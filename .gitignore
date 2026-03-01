@@ -1,0 +1,7 @@
+zig-out/
+zig-cache/
+.zig-cache/
+nullboiler.db
+*.db-journal
+*.db-wal
+*.db-shm

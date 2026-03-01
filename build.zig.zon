@@ -1,0 +1,17 @@
+.{
+    .name = .nullboiler,
+    .fingerprint = 0xa2fe02b8f872821f,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .sqlite3 = .{
+            .path = "deps/sqlite",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "deps",
+    },
+}
