@@ -3,6 +3,7 @@ const Store = @import("store.zig").Store;
 const api = @import("api.zig");
 const config = @import("config.zig");
 const engine_mod = @import("engine.zig");
+const worker_protocol = @import("worker_protocol.zig");
 
 const version = "0.1.0";
 const max_request_size: usize = 8 * 1024 * 1024;
@@ -92,20 +93,16 @@ pub fn main() !void {
     };
 
     for (cfg.workers) |w| {
-        const protocol_supported =
-            std.mem.eql(u8, w.protocol, "webhook") or
-            std.mem.eql(u8, w.protocol, "api_chat") or
-            std.mem.eql(u8, w.protocol, "openai_chat");
-        if (!protocol_supported) {
+        const protocol = worker_protocol.parse(w.protocol) orelse {
             std.debug.print("warning: skipped config worker {s}: unsupported protocol {s}\n", .{ w.id, w.protocol });
             continue;
-        }
+        };
 
-        if (std.mem.eql(u8, w.protocol, "openai_chat") and w.model == null) {
+        if (worker_protocol.requiresModel(protocol) and w.model == null) {
             std.debug.print("warning: skipped config worker {s}: openai_chat protocol requires model\n", .{w.id});
             continue;
         }
-        if (std.mem.eql(u8, w.protocol, "webhook") and !hasExplicitPath(w.url)) {
+        if (!worker_protocol.validateUrlForProtocol(w.url, protocol)) {
             std.debug.print("warning: skipped config worker {s}: webhook protocol requires explicit URL path (for example /webhook)\n", .{w.id});
             continue;
         }
@@ -281,16 +278,6 @@ fn parseBearerToken(headers_raw: []const u8) ?[]const u8 {
     return null;
 }
 
-fn hasExplicitPath(url: []const u8) bool {
-    const trimmed = std.mem.trimRight(u8, url, "/");
-    if (std.mem.startsWith(u8, trimmed, "/")) return true;
-
-    const scheme_idx = std.mem.indexOf(u8, trimmed, "://") orelse return false;
-    const host_start = scheme_idx + 3;
-    const slash_idx = std.mem.indexOfScalarPos(u8, trimmed, host_start, '/') orelse return false;
-    return slash_idx + 1 < trimmed.len;
-}
-
 test "serializeTagsJson escapes special chars" {
     const allocator = std.testing.allocator;
     const tags = [_][]const u8{
@@ -354,10 +341,10 @@ test "parseBearerToken accepts case-insensitive bearer scheme" {
     try std.testing.expectEqualStrings("token-xyz", token.?);
 }
 
-test "hasExplicitPath identifies explicit path URLs" {
-    try std.testing.expect(!hasExplicitPath("http://localhost:3000"));
-    try std.testing.expect(!hasExplicitPath("http://localhost:3000/"));
-    try std.testing.expect(hasExplicitPath("http://localhost:3000/webhook"));
+test "worker_protocol hasExplicitPath identifies explicit path URLs" {
+    try std.testing.expect(!worker_protocol.hasExplicitPath("http://localhost:3000"));
+    try std.testing.expect(!worker_protocol.hasExplicitPath("http://localhost:3000/"));
+    try std.testing.expect(worker_protocol.hasExplicitPath("http://localhost:3000/webhook"));
 }
 
 comptime {
@@ -371,4 +358,6 @@ comptime {
     _ = @import("engine.zig");
     _ = @import("callbacks.zig");
     _ = @import("workflow_validation.zig");
+    _ = @import("worker_protocol.zig");
+    _ = @import("worker_response.zig");
 }

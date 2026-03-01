@@ -3,6 +3,7 @@ const Store = @import("store.zig").Store;
 const ids = @import("ids.zig");
 const types = @import("types.zig");
 const workflow_validation = @import("workflow_validation.zig");
+const worker_protocol = @import("worker_protocol.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -212,16 +213,16 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: url\"}}");
     };
     const token = getJsonString(obj, "token") orelse "";
-    const protocol = getJsonString(obj, "protocol") orelse "webhook";
+    const protocol_raw = getJsonString(obj, "protocol") orelse "webhook";
     const model = getJsonString(obj, "model");
 
-    if (!isSupportedWorkerProtocol(protocol)) {
+    const protocol = worker_protocol.parse(protocol_raw) orelse {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid protocol (expected webhook|api_chat|openai_chat)\"}}");
-    }
-    if (!isValidWorkerUrlForProtocol(url, protocol)) {
+    };
+    if (!worker_protocol.validateUrlForProtocol(url, protocol)) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"webhook protocol requires explicit URL path (for example /webhook)\"}}");
     }
-    if (std.mem.eql(u8, protocol, "openai_chat") and model == null) {
+    if (worker_protocol.requiresModel(protocol) and model == null) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"openai_chat protocol requires model\"}}");
     }
 
@@ -259,12 +260,12 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
         break :blk mc.integer;
     } else 1;
 
-    ctx.store.insertWorker(worker_id, url, token, protocol, model, tags_json, max_concurrent, "registered") catch {
+    ctx.store.insertWorker(worker_id, url, token, protocol_raw, model, tags_json, max_concurrent, "registered") catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to insert worker\"}}");
     };
 
     const worker_id_json = jsonQuoted(ctx.allocator, worker_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    const protocol_json = jsonQuoted(ctx.allocator, protocol) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const protocol_json = jsonQuoted(ctx.allocator, protocol_raw) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const resp = std.fmt.allocPrint(ctx.allocator,
         \\{{"id":{s},"status":"active","protocol":{s}}}
     , .{ worker_id_json, protocol_json }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -855,27 +856,6 @@ fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const val = obj.get(key) orelse return null;
     if (val == .string) return val.string;
     return null;
-}
-
-fn isSupportedWorkerProtocol(protocol: []const u8) bool {
-    return std.mem.eql(u8, protocol, "webhook") or
-        std.mem.eql(u8, protocol, "api_chat") or
-        std.mem.eql(u8, protocol, "openai_chat");
-}
-
-fn isValidWorkerUrlForProtocol(url: []const u8, protocol: []const u8) bool {
-    if (!std.mem.eql(u8, protocol, "webhook")) return true;
-    return hasExplicitPath(url);
-}
-
-fn hasExplicitPath(url: []const u8) bool {
-    const trimmed = std.mem.trimRight(u8, url, "/");
-    if (std.mem.startsWith(u8, trimmed, "/")) return true;
-
-    const scheme_idx = std.mem.indexOf(u8, trimmed, "://") orelse return false;
-    const host_start = scheme_idx + 3;
-    const slash_idx = std.mem.indexOfScalarPos(u8, trimmed, host_start, '/') orelse return false;
-    return slash_idx + 1 < trimmed.len;
 }
 
 fn serializeJsonValue(allocator: std.mem.Allocator, val: ?std.json.Value) ![]const u8 {
