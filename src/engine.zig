@@ -17,6 +17,7 @@ const types = @import("types.zig");
 const ids = @import("ids.zig");
 const templates = @import("templates.zig");
 const dispatch = @import("dispatch.zig");
+const callbacks = @import("callbacks.zig");
 
 // ── Engine ───────────────────────────────────────────────────────────
 
@@ -201,6 +202,7 @@ pub const Engine = struct {
             const output_json = try wrapOutput(alloc, result.output);
             try self.store.updateStepStatus(step.id, "completed", worker.id, output_json, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", "{}");
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output_json);
             log.info("step {s} completed", .{step.id});
         } else {
             // On failure: retry or fail
@@ -213,6 +215,7 @@ pub const Engine = struct {
             } else {
                 try self.store.updateStepStatus(step.id, "failed", worker.id, null, err_text, step.attempt);
                 try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
                 log.err("step {s} failed: {s}", .{ step.id, err_text });
             }
         }
@@ -429,6 +432,7 @@ pub const Engine = struct {
             const output_json = try wrapOutput(alloc, result.output);
             try self.store.updateStepStatus(step.id, "completed", worker.id, output_json, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", "{}");
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output_json);
             log.info("reduce step {s} completed", .{step.id});
         } else {
             const err_text = result.error_text orelse "dispatch failed";
@@ -438,6 +442,7 @@ pub const Engine = struct {
             } else {
                 try self.store.updateStepStatus(step.id, "failed", worker.id, null, err_text, step.attempt);
                 try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
             }
         }
     }
@@ -527,10 +532,18 @@ pub const Engine = struct {
         if (all_terminal and !any_failed) {
             try self.store.updateRunStatus(run_id, "completed", null);
             try self.store.insertEvent(run_id, null, "run.completed", "{}");
+            // Fire run.completed callbacks
+            if (try self.store.getRun(alloc, run_id)) |run_row| {
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.completed", run_id, null, "{}");
+            }
             log.info("run {s} completed", .{run_id});
         } else if (all_terminal and any_failed) {
             try self.store.updateRunStatus(run_id, "failed", "one or more steps failed");
             try self.store.insertEvent(run_id, null, "run.failed", "{}");
+            // Fire run.failed callbacks
+            if (try self.store.getRun(alloc, run_id)) |run_row| {
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_id, null, "{}");
+            }
             log.info("run {s} failed", .{run_id});
         }
     }

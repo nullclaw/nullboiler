@@ -104,8 +104,26 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
 
 // ── Handlers ─────────────────────────────────────────────────────────
 
-fn handleHealth(_: *Context) HttpResponse {
-    return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"0.1.0\"}");
+fn handleHealth(ctx: *Context) HttpResponse {
+    // Count active runs
+    const active_runs = ctx.store.getActiveRuns(ctx.allocator) catch {
+        return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"0.1.0\",\"active_runs\":0,\"total_workers\":0}");
+    };
+    const active_count = active_runs.len;
+
+    // Count total workers
+    const workers = ctx.store.listWorkers(ctx.allocator) catch {
+        const resp = std.fmt.allocPrint(ctx.allocator,
+            \\{{"status":"ok","version":"0.1.0","active_runs":{d},"total_workers":0}}
+        , .{active_count}) catch return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"0.1.0\"}");
+        return jsonResponse(200, resp);
+    };
+    const worker_count = workers.len;
+
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"status":"ok","version":"0.1.0","active_runs":{d},"total_workers":{d}}}
+    , .{ active_count, worker_count }) catch return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"0.1.0\"}");
+    return jsonResponse(200, resp);
 }
 
 // ── Worker Handlers ──────────────────────────────────────────────────
@@ -436,24 +454,194 @@ fn handleGetStep(ctx: *Context, _: []const u8, step_id: []const u8) HttpResponse
 
 // ── Stub Handlers (not yet implemented) ──────────────────────────────
 
-fn handleCancelRun(_: *Context, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"POST /runs/{id}/cancel not implemented\"}}");
+fn handleCancelRun(ctx: *Context, run_id: []const u8) HttpResponse {
+    // 1. Get run from store
+    const run = ctx.store.getRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get run\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
+    };
+
+    // 2. If already in a terminal state, return 409
+    if (std.mem.eql(u8, run.status, "completed") or
+        std.mem.eql(u8, run.status, "failed") or
+        std.mem.eql(u8, run.status, "cancelled"))
+    {
+        const resp = std.fmt.allocPrint(ctx.allocator,
+            \\{{"error":{{"code":"conflict","message":"run is already {s}"}}}}
+        , .{run.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"run is in a terminal state\"}}");
+        return jsonResponse(409, resp);
+    }
+
+    // 3. Update run status to "cancelled"
+    ctx.store.updateRunStatus(run_id, "cancelled", null) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to cancel run\"}}");
+    };
+
+    // 4. Mark all pending/ready steps as "skipped"
+    const steps = ctx.store.getStepsByRun(ctx.allocator, run_id) catch {
+        // Run is cancelled but steps may not be updated — log and continue
+        return jsonResponse(200, std.fmt.allocPrint(ctx.allocator,
+            \\{{"id":"{s}","status":"cancelled"}}
+        , .{run_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}"));
+    };
+
+    for (steps) |step| {
+        if (std.mem.eql(u8, step.status, "pending") or std.mem.eql(u8, step.status, "ready")) {
+            ctx.store.updateStepStatus(step.id, "skipped", null, null, null, step.attempt) catch {};
+        }
+    }
+
+    // 5. Insert event
+    ctx.store.insertEvent(run_id, null, "run.cancelled", "{}") catch {};
+
+    // 6. Return 200
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":"{s}","status":"cancelled"}}
+    , .{run_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
 }
 
-fn handleRetryRun(_: *Context, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"POST /runs/{id}/retry not implemented\"}}");
+fn handleRetryRun(ctx: *Context, run_id: []const u8) HttpResponse {
+    // 1. Get run from store
+    const run = ctx.store.getRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get run\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
+    };
+
+    // 2. Can only retry a failed run
+    if (!std.mem.eql(u8, run.status, "failed")) {
+        const resp = std.fmt.allocPrint(ctx.allocator,
+            \\{{"error":{{"code":"conflict","message":"run is not failed (current: {s})"}}}}
+        , .{run.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"run is not failed\"}}");
+        return jsonResponse(409, resp);
+    }
+
+    // 3. Find all failed steps, reset to "ready", increment attempt
+    const steps = ctx.store.getStepsByRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get steps\"}}");
+    };
+
+    for (steps) |step| {
+        if (std.mem.eql(u8, step.status, "failed")) {
+            ctx.store.updateStepStatus(step.id, "ready", null, null, null, step.attempt + 1) catch {};
+        }
+    }
+
+    // 4. Set run status back to "running"
+    ctx.store.updateRunStatus(run_id, "running", null) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update run status\"}}");
+    };
+
+    // 5. Insert event
+    ctx.store.insertEvent(run_id, null, "run.retried", "{}") catch {};
+
+    // 6. Return 200
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":"{s}","status":"running"}}
+    , .{run_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
 }
 
-fn handleApproveStep(_: *Context, _: []const u8, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"POST /runs/{id}/steps/{step_id}/approve not implemented\"}}");
+fn handleApproveStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
+    // 1. Get step from store
+    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    };
+
+    // 2. Must be "waiting_approval"
+    if (!std.mem.eql(u8, step.status, "waiting_approval")) {
+        const resp = std.fmt.allocPrint(ctx.allocator,
+            \\{{"error":{{"code":"conflict","message":"step is not waiting_approval (current: {s})"}}}}
+        , .{step.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"step is not waiting_approval\"}}");
+        return jsonResponse(409, resp);
+    }
+
+    // 3. Update status to "completed"
+    ctx.store.updateStepStatus(step_id, "completed", null, null, null, step.attempt) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
+    };
+
+    // 4. Insert event
+    ctx.store.insertEvent(run_id, step_id, "step.approved", "{}") catch {};
+
+    // 5. Return 200
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"step_id":"{s}","status":"completed"}}
+    , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
 }
 
-fn handleRejectStep(_: *Context, _: []const u8, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"POST /runs/{id}/steps/{step_id}/reject not implemented\"}}");
+fn handleRejectStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
+    // 1. Get step from store
+    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    };
+
+    // 2. Must be "waiting_approval"
+    if (!std.mem.eql(u8, step.status, "waiting_approval")) {
+        const resp = std.fmt.allocPrint(ctx.allocator,
+            \\{{"error":{{"code":"conflict","message":"step is not waiting_approval (current: {s})"}}}}
+        , .{step.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"step is not waiting_approval\"}}");
+        return jsonResponse(409, resp);
+    }
+
+    // 3. Update status to "failed", set error_text
+    ctx.store.updateStepStatus(step_id, "failed", null, null, "rejected by user", step.attempt) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
+    };
+
+    // 4. Insert event
+    ctx.store.insertEvent(run_id, step_id, "step.rejected", "{}") catch {};
+
+    // 5. Return 200
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"step_id":"{s}","status":"failed"}}
+    , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
 }
 
-fn handleListEvents(_: *Context, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"GET /runs/{id}/events not implemented\"}}");
+fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
+    // 1. Get events from store
+    const events = ctx.store.getEventsByRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get events\"}}");
+    };
+
+    // 2. Build JSON array
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    for (events, 0..) |ev, i| {
+        if (i > 0) {
+            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        }
+
+        const step_field = if (ev.step_id) |sid|
+            std.fmt.allocPrint(ctx.allocator, ",\"step_id\":\"{s}\"", .{sid}) catch ""
+        else
+            "";
+
+        const entry = std.fmt.allocPrint(ctx.allocator,
+            \\{{"id":{d},"run_id":"{s}"{s},"kind":"{s}","data":{s},"ts_ms":{d}}}
+        , .{
+            ev.id,
+            ev.run_id,
+            step_field,
+            ev.kind,
+            ev.data_json,
+            ev.ts_ms,
+        }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    }
+
+    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, json_body);
 }
 
 // ── JSON Helpers ─────────────────────────────────────────────────────

@@ -170,4 +170,5 @@ comptime {
     _ = @import("dispatch.zig");
     _ = @import("config.zig");
     _ = @import("engine.zig");
+    _ = @import("callbacks.zig");
 }
