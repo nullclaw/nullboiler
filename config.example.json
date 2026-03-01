@@ -1,0 +1,26 @@
+{
+  "port": 8080,
+  "db": "nullboiler.db",
+  "workers": [
+    {
+      "id": "claw-1",
+      "url": "http://localhost:3001",
+      "token": "bearer_token_here",
+      "tags": ["coder", "researcher"],
+      "max_concurrent": 3
+    },
+    {
+      "id": "claw-2",
+      "url": "http://localhost:3002",
+      "token": "bearer_token_here",
+      "tags": ["writer", "editor"],
+      "max_concurrent": 2
+    }
+  ],
+  "engine": {
+    "poll_interval_ms": 500,
+    "default_timeout_ms": 300000,
+    "default_max_attempts": 1,
+    "health_check_interval_ms": 30000
+  }
+}
