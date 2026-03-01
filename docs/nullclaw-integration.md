@@ -1,10 +1,10 @@
-# NullBoiler + NullClaw Integration
+# Single NullClaw Integration
 
-This project dispatches workflow `task`/`reduce`/chat steps to NullClaw gateway workers.
+Use this mode when you want `nullboiler` to orchestrate tasks through one `nullclaw` worker setup (without `nulltracker`).
 
-## Required NullClaw setup
+## 1) Configure NullClaw gateway
 
-Configure each NullClaw gateway with a static paired token:
+Set a static paired token in NullClaw config:
 
 ```json
 {
@@ -23,9 +23,9 @@ Start gateway:
 nullclaw gateway --port 3000
 ```
 
-## Required NullBoiler setup
+## 2) Configure NullBoiler worker
 
-Point worker `url` to NullClaw gateway and use the same token from `gateway.paired_tokens`:
+Use the same token and an explicit webhook path:
 
 ```json
 {
@@ -42,21 +42,15 @@ Point worker `url` to NullClaw gateway and use the same token from `gateway.pair
 }
 ```
 
-## Example: single NullClaw bot for a real coding task
-
-This is a pure `nullboiler + nullclaw` flow (no `nulltracker`, no bridge).
-
-### 1) Start services
+Start NullBoiler:
 
 ```bash
-# nullclaw gateway
-nullclaw gateway --port 3000
-
-# nullboiler
 zig-out/bin/nullboiler --config config.json --port 8080 --db nullboiler.db
 ```
 
-### 2) Submit run: "rewrite openclaw tests from TypeScript to Go"
+## 3) Example task run
+
+Example request for: "rewrite openclaw tests from TypeScript to Go".
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/runs \
@@ -71,29 +65,29 @@ curl -sS -X POST http://127.0.0.1:8080/runs \
         "id": "rewrite-tests",
         "type": "task",
         "worker_tags": ["coder"],
-        "prompt_template": "Repository: {{input.repo}}\nGoal: {{input.goal}}\n\nTask:\n1) Find the TypeScript test suite.\n2) Rewrite tests to idiomatic Go tests.\n3) Keep behavior equivalent.\n4) Update test command/docs if needed.\n5) Return a concise summary of changed files and migration notes."
+        "prompt_template": "Repository: {{input.repo}}\\nGoal: {{input.goal}}\\n\\nTask:\\n1) Find the TypeScript test suite.\\n2) Rewrite tests to idiomatic Go tests.\\n3) Keep behavior equivalent.\\n4) Update test command/docs if needed.\\n5) Return a concise summary of changed files and migration notes."
       }
     ]
   }'
 ```
 
-Response returns run id:
+Expected create-run response:
 
 ```json
 {"id":"<run_id>","status":"running"}
 ```
 
-### 3) Poll run status
+Track progress:
 
 ```bash
 curl -sS http://127.0.0.1:8080/runs/<run_id>
 ```
 
-When completed, step output is in `steps[].output_json.output`.
+Final task output is in `steps[].output_json.output`.
 
-### 4) Run all night with orchestration strategy (no shell loop)
+## 4) Overnight mode with built-in orchestration strategy
 
-Use one run with a `loop` step that keeps executing a task step until the bot reports completion token.
+Use one run with `loop` strategy. Each iteration executes one task unit and stops only when worker returns `BACKLOG_DONE`.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/runs \
@@ -115,24 +109,18 @@ curl -sS -X POST http://127.0.0.1:8080/runs \
         "id": "execute-next-task",
         "type": "task",
         "worker_tags": ["coder"],
-        "prompt_template": "Repository: {{input.repo}}\nTask source file: {{input.task_file}}\n\nDo exactly one next unchecked task from the file.\nApply code changes and tests.\nMark the task as done in the same file.\nIf no unchecked tasks remain, return exactly: BACKLOG_DONE.\nOtherwise return a short summary prefixed with: CONTINUE."
+        "prompt_template": "Repository: {{input.repo}}\\nTask source file: {{input.task_file}}\\n\\nDo exactly one next unchecked task from the file.\\nApply code changes and tests.\\nMark the task as done in the same file.\\nIf no unchecked tasks remain, return exactly: BACKLOG_DONE.\\nOtherwise return a short summary prefixed with: CONTINUE."
       }
     ]
   }'
 ```
 
-How it works:
+## 5) Required NullClaw response contract
 
-1. `loop` creates a child `execute-next-task` step.
-2. After each iteration, NullBoiler checks child output for `BACKLOG_DONE`.
-3. If found, run completes; otherwise next iteration starts automatically.
-
-## Required worker response shape
-
-For NullClaw integration, return synchronous JSON response:
+NullBoiler expects synchronous JSON response from webhook workers:
 
 ```json
 {"status":"ok","response":"...","thread_events":[...]}
 ```
 
-`{"status":"received"}` without `response` is treated as an error because no synchronous step result is available for DAG progression.
+`{"status":"received"}` without `response` is treated as an error because there is no synchronous output for DAG progression.
