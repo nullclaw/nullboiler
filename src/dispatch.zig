@@ -1,7 +1,6 @@
 /// Worker dispatch module — sends rendered prompts to NullClaw workers via HTTP.
 /// Provides worker selection (filtering by status, capacity, and tags) and
 /// HTTP dispatch to worker webhook endpoints.
-
 const std = @import("std");
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -104,7 +103,7 @@ pub fn dispatchStep(
     rendered_prompt: []const u8,
 ) !DispatchResult {
     // Build the full webhook URL
-    const url = try std.fmt.allocPrint(allocator, "{s}/webhook", .{worker_url});
+    const url = try buildWebhookUrl(allocator, worker_url);
     defer allocator.free(url);
 
     // Build the JSON body using the JSON serializer for proper escaping
@@ -162,29 +161,86 @@ pub fn dispatchStep(
         };
     }
 
-    // Parse response JSON and extract "output" field
+    // Parse worker response body and extract output.
     const response_data = response_body.written();
-    const parsed = std.json.parseFromSlice(
-        struct { output: []const u8 },
-        allocator,
-        response_data,
-        .{ .ignore_unknown_fields = true },
-    ) catch {
+    return try parseWorkerResponse(allocator, response_data);
+}
+
+fn buildWebhookUrl(allocator: std.mem.Allocator, worker_url: []const u8) ![]const u8 {
+    const trimmed = std.mem.trimRight(u8, worker_url, "/");
+    if (std.mem.endsWith(u8, trimmed, "/webhook")) {
+        return try allocator.dupe(u8, trimmed);
+    }
+    return try std.fmt.allocPrint(allocator, "{s}/webhook", .{trimmed});
+}
+
+fn parseWorkerResponse(allocator: std.mem.Allocator, response_data: []const u8) !DispatchResult {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, response_data, .{}) catch {
+        // Some workers return plain text. Treat that as successful output.
+        const output = try allocator.dupe(u8, response_data);
+        return DispatchResult{
+            .output = output,
+            .success = true,
+            .error_text = null,
+        };
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
         return DispatchResult{
             .output = "",
             .success = false,
-            .error_text = "failed to parse response JSON",
+            .error_text = "worker response must be a JSON object",
         };
-    };
+    }
+    const obj = parsed.value.object;
 
-    // Copy output to caller-owned memory since parsed will be freed
-    const output = try allocator.dupe(u8, parsed.value.output);
-    defer parsed.deinit();
+    if (obj.get("output")) |out_val| {
+        if (out_val == .string) {
+            return DispatchResult{
+                .output = try allocator.dupe(u8, out_val.string),
+                .success = true,
+                .error_text = null,
+            };
+        }
+    }
+
+    // nullclaw /webhook success payload:
+    // {"status":"ok","response":"...","thread_events":[...]}
+    if (obj.get("response")) |resp_val| {
+        if (resp_val == .string) {
+            return DispatchResult{
+                .output = try allocator.dupe(u8, resp_val.string),
+                .success = true,
+                .error_text = null,
+            };
+        }
+    }
+
+    if (obj.get("error")) |err_val| {
+        if (err_val == .string) {
+            return DispatchResult{
+                .output = "",
+                .success = false,
+                .error_text = try allocator.dupe(u8, err_val.string),
+            };
+        }
+    }
+
+    if (obj.get("status")) |status_val| {
+        if (status_val == .string and std.mem.eql(u8, status_val.string, "received")) {
+            return DispatchResult{
+                .output = "",
+                .success = false,
+                .error_text = "worker acknowledged request but returned no synchronous output",
+            };
+        }
+    }
 
     return DispatchResult{
-        .output = output,
-        .success = true,
-        .error_text = null,
+        .output = "",
+        .success = false,
+        .error_text = "worker response missing output/response field",
     };
 }
 
@@ -379,4 +435,46 @@ test "workerMatchesTags: empty required returns true" {
     const allocator = std.testing.allocator;
     const tags = [_][]const u8{};
     try std.testing.expect(try workerMatchesTags(allocator, "[\"coder\"]", &tags));
+}
+
+test "buildWebhookUrl normalizes trailing slash and keeps explicit endpoint" {
+    const allocator = std.testing.allocator;
+    const url1 = try buildWebhookUrl(allocator, "http://localhost:3000");
+    defer allocator.free(url1);
+    try std.testing.expectEqualStrings("http://localhost:3000/webhook", url1);
+
+    const url2 = try buildWebhookUrl(allocator, "http://localhost:3000/");
+    defer allocator.free(url2);
+    try std.testing.expectEqualStrings("http://localhost:3000/webhook", url2);
+
+    const url3 = try buildWebhookUrl(allocator, "http://localhost:3000/webhook");
+    defer allocator.free(url3);
+    try std.testing.expectEqualStrings("http://localhost:3000/webhook", url3);
+}
+
+test "parseWorkerResponse supports nullclaw response format" {
+    const allocator = std.testing.allocator;
+    const result = try parseWorkerResponse(
+        allocator,
+        "{\"status\":\"ok\",\"response\":\"Done\",\"thread_events\":[]}",
+    );
+    defer allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("Done", result.output);
+}
+
+test "parseWorkerResponse supports legacy output format" {
+    const allocator = std.testing.allocator;
+    const result = try parseWorkerResponse(allocator, "{\"output\":\"Result\"}");
+    defer allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("Result", result.output);
+}
+
+test "parseWorkerResponse treats plain text as output" {
+    const allocator = std.testing.allocator;
+    const result = try parseWorkerResponse(allocator, "plain text");
+    defer allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("plain text", result.output);
 }

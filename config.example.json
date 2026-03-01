@@ -3,16 +3,16 @@
   "db": "nullboiler.db",
   "workers": [
     {
-      "id": "claw-1",
-      "url": "http://localhost:3001",
-      "token": "bearer_token_here",
+      "id": "nullclaw-1",
+      "url": "http://localhost:3000",
+      "token": "set_same_value_as_nullclaw_gateway_paired_tokens",
       "tags": ["coder", "researcher"],
       "max_concurrent": 3
     },
     {
-      "id": "claw-2",
+      "id": "nullclaw-2",
       "url": "http://localhost:3002",
-      "token": "bearer_token_here",
+      "token": "set_same_value_as_nullclaw_gateway_paired_tokens",
       "tags": ["writer", "editor"],
       "max_concurrent": 2
     }
