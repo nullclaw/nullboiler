@@ -42,97 +42,73 @@ Point worker `url` to NullClaw gateway and use the same token from `gateway.pair
 }
 ```
 
-## Example: one bot works all night
+## Example: single NullClaw bot for a real coding task
 
-If you want one agent to keep taking tasks overnight, use:
-
-1. `nullclaw` as worker runtime
-2. `nullboiler` as orchestrator
-3. `nulltracker` as task queue
-4. `tools/nulltracker_nullboiler_executor.py` as the bridge loop
+This is a pure `nullboiler + nullclaw` flow (no `nulltracker`, no bridge).
 
 ### 1) Start services
 
 ```bash
-# 1) nullclaw gateway
+# nullclaw gateway
 nullclaw gateway --port 3000
 
-# 2) nullboiler
+# nullboiler
 zig-out/bin/nullboiler --config config.json --port 8080 --db nullboiler.db
-
-# 3) nulltracker
-zig-out/bin/nulltracker --port 7700 --db nulltracker.db
 ```
 
-If `nullboiler` uses API token auth, export it before starting bridge:
+### 2) Submit run: "rewrite openclaw tests from TypeScript to Go"
 
 ```bash
-export NULLBOILER_TOKEN="your_nullboiler_api_token"
-```
-
-### 2) Run a single long-running bridge worker
-
-Use one agent identity and one role. The role should match your tracker stage role.
-
-```bash
-python3 tools/nulltracker_nullboiler_executor.py \
-  --tracker-base http://127.0.0.1:7700 \
-  --boiler-base http://127.0.0.1:8080 \
-  --agent-id night-bot-1 \
-  --agent-role llm-dev \
-  --worker-tags coder \
-  --max-tasks 0
-```
-
-`--max-tasks 0` means infinite loop (keep processing tasks all night).
-
-### 3) Create tracker pipeline and tasks
-
-Create a pipeline where the initial stage is owned by the same role (`llm-dev`):
-
-```bash
-curl -sS -X POST http://127.0.0.1:7700/pipelines \
-  -H 'content-type: application/json' \
+curl -sS -X POST http://127.0.0.1:8080/runs \
+  -H 'Content-Type: application/json' \
   -d '{
-    "name":"night-bot",
-    "definition":{
-      "initial":"todo",
-      "states":{
-        "todo":{"agent_role":"llm-dev"},
-        "done":{"terminal":true}
-      },
-      "transitions":[
-        {"from":"todo","to":"done","trigger":"complete"}
-      ]
-    }
+    "input": {
+      "repo": "openclaw",
+      "goal": "rewrite tests from TypeScript to Go"
+    },
+    "steps": [
+      {
+        "id": "rewrite-tests",
+        "type": "task",
+        "worker_tags": ["coder"],
+        "prompt_template": "Repository: {{input.repo}}\nGoal: {{input.goal}}\n\nTask:\n1) Find the TypeScript test suite.\n2) Rewrite tests to idiomatic Go tests.\n3) Keep behavior equivalent.\n4) Update test command/docs if needed.\n5) Return a concise summary of changed files and migration notes."
+      }
+    ]
   }'
 ```
 
-Create tasks in that pipeline (repeat as needed):
+Response returns run id:
 
-```bash
-curl -sS -X POST http://127.0.0.1:7700/tasks \
-  -H 'content-type: application/json' \
-  -d '{
-    "pipeline_id":"<pipeline_id>",
-    "title":"Night task 1",
-    "description":"Implement and test feature X.",
-    "priority":0
-  }'
+```json
+{"id":"<run_id>","status":"running"}
 ```
 
-### 4) Observe execution
+### 3) Poll run status
 
-1. Bridge logs: task claim, run status changes, transition/fail results.
-2. `GET http://127.0.0.1:8080/runs` to inspect nullboiler runs.
-3. `GET http://127.0.0.1:7700/tasks/<task_id>` to inspect tracker state.
+```bash
+curl -sS http://127.0.0.1:8080/runs/<run_id>
+```
 
-## Supported worker responses
+When completed, step output is in `steps[].output_json.output`.
 
-NullBoiler accepts:
+### 4) Run continuously all night with one bot
 
-1. NullClaw shape: `{"status":"ok","response":"...","thread_events":[...]}`
-2. ZeroClaw `api_chat`: `{"reply":"...","model":"..."}`
-3. OpenAI chat-completions: `{"choices":[{"message":{"content":"..."}}]}`
+If you have a list of tasks, submit runs in a loop from shell (single worker still executes by capacity limits):
+
+```bash
+while IFS= read -r task; do
+  curl -sS -X POST http://127.0.0.1:8080/runs \
+    -H 'Content-Type: application/json' \
+    -d "{\"steps\":[{\"id\":\"night-task\",\"type\":\"task\",\"worker_tags\":[\"coder\"],\"prompt_template\":\"$task\"}]}"
+done < night_tasks.txt
+```
+
+## Required worker response shape
+
+For NullClaw integration, return synchronous JSON response:
+
+```json
+{"status":"ok","response":"...","thread_events":[...]}
+```
 
 `{"status":"received"}` without `response` is treated as an error because no synchronous step result is available for DAG progression.
