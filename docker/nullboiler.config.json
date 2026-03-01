@@ -1,0 +1,21 @@
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "db": "/nullboiler-data/nullboiler.db",
+  "workers": [
+    {
+      "id": "nullclaw-local-1",
+      "url": "http://nullclaw:3000",
+      "token": "nb_worker_token_1",
+      "protocol": "webhook",
+      "tags": ["llm-dev"],
+      "max_concurrent": 2
+    }
+  ],
+  "engine": {
+    "poll_interval_ms": 500,
+    "default_timeout_ms": 300000,
+    "default_max_attempts": 1,
+    "health_check_interval_ms": 30000
+  }
+}

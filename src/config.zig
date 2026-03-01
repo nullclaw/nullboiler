@@ -18,6 +18,7 @@ pub const EngineConfig = struct {
 };
 
 pub const Config = struct {
+    host: []const u8 = "127.0.0.1",
     port: u16 = 8080,
     db: []const u8 = "nullboiler.db",
     workers: []const WorkerConfig = &.{},
@@ -51,6 +52,7 @@ pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !Config {
 
 test "default config" {
     const cfg = Config{};
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.host);
     try std.testing.expectEqual(@as(u16, 8080), cfg.port);
     try std.testing.expectEqualStrings("nullboiler.db", cfg.db);
     try std.testing.expectEqual(@as(usize, 0), cfg.workers.len);
@@ -59,6 +61,7 @@ test "default config" {
 test "loadFromFile returns default when file not found" {
     const allocator = std.testing.allocator;
     const cfg = try loadFromFile(allocator, "nonexistent_config_file_12345.json");
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.host);
     try std.testing.expectEqual(@as(u16, 8080), cfg.port);
     try std.testing.expectEqualStrings("nullboiler.db", cfg.db);
 }

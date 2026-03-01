@@ -29,6 +29,18 @@ zig-out/bin/nullboiler --port 8080 --db nullboiler.db --config config.json
 nullclaw gateway --port 3000
 ```
 
+## Docker Compose quick start
+
+For the containerized stack, use root compose profiles:
+
+```bash
+# nullboiler + nullclaw + nulltracker + bridge executor
+docker compose --profile nulltracker up -d
+```
+
+Detailed compose guide:
+`docs/docker-compose-nulltracker-nullclaw.md`.
+
 Configure `nullBoiler` workers to point at `nullClaw`:
 
 ```json

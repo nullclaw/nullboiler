@@ -1,0 +1,13 @@
+{
+  "api_key": "set_provider_key_here",
+  "default_provider": "openrouter",
+  "default_model": "anthropic/claude-sonnet-4",
+  "default_temperature": 0.2,
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 3000,
+    "allow_public_bind": true,
+    "require_pairing": true,
+    "paired_tokens": ["nb_worker_token_1"]
+  }
+}

@@ -1,34 +1,90 @@
 services:
-  agent:
+  nullboiler:
     build: .
     image: nullboiler:latest
-    profiles: ["agent"]
-    stdin_open: true
-    tty: true
-    env_file:
-      - path: .env
-        required: false
-    volumes:
-      - nullboiler-data:/root/.nullboiler
-    restart: unless-stopped
-
-  gateway:
-    build: .
-    image: nullboiler:latest
-    profiles: ["gateway"]
+    command:
+      - --config
+      - /nullboiler-data/config.json
+      - --db
+      - /nullboiler-data/nullboiler.db
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
     ports:
       - "8080:8080"
-    env_file:
-      - path: .env
-        required: false
     volumes:
-      - nullboiler-data:/root/.nullboiler
+      - nullboiler-data:/nullboiler-data
+      - ./docker/nullboiler.config.json:/nullboiler-data/config.json:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
 
+  nullclaw:
+    profiles: ["nullclaw", "nulltracker"]
+    build:
+      context: ./reference/nullclaw
+    image: nullclaw:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - nullclaw-data:/nullclaw-data
+      - ./docker/nullclaw.config.json:/nullclaw-data/.nullclaw/config.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  nulltracker:
+    profiles: ["nulltracker"]
+    build:
+      context: ./reference/nulltracker
+    image: nulltracker:latest
+    ports:
+      - "7700:7700"
+    volumes:
+      - nulltracker-data:/nulltracker-data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  nulltracker-executor:
+    profiles: ["nulltracker"]
+    image: python:3.12-alpine
+    depends_on:
+      nullboiler:
+        condition: service_healthy
+      nullclaw:
+        condition: service_healthy
+      nulltracker:
+        condition: service_healthy
+    working_dir: /workspace
+    command:
+      - python3
+      - tools/nulltracker_nullboiler_executor.py
+    environment:
+      TRACKER_BASE: http://nulltracker:7700
+      NULLBOILER_BASE: http://nullboiler:8080
+      AGENT_ID: docker-dev-1
+      AGENT_ROLE: llm-dev
+      NULLBOILER_WORKER_TAGS: llm-dev
+      WORK_DIR: /work/reports
+      MAX_TASKS: "0"
+    volumes:
+      - .:/workspace:ro
+      - nulltracker-executor-data:/work
+    restart: unless-stopped
+
 volumes:
   nullboiler-data:
+  nullclaw-data:
+  nulltracker-data:
+  nulltracker-executor-data:

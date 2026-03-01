@@ -17,12 +17,17 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // skip program name
 
+    var host_override: ?[]const u8 = null;
     var port_override: ?u16 = null;
     var db_override: ?[:0]const u8 = null;
     var config_path: []const u8 = "config.json";
 
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--port")) {
+        if (std.mem.eql(u8, arg, "--host")) {
+            if (args.next()) |val| {
+                host_override = val;
+            }
+        } else if (std.mem.eql(u8, arg, "--port")) {
             if (args.next()) |val| {
                 port_override = std.fmt.parseInt(u16, val, 10) catch {
                     std.debug.print("invalid port: {s}\n", .{val});
@@ -51,7 +56,8 @@ pub fn main() !void {
         return;
     };
 
-    // Determine port and db path (CLI overrides config)
+    // Determine bind host, port, and db path (CLI overrides config)
+    const bind_host = host_override orelse cfg.host;
     const port = port_override orelse cfg.port;
     const db_path: [:0]const u8 = db_override orelse blk: {
         // Need to convert cfg.db ([]const u8) to [:0]const u8
@@ -101,12 +107,12 @@ pub fn main() !void {
         std.debug.print("registered config worker: {s}\n", .{w.id});
     }
 
-    const addr = std.net.Address.resolveIp("127.0.0.1", port) catch |err| {
-        std.debug.print("failed to resolve address: {}\n", .{err});
+    const addr = std.net.Address.resolveIp(bind_host, port) catch |err| {
+        std.debug.print("failed to resolve bind address {s}:{d}: {}\n", .{ bind_host, port, err });
         return;
     };
     var server = addr.listen(.{ .reuse_address = true }) catch |err| {
-        std.debug.print("failed to listen on port {d}: {}\n", .{ port, err });
+        std.debug.print("failed to listen on {s}:{d}: {}\n", .{ bind_host, port, err });
         return;
     };
     defer server.deinit();
@@ -116,7 +122,7 @@ pub fn main() !void {
     var engine = engine_mod.Engine.init(&store, allocator, poll_ms);
     const engine_thread = try std.Thread.spawn(.{}, engine_mod.Engine.run, .{&engine});
 
-    std.debug.print("listening on http://127.0.0.1:{d}\n", .{port});
+    std.debug.print("listening on http://{s}:{d}\n", .{ bind_host, port });
     std.debug.print("engine started (poll_interval={d}ms)\n", .{poll_ms});
 
     defer {

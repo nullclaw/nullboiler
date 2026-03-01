@@ -13,6 +13,9 @@ This directory contains integration guides for different deployment modes.
 3. Full async loop with durable task queue:
    `nulltracker + nullboiler + nullclaw`
    See: `nulltracker-nullboiler-nullclaw.md`
+4. Containerized local stack with profiles:
+   `docker compose + nullboiler + nullclaw + nulltracker`
+   See: `docker-compose-nulltracker-nullclaw.md`
 
 ## Document map
 
@@ -22,6 +25,8 @@ This directory contains integration guides for different deployment modes.
   Worker protocol matrix, config examples, PicoClaw bridge, and tracker bridge entrypoint.
 - `nulltracker-nullboiler-nullclaw.md`
   End-to-end executor flow, prerequisites, bridge run command, and environment variables.
+- `docker-compose-nulltracker-nullclaw.md`
+  Compose profiles, required config alignment, and full-stack smoke test.
 
 ## Design principle
 
