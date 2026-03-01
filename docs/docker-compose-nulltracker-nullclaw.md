@@ -17,6 +17,7 @@ git clone https://github.com/nullclaw/nulltracker reference/nulltracker
 - `docker/nullboiler.config.json` -> `workers[0].token`
 
 3. Set a valid provider key in `docker/nullclaw.config.json` (`api_key` field).
+4. Optional hardening: set `api_token` in `docker/nullboiler.config.json` and export the same token as `NULLBOILER_TOKEN` before `docker compose up`.
 
 ## 2. Compose profiles
 

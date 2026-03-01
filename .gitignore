@@ -17,4 +17,6 @@ nullboiler.db
 result
 .direnv/
 .worktrees
-reference/
+!reference/
+reference/*
+!reference/todo.md

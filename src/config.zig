@@ -21,6 +21,7 @@ pub const Config = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 8080,
     db: []const u8 = "nullboiler.db",
+    api_token: ?[]const u8 = null,
     workers: []const WorkerConfig = &.{},
     engine: EngineConfig = .{},
 };
@@ -55,6 +56,7 @@ test "default config" {
     try std.testing.expectEqualStrings("127.0.0.1", cfg.host);
     try std.testing.expectEqual(@as(u16, 8080), cfg.port);
     try std.testing.expectEqualStrings("nullboiler.db", cfg.db);
+    try std.testing.expectEqual(@as(?[]const u8, null), cfg.api_token);
     try std.testing.expectEqual(@as(usize, 0), cfg.workers.len);
 }
 
@@ -64,4 +66,5 @@ test "loadFromFile returns default when file not found" {
     try std.testing.expectEqualStrings("127.0.0.1", cfg.host);
     try std.testing.expectEqual(@as(u16, 8080), cfg.port);
     try std.testing.expectEqualStrings("nullboiler.db", cfg.db);
+    try std.testing.expectEqual(@as(?[]const u8, null), cfg.api_token);
 }

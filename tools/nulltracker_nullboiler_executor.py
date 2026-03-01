@@ -127,6 +127,7 @@ class Executor:
         self.args = args
         self.tracker = HttpClient(args.tracker_base, args.http_timeout_sec)
         self.boiler = HttpClient(args.boiler_base, args.http_timeout_sec)
+        self.boiler_headers = {"Authorization": f"Bearer {args.boiler_token}"} if args.boiler_token else None
         self.work_dir = pathlib.Path(args.work_dir).resolve()
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.worker_tags = parse_worker_tags(args.worker_tags, args.agent_role)
@@ -265,7 +266,12 @@ class Executor:
             ],
         }
 
-        status, data, raw = self.boiler.request_json("POST", "/runs", payload=run_payload)
+        status, data, raw = self.boiler.request_json(
+            "POST",
+            "/runs",
+            payload=run_payload,
+            headers=self.boiler_headers,
+        )
         if status != 201 or not isinstance(data, dict) or not isinstance(data.get("id"), str):
             raise RuntimeError(f"nullboiler run create failed: status={status} body={raw[:400]}")
         return data["id"]
@@ -275,7 +281,12 @@ class Executor:
         step_statuses: Dict[str, str] = {}
 
         while True:
-            status, data, raw = self.boiler.request_json("GET", f"/runs/{boiler_run_id}", payload=None)
+            status, data, raw = self.boiler.request_json(
+                "GET",
+                f"/runs/{boiler_run_id}",
+                payload=None,
+                headers=self.boiler_headers,
+            )
             if status != 200 or not isinstance(data, dict):
                 raise RuntimeError(f"nullboiler run poll failed: run={boiler_run_id} status={status} body={raw[:300]}")
 
@@ -501,6 +512,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent-id", default=os.environ.get("AGENT_ID"), required=os.environ.get("AGENT_ID") is None)
     parser.add_argument("--agent-role", default=os.environ.get("AGENT_ROLE"), required=os.environ.get("AGENT_ROLE") is None)
     parser.add_argument("--worker-tags", default=os.environ.get("NULLBOILER_WORKER_TAGS", ""))
+    parser.add_argument("--boiler-token", default=os.environ.get("NULLBOILER_TOKEN", ""))
     parser.add_argument("--success-trigger", default=os.environ.get("SUCCESS_TRIGGER", ""))
     parser.add_argument("--lease-ttl-ms", type=int, default=int(os.environ.get("LEASE_TTL_MS", "300000")))
     parser.add_argument("--heartbeat-interval-sec", type=float, default=float(os.environ.get("HEARTBEAT_INTERVAL_SEC", "20")))

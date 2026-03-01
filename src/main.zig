@@ -20,6 +20,7 @@ pub fn main() !void {
     var host_override: ?[]const u8 = null;
     var port_override: ?u16 = null;
     var db_override: ?[:0]const u8 = null;
+    var token_override: ?[]const u8 = null;
     var config_path: []const u8 = "config.json";
 
     while (args.next()) |arg| {
@@ -37,6 +38,10 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "--db")) {
             if (args.next()) |val| {
                 db_override = val;
+            }
+        } else if (std.mem.eql(u8, arg, "--token")) {
+            if (args.next()) |val| {
+                token_override = val;
             }
         } else if (std.mem.eql(u8, arg, "--config")) {
             if (args.next()) |val| {
@@ -59,6 +64,7 @@ pub fn main() !void {
     // Determine bind host, port, and db path (CLI overrides config)
     const bind_host = host_override orelse cfg.host;
     const port = port_override orelse cfg.port;
+    const api_token = token_override orelse cfg.api_token;
     const db_path: [:0]const u8 = db_override orelse blk: {
         // Need to convert cfg.db ([]const u8) to [:0]const u8
         const db_z = cfg_arena.allocator().allocSentinel(u8, cfg.db.len, 0) catch {
@@ -71,6 +77,11 @@ pub fn main() !void {
 
     std.debug.print("nullboiler v{s}\n", .{version});
     std.debug.print("opening database: {s}\n", .{db_path});
+    if (api_token != null) {
+        std.debug.print("API auth: bearer token enabled\n", .{});
+    } else {
+        std.debug.print("API auth: disabled\n", .{});
+    }
 
     var store = try Store.init(allocator, db_path);
     defer store.deinit();
@@ -147,7 +158,12 @@ pub fn main() !void {
             continue;
         } orelse continue;
 
-        var ctx = api.Context{ .store = &store, .allocator = req_alloc };
+        var ctx = api.Context{
+            .store = &store,
+            .allocator = req_alloc,
+            .required_api_token = api_token,
+            .request_bearer_token = request.bearer_token,
+        };
         const response = api.handleRequest(&ctx, request.method, request.target, request.body);
 
         const header = std.fmt.allocPrint(req_alloc, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ response.status, response.body.len }) catch continue;
@@ -165,6 +181,7 @@ const ParsedHttpRequest = struct {
     method: []const u8,
     target: []const u8,
     body: []const u8,
+    bearer_token: ?[]const u8,
 };
 
 fn readHttpRequest(allocator: std.mem.Allocator, stream: *std.net.Stream, max_bytes: usize) !?ParsedHttpRequest {
@@ -207,11 +224,14 @@ fn readHttpRequest(allocator: std.mem.Allocator, stream: *std.net.Stream, max_by
     const method = parts.next() orelse return error.InvalidRequestLine;
     const target = parts.next() orelse return error.InvalidRequestLine;
     const body = req_bytes[header_end.? + 4 .. req_total];
+    const headers_raw = req_bytes[0..header_end.?];
+    const bearer_token = parseBearerToken(headers_raw);
 
     return .{
         .method = method,
         .target = target,
         .body = body,
+        .bearer_token = bearer_token,
     };
 }
 
@@ -231,6 +251,30 @@ fn parseContentLength(headers_raw: []const u8) ?usize {
     }
 
     return 0;
+}
+
+fn parseBearerToken(headers_raw: []const u8) ?[]const u8 {
+    var lines = std.mem.splitSequence(u8, headers_raw, "\r\n");
+    _ = lines.next(); // request line
+
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, "Authorization")) continue;
+
+        const raw_value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        const space_idx = std.mem.indexOfScalar(u8, raw_value, ' ') orelse return null;
+        const scheme = std.mem.trim(u8, raw_value[0..space_idx], " \t");
+        if (!std.ascii.eqlIgnoreCase(scheme, "Bearer")) return null;
+
+        const token = std.mem.trim(u8, raw_value[space_idx + 1 ..], " \t");
+        if (token.len == 0) return null;
+        return token;
+    }
+
+    return null;
 }
 
 test "serializeTagsJson escapes special chars" {
@@ -266,6 +310,34 @@ test "parseContentLength returns null for invalid number" {
         "Host: localhost\r\n" ++
         "Content-Length: not-a-number";
     try std.testing.expectEqual(@as(?usize, null), parseContentLength(headers));
+}
+
+test "parseBearerToken extracts bearer token from Authorization header" {
+    const headers = "POST /runs HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Authorization: Bearer token-123\r\n" ++
+        "Content-Length: 0";
+    const token = parseBearerToken(headers);
+    try std.testing.expect(token != null);
+    try std.testing.expectEqualStrings("token-123", token.?);
+}
+
+test "parseBearerToken returns null for malformed Authorization header" {
+    const headers = "POST /runs HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Authorization: Basic abc\r\n" ++
+        "Content-Length: 0";
+    try std.testing.expectEqual(@as(?[]const u8, null), parseBearerToken(headers));
+}
+
+test "parseBearerToken accepts case-insensitive bearer scheme" {
+    const headers = "POST /runs HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Authorization: bearer token-xyz\r\n" ++
+        "Content-Length: 0";
+    const token = parseBearerToken(headers);
+    try std.testing.expect(token != null);
+    try std.testing.expectEqualStrings("token-xyz", token.?);
 }
 
 comptime {

@@ -2,6 +2,7 @@
   "host": "127.0.0.1",
   "port": 8080,
   "db": "nullboiler.db",
+  "api_token": null,
   "workers": [
     {
       "id": "nullclaw-1",

@@ -76,6 +76,7 @@ services:
       AGENT_ID: docker-dev-1
       AGENT_ROLE: llm-dev
       NULLBOILER_WORKER_TAGS: llm-dev
+      NULLBOILER_TOKEN: ${NULLBOILER_TOKEN:-}
       WORK_DIR: /work/reports
       MAX_TASKS: "0"
     volumes:

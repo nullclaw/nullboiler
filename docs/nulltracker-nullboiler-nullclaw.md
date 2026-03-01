@@ -80,17 +80,18 @@ Supported equivalents:
 
 1. `TRACKER_BASE`
 2. `NULLBOILER_BASE`
-3. `AGENT_ID`
-4. `AGENT_ROLE`
-5. `NULLBOILER_WORKER_TAGS` (comma-separated)
-6. `SUCCESS_TRIGGER` (optional fixed transition trigger)
-7. `LEASE_TTL_MS`
-8. `HEARTBEAT_INTERVAL_SEC`
-9. `POLL_INTERVAL_SEC`
-10. `CLAIM_SLEEP_SEC`
-11. `HTTP_TIMEOUT_SEC`
-12. `WORK_DIR`
-13. `MAX_TASKS` (0 means infinite loop)
+3. `NULLBOILER_TOKEN` (optional bearer token for protected nullBoiler API)
+4. `AGENT_ID`
+5. `AGENT_ROLE`
+6. `NULLBOILER_WORKER_TAGS` (comma-separated)
+7. `SUCCESS_TRIGGER` (optional fixed transition trigger)
+8. `LEASE_TTL_MS`
+9. `HEARTBEAT_INTERVAL_SEC`
+10. `POLL_INTERVAL_SEC`
+11. `CLAIM_SLEEP_SEC`
+12. `HTTP_TIMEOUT_SEC`
+13. `WORK_DIR`
+14. `MAX_TASKS` (0 means infinite loop)
 
 ## Notes
 

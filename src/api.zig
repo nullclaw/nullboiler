@@ -9,6 +9,8 @@ const workflow_validation = @import("workflow_validation.zig");
 pub const Context = struct {
     store: *Store,
     allocator: std.mem.Allocator,
+    required_api_token: ?[]const u8 = null,
+    request_bearer_token: ?[]const u8 = null,
 };
 
 pub const HttpResponse = struct {
@@ -31,6 +33,10 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
     const is_get = eql(method, "GET");
     const is_post = eql(method, "POST");
     const is_delete = eql(method, "DELETE");
+
+    if (!isAuthorized(ctx, seg0, seg1)) {
+        return jsonResponse(401, "{\"error\":{\"code\":\"unauthorized\",\"message\":\"missing or invalid bearer token\"}}");
+    }
 
     // GET /health
     if (is_get and eql(seg0, "health") and seg1 == null) {
@@ -1026,11 +1032,22 @@ fn eql(a: ?[]const u8, b: []const u8) bool {
     return false;
 }
 
+fn isAuthorized(ctx: *Context, seg0: ?[]const u8, seg1: ?[]const u8) bool {
+    const required = ctx.required_api_token orelse return true;
+
+    // Keep health endpoint unauthenticated for probes.
+    if (eql(seg0, "health") and seg1 == null) return true;
+
+    const provided = ctx.request_bearer_token orelse return false;
+    return std.mem.eql(u8, provided, required);
+}
+
 fn jsonResponse(status_code: u16, body: []const u8) HttpResponse {
     const status = switch (status_code) {
         200 => "200 OK",
         201 => "201 Created",
         204 => "204 No Content",
+        401 => "401 Unauthorized",
         400 => "400 Bad Request",
         404 => "404 Not Found",
         405 => "405 Method Not Allowed",
@@ -1067,6 +1084,71 @@ test "API: create run rejects unknown dependency" {
 
     const resp = handleRequest(&ctx, "POST", "/runs", body);
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: create run requires bearer token when auth enabled" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .required_api_token = "secret-token",
+        .request_bearer_token = null,
+    };
+
+    const body =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work"}]}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 401), resp.status_code);
+}
+
+test "API: create run accepts valid bearer token when auth enabled" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .required_api_token = "secret-token",
+        .request_bearer_token = "secret-token",
+    };
+
+    const body =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work"}]}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 201), resp.status_code);
+}
+
+test "API: health remains public when auth enabled" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .required_api_token = "secret-token",
+        .request_bearer_token = null,
+    };
+
+    const resp = handleRequest(&ctx, "GET", "/health", "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
 }
 
 test "API: create run rejects non-object retry field" {
