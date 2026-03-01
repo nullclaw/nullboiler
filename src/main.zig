@@ -5,3 +5,8 @@ const version = "0.1.0";
 pub fn main() !void {
     std.debug.print("nullboiler v{s}\n", .{version});
 }
+
+comptime {
+    _ = @import("ids.zig");
+    _ = @import("types.zig");
+}
