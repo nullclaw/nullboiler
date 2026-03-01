@@ -38,10 +38,10 @@ pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !Config {
     defer file.close();
 
     const contents = try file.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(contents);
 
-    // Do NOT deinit parsed — Config contains slices that point into parsed
-    // memory. The caller's arena allocator will clean up everything.
+    // Do NOT free `contents` or deinit `parsed` here.
+    // `Config` fields may point into these allocations.
+    // The caller should provide an arena allocator and clean it up once on shutdown.
     const parsed = try std.json.parseFromSlice(Config, allocator, contents, .{});
 
     return parsed.value;
@@ -65,4 +65,45 @@ test "loadFromFile returns default when file not found" {
     try std.testing.expectEqual(@as(u16, 8080), cfg.port);
     try std.testing.expectEqualStrings("nullboiler.db", cfg.db);
     try std.testing.expectEqual(@as(?[]const u8, null), cfg.api_token);
+}
+
+test "loadFromFile reads configured host and worker URL from JSON file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cfg_json =
+        \\{
+        \\  "host": "127.0.0.1",
+        \\  "port": 8099,
+        \\  "db": "cfg.db",
+        \\  "workers": [
+        \\    {
+        \\      "id": "w1",
+        \\      "url": "http://localhost:3000/webhook",
+        \\      "token": "tok",
+        \\      "protocol": "webhook",
+        \\      "tags": ["coder"],
+        \\      "max_concurrent": 1
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "config.json",
+        .data = cfg_json,
+    });
+
+    const cfg_path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.json");
+    defer std.testing.allocator.free(cfg_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const cfg = try loadFromFile(arena.allocator(), cfg_path);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.host);
+    try std.testing.expectEqual(@as(u16, 8099), cfg.port);
+    try std.testing.expectEqualStrings("cfg.db", cfg.db);
+    try std.testing.expectEqual(@as(usize, 1), cfg.workers.len);
+    try std.testing.expectEqualStrings("http://localhost:3000/webhook", cfg.workers[0].url);
 }
