@@ -206,8 +206,28 @@ pub const Engine = struct {
     // ── executeTaskStep ──────────────────────────────────────────────
 
     fn executeTaskStep(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, step: types.StepRow) !void {
-        // 1. Get the step's prompt_template from workflow_json
-        const prompt_template = try getStepField(alloc, run_row.workflow_json, step.def_step_id, "prompt_template") orelse {
+        // 1. Resolve prompt source for this task step.
+        // Priority:
+        //   a) step definition prompt_template
+        //   b) parent step definition prompt_template (for generated child tasks)
+        //   c) input_json.rendered_prompt (for dynamically rendered children)
+        const prompt_template = blk: {
+            if (try getStepField(alloc, run_row.workflow_json, step.def_step_id, "prompt_template")) |tpl| {
+                break :blk tpl;
+            }
+
+            if (step.parent_step_id) |parent_id| {
+                if (try self.store.getStep(alloc, parent_id)) |parent_step| {
+                    if (try getStepField(alloc, run_row.workflow_json, parent_step.def_step_id, "prompt_template")) |parent_tpl| {
+                        break :blk parent_tpl;
+                    }
+                }
+            }
+
+            if (extractRenderedPromptFromInput(alloc, step.input_json)) |rendered_prompt| {
+                break :blk rendered_prompt;
+            }
+
             log.warn("no prompt_template for step {s}", .{step.def_step_id});
             return;
         };
@@ -1271,8 +1291,8 @@ pub const Engine = struct {
             const child_def_id = try std.fmt.allocPrint(alloc, "{s}_participant_{d}", .{ step.def_step_id, i });
             const idx: i64 = @intCast(i);
 
-            // Store rendered prompt in input_json so participant children can be dispatched
-            const input_json = try std.fmt.allocPrint(alloc, "{{\"rendered_prompt\":\"{s}\"}}", .{rendered_prompt});
+            // Store rendered prompt in input_json so participant children can be dispatched.
+            const input_json = try buildRenderedPromptInputJson(alloc, rendered_prompt);
 
             try self.store.insertStep(
                 child_id,
@@ -1396,21 +1416,7 @@ pub const Engine = struct {
         const judge_id = try alloc.dupe(u8, &judge_id_buf);
         const judge_def_id = try std.fmt.allocPrint(alloc, "{s}_judge", .{step.def_step_id});
 
-        // Escape rendered prompt for JSON storage
-        var escaped_prompt: std.ArrayListUnmanaged(u8) = .empty;
-        for (rendered_judge_prompt) |ch| {
-            switch (ch) {
-                '"' => try escaped_prompt.appendSlice(alloc, "\\\""),
-                '\\' => try escaped_prompt.appendSlice(alloc, "\\\\"),
-                '\n' => try escaped_prompt.appendSlice(alloc, "\\n"),
-                '\r' => try escaped_prompt.appendSlice(alloc, "\\r"),
-                '\t' => try escaped_prompt.appendSlice(alloc, "\\t"),
-                else => try escaped_prompt.append(alloc, ch),
-            }
-        }
-        const escaped = try escaped_prompt.toOwnedSlice(alloc);
-
-        const judge_input = try std.fmt.allocPrint(alloc, "{{\"rendered_prompt\":\"{s}\"}}", .{escaped});
+        const judge_input = try buildRenderedPromptInputJson(alloc, rendered_judge_prompt);
         const judge_idx: i64 = @intCast(participants.items.len);
 
         try self.store.insertStep(
@@ -2749,6 +2755,25 @@ fn buildChatTranscript(alloc: std.mem.Allocator, messages: []const types.ChatMes
     return try buf.toOwnedSlice(alloc);
 }
 
+/// Build input_json payload that carries an already rendered prompt for child task steps.
+fn buildRenderedPromptInputJson(alloc: std.mem.Allocator, rendered_prompt: []const u8) ![]const u8 {
+    return std.json.Stringify.valueAlloc(alloc, .{
+        .rendered_prompt = rendered_prompt,
+    }, .{});
+}
+
+/// Extract optional input_json.rendered_prompt for dynamic child task execution.
+fn extractRenderedPromptFromInput(alloc: std.mem.Allocator, input_json: []const u8) ?[]const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, input_json, .{}) catch {
+        return null;
+    };
+    const root = parsed.value;
+    if (root != .object) return null;
+    const rendered = root.object.get("rendered_prompt") orelse return null;
+    if (rendered != .string) return null;
+    return alloc.dupe(u8, rendered.string) catch null;
+}
+
 /// Extract the "item" field from input_json, or return the whole input_json
 /// as item text if it's a simple value.
 fn extractItemFromInput(alloc: std.mem.Allocator, input_json: []const u8) ![]const u8 {
@@ -3038,6 +3063,51 @@ test "wrapOutput escapes special characters" {
 
     const result = try wrapOutput(arena.allocator(), "line1\nline2");
     try std.testing.expectEqualStrings("{\"output\":\"line1\\nline2\"}", result);
+}
+
+test "build/extract rendered_prompt input JSON round-trip" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const input_json = try buildRenderedPromptInputJson(arena.allocator(), "say \"hi\"\\nnext");
+    const prompt = extractRenderedPromptFromInput(arena.allocator(), input_json);
+    try std.testing.expect(prompt != null);
+    try std.testing.expectEqualStrings("say \"hi\"\\nnext", prompt.?);
+}
+
+test "Engine: task step fallback uses input_json.rendered_prompt" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    try store.insertRun("r-rendered", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertWorker("w-rendered", "http://127.0.0.1:1", "", "webhook", null, "[]", 1, "registered");
+    try store.insertStep("parent-step", "r-rendered", "missing-parent-def", "task", "completed", "{}", 1, null, null, null);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const rendered_input = try buildRenderedPromptInputJson(arena.allocator(), "child fallback prompt");
+    try store.insertStep(
+        "child-step",
+        "r-rendered",
+        "missing-child-def",
+        "task",
+        "ready",
+        rendered_input,
+        2,
+        null,
+        "parent-step",
+        0,
+    );
+
+    var engine = Engine.init(&store, allocator, 500);
+    const run_row = (try store.getRun(arena.allocator(), "r-rendered")).?;
+    try engine.processRun(arena.allocator(), run_row);
+
+    const child = (try store.getStep(arena.allocator(), "child-step")).?;
+    try std.testing.expectEqualStrings("ready", child.status);
+    try std.testing.expectEqual(@as(i64, 2), child.attempt);
 }
 
 test "findStepStatus finds matching step" {
