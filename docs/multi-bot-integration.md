@@ -10,7 +10,7 @@ NullBoiler supports multiple worker protocols per worker:
 
 | Bot | Recommended protocol | URL example | Notes |
 | --- | --- | --- | --- |
-| NullClaw | `webhook` | `http://127.0.0.1:3000` or `.../webhook` | `response` field supported |
+| NullClaw | `webhook` | `http://127.0.0.1:3000/webhook` | `response` field supported |
 | ZeroClaw | `api_chat` or `webhook` | `http://127.0.0.1:42617/api/chat` | `reply` and `response` supported |
 | OpenClaw / OpenAI-compatible gateways | `openai_chat` | `http://127.0.0.1:42617/v1/chat/completions` | `model` is required in worker config |
 | PicoClaw | `webhook` via bridge | `http://127.0.0.1:18795/webhook` | PicoClaw gateway is WS-first (`/pico/ws`), use bridge below for sync orchestration |
@@ -22,7 +22,7 @@ NullBoiler supports multiple worker protocols per worker:
   "workers": [
     {
       "id": "nullclaw-1",
-      "url": "http://127.0.0.1:3000",
+      "url": "http://127.0.0.1:3000/webhook",
       "token": "token-1",
       "protocol": "webhook",
       "tags": ["coder"],

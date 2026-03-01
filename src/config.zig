@@ -42,9 +42,7 @@ pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !Config {
 
     // Do NOT deinit parsed — Config contains slices that point into parsed
     // memory. The caller's arena allocator will clean up everything.
-    const parsed = try std.json.parseFromSlice(Config, allocator, contents, .{
-        .ignore_unknown_fields = true,
-    });
+    const parsed = try std.json.parseFromSlice(Config, allocator, contents, .{});
 
     return parsed.value;
 }

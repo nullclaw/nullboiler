@@ -82,10 +82,6 @@ fn validateStepTypeRules(step_type: []const u8, step_obj: std.json.ObjectMap) Va
                 .integer => {
                     if (duration_val.integer < 0) return error.WaitDurationInvalid;
                 },
-                .string => {
-                    const parsed = std.fmt.parseInt(i64, duration_val.string, 10) catch return error.WaitDurationInvalid;
-                    if (parsed < 0) return error.WaitDurationInvalid;
-                },
                 else => return error.WaitDurationInvalid,
             }
         }

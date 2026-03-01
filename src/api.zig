@@ -218,6 +218,9 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
     if (!isSupportedWorkerProtocol(protocol)) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid protocol (expected webhook|api_chat|openai_chat)\"}}");
     }
+    if (!isValidWorkerUrlForProtocol(url, protocol)) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"webhook protocol requires explicit URL path (for example /webhook)\"}}");
+    }
     if (std.mem.eql(u8, protocol, "openai_chat") and model == null) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"openai_chat protocol requires model\"}}");
     }
@@ -860,6 +863,21 @@ fn isSupportedWorkerProtocol(protocol: []const u8) bool {
         std.mem.eql(u8, protocol, "openai_chat");
 }
 
+fn isValidWorkerUrlForProtocol(url: []const u8, protocol: []const u8) bool {
+    if (!std.mem.eql(u8, protocol, "webhook")) return true;
+    return hasExplicitPath(url);
+}
+
+fn hasExplicitPath(url: []const u8) bool {
+    const trimmed = std.mem.trimRight(u8, url, "/");
+    if (std.mem.startsWith(u8, trimmed, "/")) return true;
+
+    const scheme_idx = std.mem.indexOf(u8, trimmed, "://") orelse return false;
+    const host_start = scheme_idx + 3;
+    const slash_idx = std.mem.indexOfScalarPos(u8, trimmed, host_start, '/') orelse return false;
+    return slash_idx + 1 < trimmed.len;
+}
+
 fn serializeJsonValue(allocator: std.mem.Allocator, val: ?std.json.Value) ![]const u8 {
     const v = val orelse return "{}";
     if (v == .null) return "{}";
@@ -886,7 +904,7 @@ fn validationErrorResponse(err: workflow_validation.ValidateError) HttpResponse 
         error.LoopBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}"),
         error.SubWorkflowRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}"),
         error.WaitConditionRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait step requires 'duration_ms', 'until_ms', or 'signal'\"}}"),
-        error.WaitDurationInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.duration_ms must be a non-negative integer or numeric string\"}}"),
+        error.WaitDurationInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.duration_ms must be a non-negative integer\"}}"),
         error.WaitUntilInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.until_ms must be a non-negative integer\"}}"),
         error.WaitSignalInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.signal must be a non-empty string\"}}"),
         error.RouterRoutesRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"router step requires 'routes' field\"}}"),
@@ -1353,7 +1371,7 @@ test "API: register worker rejects non-array tags" {
     };
 
     const body =
-        \\{"id":"w1","url":"http://localhost:3000","tags":"coder"}
+        \\{"id":"w1","url":"http://localhost:3000/webhook","tags":"coder"}
     ;
     const resp = handleRequest(&ctx, "POST", "/workers", body);
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
@@ -1373,7 +1391,27 @@ test "API: register worker rejects non-string tags items" {
     };
 
     const body =
-        \\{"id":"w1","url":"http://localhost:3000","tags":["ok",123]}
+        \\{"id":"w1","url":"http://localhost:3000/webhook","tags":["ok",123]}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/workers", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: register webhook worker requires explicit path" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"id":"w1","url":"http://localhost:3000","protocol":"webhook","tags":["ok"]}
     ;
     const resp = handleRequest(&ctx, "POST", "/workers", body);
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
@@ -1393,7 +1431,7 @@ test "API: register worker rejects non-positive max_concurrent" {
     };
 
     const body =
-        \\{"id":"w1","url":"http://localhost:3000","max_concurrent":0}
+        \\{"id":"w1","url":"http://localhost:3000/webhook","max_concurrent":0}
     ;
     const resp = handleRequest(&ctx, "POST", "/workers", body);
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
@@ -1450,7 +1488,7 @@ test "API: register worker rejects duplicate id with conflict" {
 
     try store.insertWorker(
         "dup-worker",
-        "http://localhost:3000",
+        "http://localhost:3000/webhook",
         "tok",
         "webhook",
         null,
@@ -1468,7 +1506,7 @@ test "API: register worker rejects duplicate id with conflict" {
     };
 
     const body =
-        \\{"id":"dup-worker","url":"http://localhost:3001"}
+        \\{"id":"dup-worker","url":"http://localhost:3001/webhook"}
     ;
     const resp = handleRequest(&ctx, "POST", "/workers", body);
     try std.testing.expectEqual(@as(u16, 409), resp.status_code);

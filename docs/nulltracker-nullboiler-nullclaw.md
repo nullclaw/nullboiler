@@ -48,7 +48,7 @@ Configure `nullBoiler` workers to point at `nullClaw`:
   "workers": [
     {
       "id": "nullclaw-dev-1",
-      "url": "http://127.0.0.1:3000",
+      "url": "http://127.0.0.1:3000/webhook",
       "token": "same_as_nullclaw_gateway_paired_token",
       "protocol": "webhook",
       "tags": ["llm-dev"],

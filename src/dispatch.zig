@@ -110,7 +110,16 @@ pub fn dispatchStep(
         };
     };
 
-    const url = try buildRequestUrl(allocator, worker_url, protocol);
+    const url = buildRequestUrl(allocator, worker_url, protocol) catch |err| switch (err) {
+        error.WebhookUrlPathRequired => {
+            return DispatchResult{
+                .output = "",
+                .success = false,
+                .error_text = "webhook worker url must include explicit path (for example /webhook)",
+            };
+        },
+        else => return err,
+    };
     defer allocator.free(url);
 
     const body = buildRequestBody(
@@ -198,10 +207,8 @@ fn buildRequestUrl(allocator: std.mem.Allocator, worker_url: []const u8, protoco
     const trimmed = std.mem.trimRight(u8, worker_url, "/");
     switch (protocol) {
         .webhook => {
-            if (hasExplicitPath(trimmed)) {
-                return try allocator.dupe(u8, trimmed);
-            }
-            return try std.fmt.allocPrint(allocator, "{s}/webhook", .{trimmed});
+            if (!hasExplicitPath(trimmed)) return error.WebhookUrlPathRequired;
+            return try allocator.dupe(u8, trimmed);
         },
         .api_chat, .openai_chat => {
             return try allocator.dupe(u8, trimmed);
@@ -263,11 +270,10 @@ fn buildRequestBody(
 
 fn parseWorkerResponse(allocator: std.mem.Allocator, response_data: []const u8) !DispatchResult {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, response_data, .{}) catch {
-        const output = try allocator.dupe(u8, response_data);
         return DispatchResult{
-            .output = output,
-            .success = true,
-            .error_text = null,
+            .output = "",
+            .success = false,
+            .error_text = "worker response must be a JSON object",
         };
     };
     defer parsed.deinit();
@@ -280,16 +286,6 @@ fn parseWorkerResponse(allocator: std.mem.Allocator, response_data: []const u8) 
         };
     }
     const obj = parsed.value.object;
-
-    if (obj.get("output")) |out_val| {
-        if (out_val == .string) {
-            return DispatchResult{
-                .output = try allocator.dupe(u8, out_val.string),
-                .success = true,
-                .error_text = null,
-            };
-        }
-    }
 
     if (obj.get("response")) |resp_val| {
         if (resp_val == .string) {
@@ -326,15 +322,6 @@ fn parseWorkerResponse(allocator: std.mem.Allocator, response_data: []const u8) 
                                 };
                             }
                         }
-                    }
-                }
-                if (first_choice.object.get("text")) |text_val| {
-                    if (text_val == .string) {
-                        return DispatchResult{
-                            .output = try allocator.dupe(u8, text_val.string),
-                            .success = true,
-                            .error_text = null,
-                        };
                     }
                 }
             }
@@ -375,7 +362,7 @@ fn parseWorkerResponse(allocator: std.mem.Allocator, response_data: []const u8) 
     return DispatchResult{
         .output = "",
         .success = false,
-        .error_text = "worker response missing output/response/reply/choices field",
+        .error_text = "worker response missing response/reply/choices.message.content field",
     };
 }
 
@@ -572,15 +559,16 @@ test "workerMatchesTags: empty required returns true" {
     try std.testing.expect(try workerMatchesTags(allocator, "[\"coder\"]", &tags));
 }
 
-test "buildRequestUrl for webhook normalizes root URL and keeps explicit endpoint" {
+test "buildRequestUrl for webhook requires explicit endpoint path" {
     const allocator = std.testing.allocator;
-    const url1 = try buildRequestUrl(allocator, "http://localhost:3000", .webhook);
-    defer allocator.free(url1);
-    try std.testing.expectEqualStrings("http://localhost:3000/webhook", url1);
-
-    const url2 = try buildRequestUrl(allocator, "http://localhost:3000/", .webhook);
-    defer allocator.free(url2);
-    try std.testing.expectEqualStrings("http://localhost:3000/webhook", url2);
+    try std.testing.expectError(
+        error.WebhookUrlPathRequired,
+        buildRequestUrl(allocator, "http://localhost:3000", .webhook),
+    );
+    try std.testing.expectError(
+        error.WebhookUrlPathRequired,
+        buildRequestUrl(allocator, "http://localhost:3000/", .webhook),
+    );
 
     const url3 = try buildRequestUrl(allocator, "http://localhost:3000/webhook", .webhook);
     defer allocator.free(url3);
@@ -613,14 +601,6 @@ test "parseWorkerResponse supports nullclaw response format" {
     try std.testing.expectEqualStrings("Done", result.output);
 }
 
-test "parseWorkerResponse supports legacy output format" {
-    const allocator = std.testing.allocator;
-    const result = try parseWorkerResponse(allocator, "{\"output\":\"Result\"}");
-    defer allocator.free(result.output);
-    try std.testing.expect(result.success);
-    try std.testing.expectEqualStrings("Result", result.output);
-}
-
 test "parseWorkerResponse supports zeroclaw api_chat reply field" {
     const allocator = std.testing.allocator;
     const result = try parseWorkerResponse(allocator, "{\"reply\":\"API chat response\",\"model\":\"foo\"}");
@@ -640,12 +620,11 @@ test "parseWorkerResponse supports openai chat completions response" {
     try std.testing.expectEqualStrings("OpenAI style", result.output);
 }
 
-test "parseWorkerResponse treats plain text as output" {
+test "parseWorkerResponse rejects plain text body" {
     const allocator = std.testing.allocator;
     const result = try parseWorkerResponse(allocator, "plain text");
-    defer allocator.free(result.output);
-    try std.testing.expect(result.success);
-    try std.testing.expectEqualStrings("plain text", result.output);
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("worker response must be a JSON object", result.error_text.?);
 }
 
 test "buildRequestBody: openai_chat requires model" {
@@ -689,7 +668,17 @@ test "parseWorkerResponse rejects object without recognized fields" {
     const result = try parseWorkerResponse(allocator, "{\"status\":\"ok\"}");
     try std.testing.expect(!result.success);
     try std.testing.expectEqualStrings(
-        "worker response missing output/response/reply/choices field",
+        "worker response missing response/reply/choices.message.content field",
+        result.error_text.?,
+    );
+}
+
+test "parseWorkerResponse rejects legacy output field without canonical response field" {
+    const allocator = std.testing.allocator;
+    const result = try parseWorkerResponse(allocator, "{\"output\":\"legacy\"}");
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings(
+        "worker response missing response/reply/choices.message.content field",
         result.error_text.?,
     );
 }

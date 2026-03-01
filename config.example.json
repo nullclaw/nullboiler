@@ -6,7 +6,7 @@
   "workers": [
     {
       "id": "nullclaw-1",
-      "url": "http://localhost:3000",
+      "url": "http://localhost:3000/webhook",
       "token": "set_same_value_as_nullclaw_gateway_paired_tokens",
       "protocol": "webhook",
       "tags": ["coder", "researcher"],
@@ -21,7 +21,7 @@
       "max_concurrent": 2
     },
     {
-      "id": "openclaw-compat-1",
+      "id": "openclaw-1",
       "url": "http://localhost:42617/v1/chat/completions",
       "token": "set_gateway_token",
       "protocol": "openai_chat",

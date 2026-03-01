@@ -105,6 +105,10 @@ pub fn main() !void {
             std.debug.print("warning: skipped config worker {s}: openai_chat protocol requires model\n", .{w.id});
             continue;
         }
+        if (std.mem.eql(u8, w.protocol, "webhook") and !hasExplicitPath(w.url)) {
+            std.debug.print("warning: skipped config worker {s}: webhook protocol requires explicit URL path (for example /webhook)\n", .{w.id});
+            continue;
+        }
 
         // Serialize tags to JSON array string
         const tags_json = serializeTagsJson(cfg_arena.allocator(), w.tags) catch |err| {
@@ -277,6 +281,16 @@ fn parseBearerToken(headers_raw: []const u8) ?[]const u8 {
     return null;
 }
 
+fn hasExplicitPath(url: []const u8) bool {
+    const trimmed = std.mem.trimRight(u8, url, "/");
+    if (std.mem.startsWith(u8, trimmed, "/")) return true;
+
+    const scheme_idx = std.mem.indexOf(u8, trimmed, "://") orelse return false;
+    const host_start = scheme_idx + 3;
+    const slash_idx = std.mem.indexOfScalarPos(u8, trimmed, host_start, '/') orelse return false;
+    return slash_idx + 1 < trimmed.len;
+}
+
 test "serializeTagsJson escapes special chars" {
     const allocator = std.testing.allocator;
     const tags = [_][]const u8{
@@ -338,6 +352,12 @@ test "parseBearerToken accepts case-insensitive bearer scheme" {
     const token = parseBearerToken(headers);
     try std.testing.expect(token != null);
     try std.testing.expectEqualStrings("token-xyz", token.?);
+}
+
+test "hasExplicitPath identifies explicit path URLs" {
+    try std.testing.expect(!hasExplicitPath("http://localhost:3000"));
+    try std.testing.expect(!hasExplicitPath("http://localhost:3000/"));
+    try std.testing.expect(hasExplicitPath("http://localhost:3000/webhook"));
 }
 
 comptime {

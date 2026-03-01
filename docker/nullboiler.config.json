@@ -6,7 +6,7 @@
   "workers": [
     {
       "id": "nullclaw-local-1",
-      "url": "http://nullclaw:3000",
+      "url": "http://nullclaw:3000/webhook",
       "token": "nb_worker_token_1",
       "protocol": "webhook",
       "tags": ["llm-dev"],

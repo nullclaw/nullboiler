@@ -5,7 +5,7 @@ Usage:
     python3 tests/mock_worker.py <port>
 
 Accepts POST /webhook with JSON body {"message": "...", "session_key": "..."}.
-Returns {"output": "Mock response to: <first 50 chars of message>"}.
+Returns {"status":"ok","response":"Mock response to: <first 50 chars of message>"}.
 Returns 404 for all other paths.
 """
 
@@ -49,7 +49,7 @@ class MockWorkerHandler(BaseHTTPRequestHandler):
 
         # Build response
         truncated = message[:50]
-        response = {"output": f"Mock response to: {truncated}"}
+        response = {"status": "ok", "response": f"Mock response to: {truncated}"}
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

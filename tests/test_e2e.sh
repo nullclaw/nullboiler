@@ -269,7 +269,7 @@ printf '%b--- Worker CRUD ---%b\n' "$BOLD" "$RESET"
 # 3. POST /workers — register a worker
 RESP=$(safe_curl -X POST "$BASE_URL/workers" \
     -H "Content-Type: application/json" \
-    -d '{"id":"test-worker-1","url":"http://localhost:9999","token":"test-token","tags":["tester"],"max_concurrent":2}')
+    -d '{"id":"test-worker-1","url":"http://localhost:9999/webhook","token":"test-token","tags":["tester"],"max_concurrent":2}')
 parse_resp "$RESP"
 
 if [ "$HTTP_CODE" = "201" ]; then
@@ -363,7 +363,7 @@ printf '%b--- Run Creation ---%b\n' "$BOLD" "$RESET"
 # Re-register a worker for run tests
 safe_curl -X POST "$BASE_URL/workers" \
     -H "Content-Type: application/json" \
-    -d '{"id":"test-worker-1","url":"http://localhost:9999","token":"test-token","tags":["tester"],"max_concurrent":2}' >/dev/null
+    -d '{"id":"test-worker-1","url":"http://localhost:9999/webhook","token":"test-token","tags":["tester"],"max_concurrent":2}' >/dev/null
 
 # 9. POST /runs — create a simple workflow run
 RESP=$(safe_curl -X POST "$BASE_URL/runs" \
@@ -1104,7 +1104,7 @@ else
         # ── Register workers ────────────────────────────────────────────
         RESP=$(safe_curl -X POST "$BASE_URL/workers" \
             -H "Content-Type: application/json" \
-            -d "{\"id\":\"mock-researcher\",\"url\":\"http://127.0.0.1:$WORKER1_PORT\",\"token\":\"test-tok\",\"tags\":[\"researcher\",\"writer\"],\"max_concurrent\":3}")
+            -d "{\"id\":\"mock-researcher\",\"url\":\"http://127.0.0.1:$WORKER1_PORT/webhook\",\"token\":\"test-tok\",\"tags\":[\"researcher\",\"writer\"],\"max_concurrent\":3}")
         parse_resp "$RESP"
         WORKER_REG_OK=1
         if [ "$HTTP_CODE" != "201" ]; then
@@ -1113,7 +1113,7 @@ else
 
         RESP=$(safe_curl -X POST "$BASE_URL/workers" \
             -H "Content-Type: application/json" \
-            -d "{\"id\":\"mock-writer\",\"url\":\"http://127.0.0.1:$WORKER2_PORT\",\"token\":\"test-tok\",\"tags\":[\"writer\"],\"max_concurrent\":2}")
+            -d "{\"id\":\"mock-writer\",\"url\":\"http://127.0.0.1:$WORKER2_PORT/webhook\",\"token\":\"test-tok\",\"tags\":[\"writer\"],\"max_concurrent\":2}")
         parse_resp "$RESP"
         if [ "$HTTP_CODE" != "201" ]; then
             WORKER_REG_OK=0

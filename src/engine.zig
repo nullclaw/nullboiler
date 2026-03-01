@@ -729,20 +729,14 @@ pub const Engine = struct {
             return;
         }
 
-        // Duration mode (supports both string and integer values)
+        // Duration mode
         const duration_opt: ?i64 = blk: {
-            if (try getStepField(alloc, run_row.workflow_json, step.def_step_id, "duration_ms")) |dur_str| {
-                const parsed = std.fmt.parseInt(i64, dur_str, 10) catch {
-                    try self.failStepWithError(alloc, run_row, step, "invalid duration_ms value");
+            const duration_raw = try getStepFieldRaw(alloc, run_row.workflow_json, step.def_step_id, "duration_ms");
+            if (duration_raw != null) {
+                const dur_int = (try getStepFieldInt(alloc, run_row.workflow_json, step.def_step_id, "duration_ms")) orelse {
+                    try self.failStepWithError(alloc, run_row, step, "duration_ms must be an integer");
                     return;
                 };
-                if (parsed < 0) {
-                    try self.failStepWithError(alloc, run_row, step, "duration_ms must be >= 0");
-                    return;
-                }
-                break :blk parsed;
-            }
-            if (try getStepFieldInt(alloc, run_row.workflow_json, step.def_step_id, "duration_ms")) |dur_int| {
                 if (dur_int < 0) {
                     try self.failStepWithError(alloc, run_row, step, "duration_ms must be >= 0");
                     return;
@@ -3295,7 +3289,7 @@ test "Engine: wait step with duration_ms=0 completes after two ticks" {
     defer store.deinit();
 
     const wf =
-        \\{"steps":[{"id":"w1","type":"wait","duration_ms":"0"}]}
+        \\{"steps":[{"id":"w1","type":"wait","duration_ms":0}]}
     ;
     try store.insertRun("r1", "running", wf, "{}", "[]");
     try store.insertStep("step_w1", "r1", "w1", "wait", "ready", "{}", 1, null, null, null);
@@ -3390,7 +3384,7 @@ test "Engine: wait step with invalid duration string fails" {
     const s = (try store.getStep(arena.allocator(), "step_w1")).?;
     try std.testing.expectEqualStrings("failed", s.status);
     try std.testing.expect(s.error_text != null);
-    try std.testing.expect(std.mem.indexOf(u8, s.error_text.?, "invalid duration_ms") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s.error_text.?, "duration_ms must be an integer") != null);
 }
 
 // ── Router step tests ────────────────────────────────────────────────
