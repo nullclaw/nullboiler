@@ -1,5 +1,6 @@
 const std = @import("std");
 const Store = @import("store.zig").Store;
+const ids = @import("ids.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -107,17 +108,333 @@ fn handleHealth(_: *Context) HttpResponse {
     return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"0.1.0\"}");
 }
 
-fn handleCreateRun(_: *Context, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"POST /runs not implemented\"}}");
+// ── Worker Handlers ──────────────────────────────────────────────────
+
+fn handleListWorkers(ctx: *Context) HttpResponse {
+    const workers = ctx.store.listWorkers(ctx.allocator) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to list workers\"}}");
+    };
+
+    // Build JSON array manually
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    for (workers, 0..) |w, i| {
+        if (i > 0) {
+            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        }
+        const entry = std.fmt.allocPrint(ctx.allocator,
+            \\{{"id":"{s}","url":"{s}","tags":{s},"max_concurrent":{d},"source":"{s}","status":"{s}","created_at_ms":{d}}}
+        , .{
+            w.id,
+            w.url,
+            w.tags_json,
+            w.max_concurrent,
+            w.source,
+            w.status,
+            w.created_at_ms,
+        }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    }
+
+    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, json_body);
 }
 
-fn handleListRuns(_: *Context) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"GET /runs not implemented\"}}");
+fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
+    // Parse JSON body
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"body must be a JSON object\"}}");
+    }
+
+    const obj = root.object;
+
+    // Extract required fields
+    const worker_id = getJsonString(obj, "id") orelse {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: id\"}}");
+    };
+    const url = getJsonString(obj, "url") orelse {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: url\"}}");
+    };
+    const token = getJsonString(obj, "token") orelse "";
+
+    // Extract tags as JSON string
+    const tags_json = if (obj.get("tags")) |tags_val| blk: {
+        var out: std.io.Writer.Allocating = .init(ctx.allocator);
+        var jw: std.json.Stringify = .{ .writer = &out.writer };
+        jw.write(tags_val) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize tags\"}}");
+        break :blk out.toOwnedSlice() catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    } else "[]";
+
+    // Extract max_concurrent
+    const max_concurrent: i64 = if (obj.get("max_concurrent")) |mc| blk: {
+        if (mc == .integer) break :blk mc.integer;
+        break :blk 1;
+    } else 1;
+
+    ctx.store.insertWorker(worker_id, url, token, tags_json, max_concurrent, "registered") catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to insert worker\"}}");
+    };
+
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":"{s}","status":"active"}}
+    , .{worker_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(201, resp);
 }
 
-fn handleGetRun(_: *Context, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"GET /runs/{id} not implemented\"}}");
+fn handleDeleteWorker(ctx: *Context, id: []const u8) HttpResponse {
+    ctx.store.deleteWorker(id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to delete worker\"}}");
+    };
+    return jsonResponse(200, "{\"ok\":true}");
 }
+
+// ── Run Handlers ─────────────────────────────────────────────────────
+
+fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
+    // Parse body JSON
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"body must be a JSON object\"}}");
+    }
+
+    const obj = root.object;
+
+    // Extract steps array
+    const steps_val = obj.get("steps") orelse {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: steps\"}}");
+    };
+    if (steps_val != .array) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"steps must be an array\"}}");
+    }
+    const steps_array = steps_val.array.items;
+
+    if (steps_array.len == 0) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"steps array must not be empty\"}}");
+    }
+
+    // Serialize input and callbacks back to JSON for storage
+    const input_json = serializeJsonValue(ctx.allocator, obj.get("input")) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize input\"}}");
+    };
+    const callbacks_json = serializeJsonValue(ctx.allocator, obj.get("callbacks")) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize callbacks\"}}");
+    };
+
+    // Generate run_id
+    const run_id_buf = ids.generateId();
+    const run_id = ctx.allocator.dupe(u8, &run_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    // Insert run — workflow_json = the original body (frozen snapshot)
+    ctx.store.insertRun(run_id, "running", body, input_json, callbacks_json) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to insert run\"}}");
+    };
+
+    // Build mapping from def_step_id -> generated step_id
+    // Use parallel arrays for simplicity
+    var def_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    var gen_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+
+    // First pass: create all steps
+    for (steps_array) |step_val| {
+        if (step_val != .object) continue;
+        const step_obj = step_val.object;
+
+        const def_step_id = getJsonString(step_obj, "id") orelse continue;
+        const step_type = getJsonString(step_obj, "type") orelse "task";
+
+        // Generate step_id
+        const step_id_buf = ids.generateId();
+        const step_id = ctx.allocator.dupe(u8, &step_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+        // Determine initial status: "ready" if no depends_on, "pending" otherwise
+        const has_deps = if (step_obj.get("depends_on")) |deps| blk: {
+            if (deps == .array and deps.array.items.len > 0) break :blk true;
+            break :blk false;
+        } else false;
+        const initial_status: []const u8 = if (has_deps) "pending" else "ready";
+
+        // Extract max_attempts from retry config (default 1)
+        const max_attempts: i64 = if (step_obj.get("retry")) |retry_val| blk: {
+            if (retry_val == .object) {
+                if (retry_val.object.get("max_attempts")) |ma| {
+                    if (ma == .integer) break :blk ma.integer;
+                }
+            }
+            break :blk 1;
+        } else 1;
+
+        // Extract timeout_ms (nullable)
+        const timeout_ms: ?i64 = if (step_obj.get("timeout_ms")) |t| blk: {
+            if (t == .integer) break :blk t.integer;
+            break :blk null;
+        } else null;
+
+        ctx.store.insertStep(step_id, run_id, def_step_id, step_type, initial_status, "{}", max_attempts, timeout_ms, null, null) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to insert step\"}}");
+        };
+
+        def_ids.append(ctx.allocator, def_step_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        gen_ids.append(ctx.allocator, step_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    }
+
+    // Second pass: insert step dependencies
+    for (steps_array) |step_val| {
+        if (step_val != .object) continue;
+        const step_obj = step_val.object;
+
+        const def_step_id = getJsonString(step_obj, "id") orelse continue;
+
+        // Find the generated step_id for this def_step_id
+        const step_id = lookupGenId(def_ids.items, gen_ids.items, def_step_id) orelse continue;
+
+        // Process depends_on
+        const deps_val = step_obj.get("depends_on") orelse continue;
+        if (deps_val != .array) continue;
+
+        for (deps_val.array.items) |dep_item| {
+            if (dep_item != .string) continue;
+            const dep_def_id = dep_item.string;
+
+            // Find the generated step_id for this dependency
+            const dep_step_id = lookupGenId(def_ids.items, gen_ids.items, dep_def_id) orelse continue;
+
+            ctx.store.insertStepDep(step_id, dep_step_id) catch {
+                return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to insert step dependency\"}}");
+            };
+        }
+    }
+
+    // Return 201 with run info
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":"{s}","status":"running"}}
+    , .{run_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(201, resp);
+}
+
+fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
+    const run = ctx.store.getRun(ctx.allocator, id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get run\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
+    };
+
+    const steps = ctx.store.getStepsByRun(ctx.allocator, id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get steps\"}}");
+    };
+
+    // Build steps JSON array
+    const steps_json = buildStepsJson(ctx.allocator, steps) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to build steps JSON\"}}");
+    };
+
+    const error_field = if (run.error_text) |et|
+        std.fmt.allocPrint(ctx.allocator, ",\"error_text\":\"{s}\"", .{et}) catch ""
+    else
+        "";
+
+    const started_field = if (run.started_at_ms) |s|
+        std.fmt.allocPrint(ctx.allocator, ",\"started_at_ms\":{d}", .{s}) catch ""
+    else
+        "";
+
+    const ended_field = if (run.ended_at_ms) |e|
+        std.fmt.allocPrint(ctx.allocator, ",\"ended_at_ms\":{d}", .{e}) catch ""
+    else
+        "";
+
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":"{s}","status":"{s}","created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s},"steps":{s}}}
+    , .{
+        run.id,
+        run.status,
+        run.created_at_ms,
+        run.updated_at_ms,
+        error_field,
+        started_field,
+        ended_field,
+        steps_json,
+    }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
+}
+
+fn handleListRuns(ctx: *Context) HttpResponse {
+    // For MVP: return all runs, no filtering
+    const runs = ctx.store.listRuns(ctx.allocator, null, 100) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to list runs\"}}");
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    for (runs, 0..) |r, i| {
+        if (i > 0) {
+            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        }
+        const entry = std.fmt.allocPrint(ctx.allocator,
+            \\{{"id":"{s}","status":"{s}","created_at_ms":{d},"updated_at_ms":{d}}}
+        , .{
+            r.id,
+            r.status,
+            r.created_at_ms,
+            r.updated_at_ms,
+        }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    }
+
+    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, json_body);
+}
+
+// ── Step Handlers ────────────────────────────────────────────────────
+
+fn handleListSteps(ctx: *Context, run_id: []const u8) HttpResponse {
+    // Verify run exists
+    _ = ctx.store.getRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get run\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
+    };
+
+    const steps = ctx.store.getStepsByRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get steps\"}}");
+    };
+
+    const steps_json = buildStepsJson(ctx.allocator, steps) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to build steps JSON\"}}");
+    };
+
+    return jsonResponse(200, steps_json);
+}
+
+fn handleGetStep(ctx: *Context, _: []const u8, step_id: []const u8) HttpResponse {
+    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    };
+
+    const step_json = buildSingleStepJson(ctx.allocator, step) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to build step JSON\"}}");
+    };
+
+    return jsonResponse(200, step_json);
+}
+
+// ── Stub Handlers (not yet implemented) ──────────────────────────────
 
 fn handleCancelRun(_: *Context, _: []const u8) HttpResponse {
     return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"POST /runs/{id}/cancel not implemented\"}}");
@@ -125,14 +442,6 @@ fn handleCancelRun(_: *Context, _: []const u8) HttpResponse {
 
 fn handleRetryRun(_: *Context, _: []const u8) HttpResponse {
     return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"POST /runs/{id}/retry not implemented\"}}");
-}
-
-fn handleListSteps(_: *Context, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"GET /runs/{id}/steps not implemented\"}}");
-}
-
-fn handleGetStep(_: *Context, _: []const u8, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"GET /runs/{id}/steps/{step_id} not implemented\"}}");
 }
 
 fn handleApproveStep(_: *Context, _: []const u8, _: []const u8) HttpResponse {
@@ -147,16 +456,108 @@ fn handleListEvents(_: *Context, _: []const u8) HttpResponse {
     return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"GET /runs/{id}/events not implemented\"}}");
 }
 
-fn handleListWorkers(_: *Context) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"GET /workers not implemented\"}}");
+// ── JSON Helpers ─────────────────────────────────────────────────────
+
+fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const val = obj.get(key) orelse return null;
+    if (val == .string) return val.string;
+    return null;
 }
 
-fn handleRegisterWorker(_: *Context, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"POST /workers not implemented\"}}");
+fn serializeJsonValue(allocator: std.mem.Allocator, val: ?std.json.Value) ![]const u8 {
+    const v = val orelse return "{}";
+    if (v == .null) return "{}";
+    var out: std.io.Writer.Allocating = .init(allocator);
+    var jw: std.json.Stringify = .{ .writer = &out.writer };
+    try jw.write(v);
+    return try out.toOwnedSlice();
 }
 
-fn handleDeleteWorker(_: *Context, _: []const u8) HttpResponse {
-    return jsonResponse(501, "{\"error\":{\"code\":\"not_implemented\",\"message\":\"DELETE /workers/{id} not implemented\"}}");
+fn lookupGenId(def_ids: []const []const u8, gen_ids: []const []const u8, target: []const u8) ?[]const u8 {
+    for (def_ids, 0..) |did, i| {
+        if (std.mem.eql(u8, did, target)) return gen_ids[i];
+    }
+    return null;
+}
+
+fn buildStepsJson(allocator: std.mem.Allocator, steps: []const @import("types.zig").StepRow) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.append(allocator, '[');
+
+    for (steps, 0..) |s, i| {
+        if (i > 0) {
+            try buf.append(allocator, ',');
+        }
+        const entry = try buildSingleStepJson(allocator, s);
+        try buf.appendSlice(allocator, entry);
+    }
+
+    try buf.append(allocator, ']');
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn buildSingleStepJson(allocator: std.mem.Allocator, s: @import("types.zig").StepRow) ![]const u8 {
+    const worker_field = if (s.worker_id) |wid|
+        try std.fmt.allocPrint(allocator, ",\"worker_id\":\"{s}\"", .{wid})
+    else
+        "";
+
+    const output_field = if (s.output_json) |oj|
+        try std.fmt.allocPrint(allocator, ",\"output_json\":{s}", .{oj})
+    else
+        "";
+
+    const error_field = if (s.error_text) |et|
+        try std.fmt.allocPrint(allocator, ",\"error_text\":\"{s}\"", .{et})
+    else
+        "";
+
+    const timeout_field = if (s.timeout_ms) |t|
+        try std.fmt.allocPrint(allocator, ",\"timeout_ms\":{d}", .{t})
+    else
+        "";
+
+    const parent_field = if (s.parent_step_id) |pid|
+        try std.fmt.allocPrint(allocator, ",\"parent_step_id\":\"{s}\"", .{pid})
+    else
+        "";
+
+    const item_field = if (s.item_index) |idx|
+        try std.fmt.allocPrint(allocator, ",\"item_index\":{d}", .{idx})
+    else
+        "";
+
+    const started_field = if (s.started_at_ms) |st|
+        try std.fmt.allocPrint(allocator, ",\"started_at_ms\":{d}", .{st})
+    else
+        "";
+
+    const ended_field = if (s.ended_at_ms) |en|
+        try std.fmt.allocPrint(allocator, ",\"ended_at_ms\":{d}", .{en})
+    else
+        "";
+
+    return try std.fmt.allocPrint(allocator,
+        \\{{"id":"{s}","run_id":"{s}","def_step_id":"{s}","type":"{s}","status":"{s}","attempt":{d},"max_attempts":{d},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s}{s}{s}}}
+    , .{
+        s.id,
+        s.run_id,
+        s.def_step_id,
+        s.type,
+        s.status,
+        s.attempt,
+        s.max_attempts,
+        s.created_at_ms,
+        s.updated_at_ms,
+        worker_field,
+        output_field,
+        error_field,
+        timeout_field,
+        parent_field,
+        item_field,
+        started_field,
+        ended_field,
+    });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
