@@ -216,6 +216,13 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"openai_chat protocol requires model\"}}");
     }
 
+    const existing = ctx.store.getWorker(ctx.allocator, worker_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to check worker id\"}}");
+    };
+    if (existing != null) {
+        return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"worker id already exists\"}}");
+    }
+
     // Extract tags as JSON string
     const tags_json = if (obj.get("tags")) |tags_val| blk: {
         if (tags_val != .array) {
@@ -854,6 +861,7 @@ fn validationErrorResponse(err: workflow_validation.ValidateError) HttpResponse 
         error.StepIdDuplicate => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"duplicate step id\"}}"),
         error.DependsOnNotArray => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on must be an array\"}}"),
         error.DependsOnItemNotString => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on items must be strings\"}}"),
+        error.DependsOnDuplicate => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on contains duplicate step id\"}}"),
         error.DependsOnUnknownStepId => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on references unknown step id\"}}"),
         error.LoopBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}"),
         error.SubWorkflowRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}"),
@@ -1055,6 +1063,26 @@ test "API: create run rejects unknown dependency" {
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
 }
 
+test "API: create run rejects duplicate depends_on items" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"steps":[{"id":"a","type":"task","prompt_template":"a"},{"id":"b","type":"task","prompt_template":"b","depends_on":["a","a"]}]}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
 test "API: get step enforces run ownership" {
     const allocator = std.testing.allocator;
     var store = try Store.init(allocator, ":memory:");
@@ -1206,4 +1234,35 @@ test "API: register openai_chat worker requires model" {
     ;
     const resp = handleRequest(&ctx, "POST", "/workers", body);
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: register worker rejects duplicate id with conflict" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    try store.insertWorker(
+        "dup-worker",
+        "http://localhost:3000",
+        "tok",
+        "webhook",
+        null,
+        "[]",
+        1,
+        "registered",
+    );
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"id":"dup-worker","url":"http://localhost:3001"}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/workers", body);
+    try std.testing.expectEqual(@as(u16, 409), resp.status_code);
 }

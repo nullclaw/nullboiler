@@ -7,6 +7,7 @@ pub const ValidateError = error{
     StepIdDuplicate,
     DependsOnNotArray,
     DependsOnItemNotString,
+    DependsOnDuplicate,
     DependsOnUnknownStepId,
     LoopBodyRequired,
     SubWorkflowRequired,
@@ -38,7 +39,7 @@ pub fn validateStepsForCreateRun(
 
         const step_type = getJsonString(step_obj, "type") orelse "task";
         validateStepTypeRules(step_type, step_obj) catch |err| return err;
-        validateDependsOnTypes(step_obj) catch |err| return err;
+        validateDependsOnTypes(allocator, step_obj) catch |err| return err;
     }
 
     for (steps_array) |step_val| {
@@ -84,11 +85,15 @@ fn validateStepTypeRules(step_type: []const u8, step_obj: std.json.ObjectMap) Va
     }
 }
 
-fn validateDependsOnTypes(step_obj: std.json.ObjectMap) ValidateError!void {
+fn validateDependsOnTypes(allocator: std.mem.Allocator, step_obj: std.json.ObjectMap) ValidateError!void {
     if (step_obj.get("depends_on")) |deps_val| {
         if (deps_val != .array) return error.DependsOnNotArray;
+        var seen = std.StringHashMap(void).init(allocator);
+        defer seen.deinit();
         for (deps_val.array.items) |dep_item| {
             if (dep_item != .string) return error.DependsOnItemNotString;
+            if (seen.contains(dep_item.string)) return error.DependsOnDuplicate;
+            seen.put(dep_item.string, {}) catch return error.OutOfMemory;
         }
     }
 }
@@ -186,6 +191,20 @@ test "validateStepsForCreateRun: rejects non-string depends_on item" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
     try std.testing.expectError(error.DependsOnItemNotString, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects duplicate depends_on item" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"a","type":"task"},
+        \\  {"id":"b","type":"task","depends_on":["a","a"]}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.DependsOnDuplicate, validateStepsForCreateRun(allocator, parsed.value.array.items));
 }
 
 test "validateStepsForCreateRun: rejects missing sub_workflow workflow field" {

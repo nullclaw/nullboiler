@@ -27,6 +27,11 @@ pub const Engine = struct {
     poll_interval_ns: u64,
     running: std.atomic.Value(bool),
 
+    const TaskPromptSource = union(enum) {
+        rendered: []const u8,
+        template: []const u8,
+    };
+
     pub fn init(store: *Store, allocator: std.mem.Allocator, poll_interval_ms: u64) Engine {
         return .{
             .store = store,
@@ -207,40 +212,23 @@ pub const Engine = struct {
 
     fn executeTaskStep(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, step: types.StepRow) !void {
         // 1. Resolve prompt source for this task step.
-        // Priority:
-        //   a) step definition prompt_template
-        //   b) parent step definition prompt_template (for generated child tasks)
-        //   c) input_json.rendered_prompt (for dynamically rendered children)
-        const prompt_template = blk: {
-            if (try getStepField(alloc, run_row.workflow_json, step.def_step_id, "prompt_template")) |tpl| {
-                break :blk tpl;
-            }
-
-            if (step.parent_step_id) |parent_id| {
-                if (try self.store.getStep(alloc, parent_id)) |parent_step| {
-                    if (try getStepField(alloc, run_row.workflow_json, parent_step.def_step_id, "prompt_template")) |parent_tpl| {
-                        break :blk parent_tpl;
-                    }
-                }
-            }
-
-            if (extractRenderedPromptFromInput(alloc, step.input_json)) |rendered_prompt| {
-                break :blk rendered_prompt;
-            }
-
+        const prompt_source = try self.resolveTaskPromptSource(alloc, run_row, step) orelse {
             log.warn("no prompt_template for step {s}", .{step.def_step_id});
             return;
         };
 
-        // 2. Build template context
-        const ctx = try buildTemplateContext(alloc, run_row, step, self.store);
-
-        // 3. Render prompt
-        const rendered_prompt = templates.render(alloc, prompt_template, ctx) catch |err| {
-            log.err("template render failed for step {s}: {}", .{ step.id, err });
-            try self.store.updateStepStatus(step.id, "failed", null, null, "template render failed", step.attempt);
-            try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-            return;
+        // 2. Build final prompt.
+        const rendered_prompt = switch (prompt_source) {
+            .rendered => |prompt| prompt,
+            .template => |prompt_template| blk: {
+                const ctx = try buildTemplateContext(alloc, run_row, step, self.store);
+                break :blk templates.render(alloc, prompt_template, ctx) catch |err| {
+                    log.err("template render failed for step {s}: {}", .{ step.id, err });
+                    try self.store.updateStepStatus(step.id, "failed", null, null, "template render failed", step.attempt);
+                    try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
+                    return;
+                };
+            },
         };
 
         // 4. Get all workers and build WorkerInfo list
@@ -360,6 +348,30 @@ pub const Engine = struct {
                 log.err("step {s} failed: {s}", .{ step.id, err_text });
             }
         }
+    }
+
+    fn resolveTaskPromptSource(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, step: types.StepRow) !?TaskPromptSource {
+        // Explicit rendered_prompt is highest priority for generated children
+        // (for example debate judge prompts).
+        if (extractRenderedPromptFromInput(alloc, step.input_json)) |rendered_prompt| {
+            return .{ .rendered = rendered_prompt };
+        }
+
+        // Normal task step definition prompt.
+        if (try getStepField(alloc, run_row.workflow_json, step.def_step_id, "prompt_template")) |tpl| {
+            return .{ .template = tpl };
+        }
+
+        // Fallback for generated child tasks that should reuse parent prompt template.
+        if (step.parent_step_id) |parent_id| {
+            if (try self.store.getStep(alloc, parent_id)) |parent_step| {
+                if (try getStepField(alloc, run_row.workflow_json, parent_step.def_step_id, "prompt_template")) |parent_tpl| {
+                    return .{ .template = parent_tpl };
+                }
+            }
+        }
+
+        return null;
     }
 
     // ── executeFanOutStep ────────────────────────────────────────────
@@ -3108,6 +3120,45 @@ test "Engine: task step fallback uses input_json.rendered_prompt" {
     const child = (try store.getStep(arena.allocator(), "child-step")).?;
     try std.testing.expectEqualStrings("ready", child.status);
     try std.testing.expectEqual(@as(i64, 2), child.attempt);
+}
+
+test "Engine: rendered_prompt has priority over parent prompt_template" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    const wf =
+        \\{"steps":[{"id":"parent","type":"debate","prompt_template":"parent template"},{"id":"child","type":"task","prompt_template":"child template"}]}
+    ;
+    try store.insertRun("r-priority", "running", wf, "{}", "[]");
+    try store.insertStep("parent-step", "r-priority", "parent", "debate", "running", "{}", 1, null, null, null);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const rendered_input = try buildRenderedPromptInputJson(arena.allocator(), "rendered prompt");
+    try store.insertStep(
+        "child-step",
+        "r-priority",
+        "child",
+        "task",
+        "ready",
+        rendered_input,
+        1,
+        null,
+        "parent-step",
+        0,
+    );
+
+    var engine = Engine.init(&store, allocator, 500);
+    const run_row = (try store.getRun(arena.allocator(), "r-priority")).?;
+    const child_step = (try store.getStep(arena.allocator(), "child-step")).?;
+    const source = (try engine.resolveTaskPromptSource(arena.allocator(), run_row, child_step)).?;
+
+    switch (source) {
+        .rendered => |prompt| try std.testing.expectEqualStrings("rendered prompt", prompt),
+        .template => try std.testing.expect(false),
+    }
 }
 
 test "findStepStatus finds matching step" {
