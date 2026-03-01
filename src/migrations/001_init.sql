@@ -44,7 +44,9 @@ CREATE TABLE IF NOT EXISTS steps (
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     started_at_ms INTEGER,
-    ended_at_ms INTEGER
+    ended_at_ms INTEGER,
+    child_run_id TEXT REFERENCES runs(id),
+    iteration_index INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_steps_run ON steps(run_id);
 CREATE INDEX IF NOT EXISTS idx_steps_status ON steps(run_id, status);

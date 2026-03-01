@@ -129,22 +129,6 @@ pub const Store = struct {
             }
             return error.MigrationFailed;
         }
-
-        // ALTER TABLE additions (ignore errors for idempotency)
-        self.execIgnoreError("ALTER TABLE steps ADD COLUMN child_run_id TEXT REFERENCES runs(id);");
-        self.execIgnoreError("ALTER TABLE steps ADD COLUMN iteration_index INTEGER DEFAULT 0;");
-    }
-
-    fn execIgnoreError(self: *Self, sql: [*:0]const u8) void {
-        var err_msg: [*c]u8 = null;
-        const prc = c.sqlite3_exec(self.db, sql, null, null, &err_msg);
-        if (prc != c.SQLITE_OK) {
-            if (err_msg) |msg| {
-                // This is expected on re-run (duplicate column name) — just log at debug level
-                log.debug("ALTER TABLE skipped (rc={d}): {s}", .{ prc, std.mem.span(msg) });
-                c.sqlite3_free(msg);
-            }
-        }
     }
 
     // ── Worker CRUD ───────────────────────────────────────────────────

@@ -32,6 +32,5 @@ CREATE TABLE IF NOT EXISTS saga_state (
     PRIMARY KEY (run_id, saga_step_id, body_step_id)
 );
 
--- NOTE: child_run_id and iteration_index columns are added to steps via
--- ALTER TABLE in the migration runner (store.zig), since SQLite does not
--- support ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+-- NOTE: steps.child_run_id and steps.iteration_index are defined in
+-- migrations/001_init.sql as part of the canonical schema.
