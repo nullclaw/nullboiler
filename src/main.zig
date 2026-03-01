@@ -5,6 +5,8 @@ const config = @import("config.zig");
 const engine_mod = @import("engine.zig");
 
 const version = "0.1.0";
+const max_request_size: usize = 8 * 1024 * 1024;
+const request_read_chunk: usize = 4096;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -124,7 +126,7 @@ pub fn main() !void {
     }
 
     while (true) {
-        const conn = server.accept() catch |err| {
+        var conn = server.accept() catch |err| {
             std.debug.print("accept error: {}\n", .{err});
             continue;
         };
@@ -134,24 +136,13 @@ pub fn main() !void {
         defer arena.deinit();
         const req_alloc = arena.allocator();
 
-        var req_buf: [1024 * 1024]u8 = undefined;
-        const n = conn.stream.read(&req_buf) catch continue;
-        if (n == 0) continue;
-        const raw = req_buf[0..n];
-
-        const first_line_end = std.mem.indexOf(u8, raw, "\r\n") orelse continue;
-        const first_line = raw[0..first_line_end];
-        var parts = std.mem.splitScalar(u8, first_line, ' ');
-        const method_str = parts.next() orelse continue;
-        const target = parts.next() orelse continue;
-
-        const body = if (std.mem.indexOf(u8, raw, "\r\n\r\n")) |bi|
-            raw[bi + 4 ..]
-        else
-            "";
+        const request = readHttpRequest(req_alloc, &conn.stream, max_request_size) catch |err| {
+            std.debug.print("request read error: {}\n", .{err});
+            continue;
+        } orelse continue;
 
         var ctx = api.Context{ .store = &store, .allocator = req_alloc };
-        const response = api.handleRequest(&ctx, method_str, target, body);
+        const response = api.handleRequest(&ctx, request.method, request.target, request.body);
 
         const header = std.fmt.allocPrint(req_alloc, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ response.status, response.body.len }) catch continue;
 
@@ -162,6 +153,78 @@ pub fn main() !void {
 
 fn serializeTagsJson(allocator: std.mem.Allocator, tags: []const []const u8) ![]const u8 {
     return std.json.Stringify.valueAlloc(allocator, tags, .{});
+}
+
+const ParsedHttpRequest = struct {
+    method: []const u8,
+    target: []const u8,
+    body: []const u8,
+};
+
+fn readHttpRequest(allocator: std.mem.Allocator, stream: *std.net.Stream, max_bytes: usize) !?ParsedHttpRequest {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(allocator);
+
+    var header_end: ?usize = null;
+    var content_len: usize = 0;
+    var chunk: [request_read_chunk]u8 = undefined;
+
+    while (true) {
+        const n = try stream.read(&chunk);
+        if (n == 0) return null;
+
+        try buffer.appendSlice(allocator, chunk[0..n]);
+        if (buffer.items.len > max_bytes) return error.RequestTooLarge;
+
+        if (header_end == null) {
+            const hdr_end = std.mem.indexOf(u8, buffer.items, "\r\n\r\n") orelse continue;
+            header_end = hdr_end;
+            content_len = parseContentLength(buffer.items[0..hdr_end]) orelse return error.InvalidContentLength;
+
+            const required = hdr_end + 4 + content_len;
+            if (required > max_bytes) return error.RequestTooLarge;
+            if (buffer.items.len >= required) break;
+            continue;
+        }
+
+        const required = header_end.? + 4 + content_len;
+        if (buffer.items.len >= required) break;
+    }
+
+    const req_total = header_end.? + 4 + content_len;
+    const req_bytes = try allocator.dupe(u8, buffer.items[0..req_total]);
+
+    const first_line_end = std.mem.indexOf(u8, req_bytes, "\r\n") orelse return error.InvalidRequestLine;
+    const first_line = req_bytes[0..first_line_end];
+    var parts = std.mem.splitScalar(u8, first_line, ' ');
+
+    const method = parts.next() orelse return error.InvalidRequestLine;
+    const target = parts.next() orelse return error.InvalidRequestLine;
+    const body = req_bytes[header_end.? + 4 .. req_total];
+
+    return .{
+        .method = method,
+        .target = target,
+        .body = body,
+    };
+}
+
+fn parseContentLength(headers_raw: []const u8) ?usize {
+    var lines = std.mem.splitSequence(u8, headers_raw, "\r\n");
+    _ = lines.next(); // request line
+
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, "Content-Length")) continue;
+
+        const raw_value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        return std.fmt.parseInt(usize, raw_value, 10) catch null;
+    }
+
+    return 0;
 }
 
 test "serializeTagsJson escapes special chars" {
