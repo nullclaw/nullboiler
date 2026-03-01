@@ -58,3 +58,13 @@ picoclaw agent --message "<prompt>" --session "<session_key>"
 ```
 
 Then register that bridge endpoint in NullBoiler with protocol `webhook`.
+
+## nullTracker bridge
+
+For `nullTracker + nullBoiler + nullClaw` end-to-end flow, run:
+
+```bash
+python3 tools/nulltracker_nullboiler_executor.py --agent-id dev-1 --agent-role llm-dev
+```
+
+Full guide: `docs/nulltracker-nullboiler-nullclaw.md`.
