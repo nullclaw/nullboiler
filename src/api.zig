@@ -1,6 +1,7 @@
 const std = @import("std");
 const Store = @import("store.zig").Store;
 const ids = @import("ids.zig");
+const types = @import("types.zig");
 const workflow_validation = @import("workflow_validation.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -475,14 +476,10 @@ fn handleListSteps(ctx: *Context, run_id: []const u8) HttpResponse {
 }
 
 fn handleGetStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
-    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
-    } orelse {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
+        .ok => |s| s,
+        .err => |resp| return resp,
     };
-    if (!std.mem.eql(u8, step.run_id, run_id)) {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
-    }
 
     const step_json = buildSingleStepJson(ctx.allocator, step) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to build step JSON\"}}");
@@ -585,14 +582,10 @@ fn handleRetryRun(ctx: *Context, run_id: []const u8) HttpResponse {
 
 fn handleApproveStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
     // 1. Get step from store
-    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
-    } orelse {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
+        .ok => |s| s,
+        .err => |resp| return resp,
     };
-    if (!std.mem.eql(u8, step.run_id, run_id)) {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
-    }
 
     // 2. Must be "waiting_approval"
     if (!std.mem.eql(u8, step.status, "waiting_approval")) {
@@ -619,14 +612,10 @@ fn handleApproveStep(ctx: *Context, run_id: []const u8, step_id: []const u8) Htt
 
 fn handleRejectStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
     // 1. Get step from store
-    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
-    } orelse {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
+        .ok => |s| s,
+        .err => |resp| return resp,
     };
-    if (!std.mem.eql(u8, step.run_id, run_id)) {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
-    }
 
     // 2. Must be "waiting_approval"
     if (!std.mem.eql(u8, step.status, "waiting_approval")) {
@@ -653,14 +642,10 @@ fn handleRejectStep(ctx: *Context, run_id: []const u8, step_id: []const u8) Http
 
 fn handleSignalStep(ctx: *Context, run_id: []const u8, step_id: []const u8, body: []const u8) HttpResponse {
     // 1. Get step from store
-    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
-    } orelse {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
+        .ok => |s| s,
+        .err => |resp| return resp,
     };
-    if (!std.mem.eql(u8, step.run_id, run_id)) {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
-    }
 
     // 2. Must be "waiting_approval" (signal mode uses this status)
     if (!std.mem.eql(u8, step.status, "waiting_approval")) {
@@ -757,14 +742,10 @@ fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
 // ── Chat Transcript Handler ──────────────────────────────────────────
 
 fn handleGetChatTranscript(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
-    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
-    } orelse {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    _ = switch (lookupStepInRun(ctx, run_id, step_id)) {
+        .ok => |s| s,
+        .err => |resp| return resp,
     };
-    if (!std.mem.eql(u8, step.run_id, run_id)) {
-        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
-    }
 
     const messages = ctx.store.getChatMessages(ctx.allocator, step_id) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get chat messages\"}}");
@@ -847,6 +828,23 @@ fn validationErrorResponse(err: workflow_validation.ValidateError) HttpResponse 
         error.GroupChatParticipantsRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"group_chat step requires 'participants' field\"}}"),
         error.OutOfMemory => jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}"),
     };
+}
+
+const StepLookup = union(enum) {
+    ok: types.StepRow,
+    err: HttpResponse,
+};
+
+fn lookupStepInRun(ctx: *Context, run_id: []const u8, step_id: []const u8) StepLookup {
+    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
+        return .{ .err = jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}") };
+    } orelse {
+        return .{ .err = jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}") };
+    };
+    if (!std.mem.eql(u8, step.run_id, run_id)) {
+        return .{ .err = jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}") };
+    }
+    return .{ .ok = step };
 }
 
 fn lookupGenId(def_ids: []const []const u8, gen_ids: []const []const u8, target: []const u8) ?[]const u8 {
