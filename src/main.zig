@@ -174,4 +174,5 @@ comptime {
     _ = @import("config.zig");
     _ = @import("engine.zig");
     _ = @import("callbacks.zig");
+    _ = @import("workflow_validation.zig");
 }

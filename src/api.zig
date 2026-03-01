@@ -1,6 +1,7 @@
 const std = @import("std");
 const Store = @import("store.zig").Store;
 const ids = @import("ids.zig");
+const workflow_validation = @import("workflow_validation.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -259,77 +260,9 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"steps array must not be empty\"}}");
     }
 
-    // Validate steps before creating DB records.
-    var step_defs = std.StringHashMap(void).init(ctx.allocator);
-    for (steps_array) |step_val| {
-        if (step_val != .object) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"each step must be an object\"}}");
-        }
-        const step_obj = step_val.object;
-
-        const def_step_id = getJsonString(step_obj, "id") orelse {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"each step must have string field 'id'\"}}");
-        };
-        if (def_step_id.len == 0) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"step id must not be empty\"}}");
-        }
-        if (step_defs.contains(def_step_id)) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"duplicate step id\"}}");
-        }
-        step_defs.put(def_step_id, {}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
-        const step_type = getJsonString(step_obj, "type") orelse "task";
-
-        // Validate required fields for advanced step types
-        if (std.mem.eql(u8, step_type, "loop") and step_obj.get("body") == null) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}");
-        }
-        if (std.mem.eql(u8, step_type, "sub_workflow") and step_obj.get("workflow") == null) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}");
-        }
-        if (std.mem.eql(u8, step_type, "wait")) {
-            if (step_obj.get("duration_ms") == null and step_obj.get("until_ms") == null and step_obj.get("signal") == null) {
-                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait step requires 'duration_ms', 'until_ms', or 'signal'\"}}");
-            }
-        }
-        if (std.mem.eql(u8, step_type, "router") and step_obj.get("routes") == null) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"router step requires 'routes' field\"}}");
-        }
-        if (std.mem.eql(u8, step_type, "saga") and step_obj.get("body") == null) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"saga step requires 'body' field\"}}");
-        }
-        if (std.mem.eql(u8, step_type, "debate")) {
-            if (step_obj.get("count") == null) {
-                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"debate step requires 'count' field\"}}");
-            }
-        }
-        if (std.mem.eql(u8, step_type, "group_chat")) {
-            if (step_obj.get("participants") == null) {
-                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"group_chat step requires 'participants' field\"}}");
-            }
-        }
-
-        if (step_obj.get("depends_on")) |deps_val| {
-            if (deps_val != .array) {
-                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on must be an array\"}}");
-            }
-            for (deps_val.array.items) |dep_item| {
-                if (dep_item != .string) {
-                    return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on items must be strings\"}}");
-                }
-            }
-        }
-    }
-
-    for (steps_array) |step_val| {
-        const step_obj = step_val.object;
-        const deps_val = step_obj.get("depends_on") orelse continue;
-        for (deps_val.array.items) |dep_item| {
-            if (!step_defs.contains(dep_item.string)) {
-                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on references unknown step id\"}}");
-            }
-        }
-    }
+    workflow_validation.validateStepsForCreateRun(ctx.allocator, steps_array) catch |err| {
+        return validationErrorResponse(err);
+    };
 
     // Serialize input and callbacks back to JSON for storage
     const input_json = serializeJsonValue(ctx.allocator, obj.get("input")) catch {
@@ -894,6 +827,26 @@ fn serializeJsonValue(allocator: std.mem.Allocator, val: ?std.json.Value) ![]con
 
 fn jsonQuoted(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     return std.json.Stringify.valueAlloc(allocator, value, .{});
+}
+
+fn validationErrorResponse(err: workflow_validation.ValidateError) HttpResponse {
+    return switch (err) {
+        error.StepMustBeObject => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"each step must be an object\"}}"),
+        error.StepIdMissingOrNotString => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"each step must have string field 'id'\"}}"),
+        error.StepIdEmpty => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"step id must not be empty\"}}"),
+        error.StepIdDuplicate => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"duplicate step id\"}}"),
+        error.DependsOnNotArray => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on must be an array\"}}"),
+        error.DependsOnItemNotString => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on items must be strings\"}}"),
+        error.DependsOnUnknownStepId => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on references unknown step id\"}}"),
+        error.LoopBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}"),
+        error.SubWorkflowRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}"),
+        error.WaitConditionRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait step requires 'duration_ms', 'until_ms', or 'signal'\"}}"),
+        error.RouterRoutesRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"router step requires 'routes' field\"}}"),
+        error.SagaBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"saga step requires 'body' field\"}}"),
+        error.DebateCountRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"debate step requires 'count' field\"}}"),
+        error.GroupChatParticipantsRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"group_chat step requires 'participants' field\"}}"),
+        error.OutOfMemory => jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}"),
+    };
 }
 
 fn lookupGenId(def_ids: []const []const u8, gen_ids: []const []const u8, target: []const u8) ?[]const u8 {
