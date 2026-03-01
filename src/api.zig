@@ -73,17 +73,17 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
     }
 
     // POST /runs/{id}/steps/{step_id}/approve
-    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "approve")) {
+    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "approve") and seg5 == null) {
         return handleApproveStep(ctx, seg1.?, seg3.?);
     }
 
     // POST /runs/{id}/steps/{step_id}/reject
-    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "reject")) {
+    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "reject") and seg5 == null) {
         return handleRejectStep(ctx, seg1.?, seg3.?);
     }
 
     // POST /runs/{id}/steps/{step_id}/signal
-    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "signal")) {
+    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "signal") and seg5 == null) {
         return handleSignalStep(ctx, seg1.?, seg3.?, body);
     }
 
@@ -218,6 +218,14 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
 
     // Extract tags as JSON string
     const tags_json = if (obj.get("tags")) |tags_val| blk: {
+        if (tags_val != .array) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"tags must be an array of strings\"}}");
+        }
+        for (tags_val.array.items) |tag_item| {
+            if (tag_item != .string) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"tags must be an array of strings\"}}");
+            }
+        }
         var out: std.io.Writer.Allocating = .init(ctx.allocator);
         var jw: std.json.Stringify = .{ .writer = &out.writer };
         jw.write(tags_val) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize tags\"}}");
@@ -226,8 +234,13 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
 
     // Extract max_concurrent
     const max_concurrent: i64 = if (obj.get("max_concurrent")) |mc| blk: {
-        if (mc == .integer) break :blk mc.integer;
-        break :blk 1;
+        if (mc != .integer) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"max_concurrent must be a positive integer\"}}");
+        }
+        if (mc.integer < 1) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"max_concurrent must be >= 1\"}}");
+        }
+        break :blk mc.integer;
     } else 1;
 
     ctx.store.insertWorker(worker_id, url, token, protocol, model, tags_json, max_concurrent, "registered") catch {
@@ -1089,4 +1102,88 @@ test "API: chat transcript escapes message content" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
     const msg = parsed.value.array.items[0].object.get("message").?;
     try std.testing.expectEqualStrings("He said \"go\"\\nline", msg.string);
+}
+
+test "API: register worker rejects non-array tags" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"id":"w1","url":"http://localhost:3000","tags":"coder"}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/workers", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: register worker rejects non-string tags items" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"id":"w1","url":"http://localhost:3000","tags":["ok",123]}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/workers", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: register worker rejects non-positive max_concurrent" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"id":"w1","url":"http://localhost:3000","max_concurrent":0}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/workers", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: approve route does not match extra path segment" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    try store.insertRun("r1", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertStep("s1", "r1", "approve-1", "approval", "waiting_approval", "{}", 1, null, null, null);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const resp = handleRequest(&ctx, "POST", "/runs/r1/steps/s1/approve/extra", "");
+    try std.testing.expectEqual(@as(u16, 404), resp.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "endpoint not found") != null);
+
+    const step = (try store.getStep(arena.allocator(), "s1")).?;
+    try std.testing.expectEqualStrings("waiting_approval", step.status);
 }
