@@ -154,6 +154,10 @@ BINARY="$PROJECT_DIR/zig-out/bin/nullboiler"
 PORT=$((10000 + RANDOM % 50000))
 DB_FILE=$(mktemp /tmp/nullboiler_test_XXXXXX.db)
 SERVER_PID=""
+MOCK_WORKER1_PID=""
+MOCK_WORKER2_PID=""
+WORKER1_LOG=""
+WORKER2_LOG=""
 BASE_URL="http://127.0.0.1:$PORT"
 
 # Pre-initialise variables that later tests depend on so that set -u never
@@ -165,11 +169,21 @@ RUN2_ID=""
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 cleanup() {
+    if [ -n "$MOCK_WORKER1_PID" ]; then
+        kill "$MOCK_WORKER1_PID" 2>/dev/null || true
+        wait "$MOCK_WORKER1_PID" 2>/dev/null || true
+    fi
+    if [ -n "$MOCK_WORKER2_PID" ]; then
+        kill "$MOCK_WORKER2_PID" 2>/dev/null || true
+        wait "$MOCK_WORKER2_PID" 2>/dev/null || true
+    fi
     if [ -n "$SERVER_PID" ]; then
         kill "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
     fi
     rm -f "$DB_FILE" "${DB_FILE}-shm" "${DB_FILE}-wal" "${DB_FILE}-journal"
+    if [ -n "$WORKER1_LOG" ]; then rm -f "$WORKER1_LOG"; fi
+    if [ -n "$WORKER2_LOG" ]; then rm -f "$WORKER2_LOG"; fi
 }
 
 trap cleanup EXIT
@@ -775,6 +789,212 @@ if [ -n "$RUN2_ID" ]; then
 else
     skip "Multi-step run step count" "no run ID from creation"
 fi
+
+# =============================================================================
+
+echo ""
+printf '%b── Workflow Demo (with mock workers) ─────%b\n\n' "$BOLD" "$RESET"
+
+# Check if python3 is available; skip this section if not.
+if ! command -v python3 &>/dev/null; then
+    skip "Simple task workflow completes" "python3 not found"
+    skip "Simple task step has output" "python3 not found"
+    skip "Sequential workflow completes" "python3 not found"
+    skip "Sequential workflow: both steps completed" "python3 not found"
+else
+
+    # ── Start mock workers ──────────────────────────────────────────────
+    WORKER1_PORT=$((10000 + RANDOM % 50000))
+    WORKER2_PORT=$((10000 + RANDOM % 50000))
+
+    # Ensure ports differ from server and from each other
+    while [ "$WORKER1_PORT" = "$PORT" ]; do
+        WORKER1_PORT=$((10000 + RANDOM % 50000))
+    done
+    while [ "$WORKER2_PORT" = "$PORT" ] || [ "$WORKER2_PORT" = "$WORKER1_PORT" ]; do
+        WORKER2_PORT=$((10000 + RANDOM % 50000))
+    done
+
+    WORKER1_LOG=$(mktemp /tmp/nullboiler_worker1_XXXXXX.log)
+    WORKER2_LOG=$(mktemp /tmp/nullboiler_worker2_XXXXXX.log)
+    python3 "$PROJECT_DIR/tests/mock_worker.py" "$WORKER1_PORT" >"$WORKER1_LOG" 2>&1 &
+    MOCK_WORKER1_PID=$!
+    python3 "$PROJECT_DIR/tests/mock_worker.py" "$WORKER2_PORT" >"$WORKER2_LOG" 2>&1 &
+    MOCK_WORKER2_PID=$!
+
+    # Wait for mock workers to be ready (simple retry loop)
+    WORKERS_READY=0
+    for _i in $(seq 1 20); do
+        if curl -s -o /dev/null "http://127.0.0.1:$WORKER1_PORT/" 2>/dev/null &&
+           curl -s -o /dev/null "http://127.0.0.1:$WORKER2_PORT/" 2>/dev/null; then
+            WORKERS_READY=1
+            break
+        fi
+        sleep 0.2
+    done
+
+    if [ "$WORKERS_READY" -ne 1 ]; then
+        printf '        %bMock worker 1 log:%b\n' "$YELLOW" "$RESET"
+        sed 's/^/        /' "$WORKER1_LOG" 2>/dev/null || true
+        printf '        %bMock worker 2 log:%b\n' "$YELLOW" "$RESET"
+        sed 's/^/        /' "$WORKER2_LOG" 2>/dev/null || true
+        skip "Simple task workflow completes" "mock workers did not start"
+        skip "Simple task step has output" "mock workers did not start"
+        skip "Sequential workflow completes" "mock workers did not start"
+        skip "Sequential workflow: both steps completed" "mock workers did not start"
+    else
+
+        # Track demo-specific failures for summary banner
+        DEMO_FAIL_COUNT=0
+
+        # ── Register workers ────────────────────────────────────────────
+        RESP=$(safe_curl -X POST "$BASE_URL/workers" \
+            -H "Content-Type: application/json" \
+            -d "{\"id\":\"mock-researcher\",\"url\":\"http://127.0.0.1:$WORKER1_PORT\",\"token\":\"test-tok\",\"tags\":[\"researcher\",\"writer\"],\"max_concurrent\":3}")
+        parse_resp "$RESP"
+        WORKER_REG_OK=1
+        if [ "$HTTP_CODE" != "201" ]; then
+            WORKER_REG_OK=0
+        fi
+
+        RESP=$(safe_curl -X POST "$BASE_URL/workers" \
+            -H "Content-Type: application/json" \
+            -d "{\"id\":\"mock-writer\",\"url\":\"http://127.0.0.1:$WORKER2_PORT\",\"token\":\"test-tok\",\"tags\":[\"writer\"],\"max_concurrent\":2}")
+        parse_resp "$RESP"
+        if [ "$HTTP_CODE" != "201" ]; then
+            WORKER_REG_OK=0
+        fi
+
+        if [ "$WORKER_REG_OK" -ne 1 ]; then
+            skip "Simple task workflow completes" "worker registration failed"
+            skip "Simple task step has output" "worker registration failed"
+            skip "Sequential workflow completes" "worker registration failed"
+            skip "Sequential workflow: both steps completed" "worker registration failed"
+            DEMO_FAIL_COUNT=1
+        else
+
+        # ── Test: Simple task workflow ──────────────────────────────────
+
+        RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+            -H "Content-Type: application/json" \
+            -d '{"steps":[{"id":"greet","type":"task","worker_tags":["researcher"],"prompt_template":"Hello {{input.name}}"}],"input":{"name":"NullBoiler"}}')
+        parse_resp "$RESP"
+
+        DEMO_RUN_ID=""
+        if [ "$HTTP_CODE" = "201" ]; then
+            DEMO_RUN_ID=$(json_field "$BODY" "id")
+        fi
+
+        if [ -z "$DEMO_RUN_ID" ]; then
+            fail "Simple task workflow completes" "failed to create run"
+            skip "Simple task step has output" "run creation failed"
+            DEMO_FAIL_COUNT=$((DEMO_FAIL_COUNT + 1))
+        else
+            # Poll until run completes or timeout (~15s)
+            DEMO_RUN_STATUS=""
+            for _i in $(seq 1 30); do
+                RESP=$(safe_curl "$BASE_URL/runs/$DEMO_RUN_ID")
+                parse_resp "$RESP"
+                if [ "$HTTP_CODE" = "200" ]; then
+                    DEMO_RUN_STATUS=$(json_field "$BODY" "status")
+                    if [ "$DEMO_RUN_STATUS" = "completed" ] || [ "$DEMO_RUN_STATUS" = "failed" ]; then
+                        break
+                    fi
+                fi
+                sleep 0.5
+            done
+
+            if [ "$DEMO_RUN_STATUS" = "completed" ]; then
+                pass "Simple task workflow completes"
+            else
+                fail "Simple task workflow completes" "expected status 'completed', got '$DEMO_RUN_STATUS'"
+                DEMO_FAIL_COUNT=$((DEMO_FAIL_COUNT + 1))
+            fi
+
+            # Verify step output contains "Mock response"
+            RESP=$(safe_curl "$BASE_URL/runs/$DEMO_RUN_ID/steps")
+            parse_resp "$RESP"
+            if [ "$HTTP_CODE" = "200" ] && printf '%s' "$BODY" | grep -q "Mock response"; then
+                pass "Simple task step has output"
+            else
+                fail "Simple task step has output" "expected output containing 'Mock response'"
+                DEMO_FAIL_COUNT=$((DEMO_FAIL_COUNT + 1))
+            fi
+        fi
+
+        # ── Test: Sequential (2-step) workflow ──────────────────────────
+
+        RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+            -H "Content-Type: application/json" \
+            -d '{"steps":[{"id":"research","type":"task","worker_tags":["researcher"],"prompt_template":"Research {{input.topic}}"},{"id":"write","type":"task","depends_on":["research"],"worker_tags":["writer"],"prompt_template":"Write about: {{steps.research.output}}"}],"input":{"topic":"DAG engines"}}')
+        parse_resp "$RESP"
+
+        SEQ_RUN_ID=""
+        if [ "$HTTP_CODE" = "201" ]; then
+            SEQ_RUN_ID=$(json_field "$BODY" "id")
+        fi
+
+        if [ -z "$SEQ_RUN_ID" ]; then
+            fail "Sequential workflow completes" "failed to create run"
+            skip "Sequential workflow: both steps completed" "run creation failed"
+            DEMO_FAIL_COUNT=$((DEMO_FAIL_COUNT + 1))
+        else
+            # Poll until run completes or timeout (~15s)
+            SEQ_RUN_STATUS=""
+            for _i in $(seq 1 30); do
+                RESP=$(safe_curl "$BASE_URL/runs/$SEQ_RUN_ID")
+                parse_resp "$RESP"
+                if [ "$HTTP_CODE" = "200" ]; then
+                    SEQ_RUN_STATUS=$(json_field "$BODY" "status")
+                    if [ "$SEQ_RUN_STATUS" = "completed" ] || [ "$SEQ_RUN_STATUS" = "failed" ]; then
+                        break
+                    fi
+                fi
+                sleep 0.5
+            done
+
+            if [ "$SEQ_RUN_STATUS" = "completed" ]; then
+                pass "Sequential workflow completes"
+            else
+                fail "Sequential workflow completes" "expected status 'completed', got '$SEQ_RUN_STATUS'"
+                DEMO_FAIL_COUNT=$((DEMO_FAIL_COUNT + 1))
+            fi
+
+            # Verify both steps completed
+            RESP=$(safe_curl "$BASE_URL/runs/$SEQ_RUN_ID/steps")
+            parse_resp "$RESP"
+            if [ "$HTTP_CODE" = "200" ]; then
+                if command -v jq &>/dev/null; then
+                    COMPLETED_COUNT=$(printf '%s' "$BODY" | jq '[.[] | select(.status=="completed")] | length' 2>/dev/null)
+                else
+                    COMPLETED_COUNT=$(printf '%s' "$BODY" | grep -o '"status":"completed"' | wc -l | tr -d ' ')
+                fi
+                if [ "$COMPLETED_COUNT" = "2" ]; then
+                    pass "Sequential workflow: both steps completed"
+                else
+                    fail "Sequential workflow: both steps completed" "expected 2 completed steps, got $COMPLETED_COUNT"
+                    DEMO_FAIL_COUNT=$((DEMO_FAIL_COUNT + 1))
+                fi
+            else
+                fail "Sequential workflow: both steps completed" "failed to fetch steps (HTTP $HTTP_CODE)"
+                DEMO_FAIL_COUNT=$((DEMO_FAIL_COUNT + 1))
+            fi
+        fi
+
+        # ── Cleanup: unregister demo workers ────────────────────────────
+        safe_curl -X DELETE "$BASE_URL/workers/mock-researcher" >/dev/null
+        safe_curl -X DELETE "$BASE_URL/workers/mock-writer" >/dev/null
+
+        fi  # WORKER_REG_OK guard
+
+        # ── Workflow demo summary banner ────────────────────────────────
+        if [ "$DEMO_FAIL_COUNT" -eq 0 ]; then
+            printf '\n  %b%bWORKFLOW DEMO: PASSED%b\n' "$GREEN" "$BOLD" "$RESET"
+        fi
+
+    fi  # WORKERS_READY guard
+
+fi  # python3 guard
 
 # =============================================================================
 # Summary
