@@ -9,6 +9,49 @@ pub const c = @cImport({
 
 pub const SQLITE_STATIC: c.sqlite3_destructor_type = null;
 
+// ── Helpers ───────────────────────────────────────────────────────────
+
+fn allocStr(allocator: std.mem.Allocator, stmt: ?*c.sqlite3_stmt, col: c_int) ![]const u8 {
+    const ptr = c.sqlite3_column_text(stmt, col);
+    if (ptr == null) return "";
+    const len: usize = @intCast(c.sqlite3_column_bytes(stmt, col));
+    const copy = try allocator.alloc(u8, len);
+    @memcpy(copy, ptr[0..len]);
+    return copy;
+}
+
+fn allocStrOpt(allocator: std.mem.Allocator, stmt: ?*c.sqlite3_stmt, col: c_int) !?[]const u8 {
+    if (c.sqlite3_column_type(stmt, col) == c.SQLITE_NULL) return null;
+    return try allocStr(allocator, stmt, col);
+}
+
+fn colInt(stmt: ?*c.sqlite3_stmt, col: c_int) i64 {
+    return c.sqlite3_column_int64(stmt, col);
+}
+
+fn colIntOpt(stmt: ?*c.sqlite3_stmt, col: c_int) ?i64 {
+    if (c.sqlite3_column_type(stmt, col) == c.SQLITE_NULL) return null;
+    return c.sqlite3_column_int64(stmt, col);
+}
+
+fn bindTextOpt(stmt: ?*c.sqlite3_stmt, col: c_int, val: ?[]const u8) void {
+    if (val) |v| {
+        _ = c.sqlite3_bind_text(stmt, col, v.ptr, @intCast(v.len), SQLITE_STATIC);
+    } else {
+        _ = c.sqlite3_bind_null(stmt, col);
+    }
+}
+
+fn bindIntOpt(stmt: ?*c.sqlite3_stmt, col: c_int, val: ?i64) void {
+    if (val) |v| {
+        _ = c.sqlite3_bind_int64(stmt, col, v);
+    } else {
+        _ = c.sqlite3_bind_null(stmt, col);
+    }
+}
+
+// ── Store ─────────────────────────────────────────────────────────────
+
 pub const Store = struct {
     db: ?*c.sqlite3,
     allocator: std.mem.Allocator,
@@ -75,4 +118,883 @@ pub const Store = struct {
             return error.MigrationFailed;
         }
     }
+
+    // ── Worker CRUD ───────────────────────────────────────────────────
+
+    pub fn insertWorker(self: *Self, id: []const u8, url: []const u8, token: []const u8, tags_json: []const u8, max_concurrent: i64, source: []const u8) !void {
+        const sql = "INSERT INTO workers (id, url, token, tags_json, max_concurrent, source, status, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, 'active', ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, url.ptr, @intCast(url.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, token.ptr, @intCast(token.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, tags_json.ptr, @intCast(tags_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 5, max_concurrent);
+        _ = c.sqlite3_bind_text(stmt, 6, source.ptr, @intCast(source.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 7, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn listWorkers(self: *Self, allocator: std.mem.Allocator) ![]types.WorkerRow {
+        const sql = "SELECT id, url, token, tags_json, max_concurrent, source, status, last_health_ms, created_at_ms FROM workers ORDER BY created_at_ms DESC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var list: std.ArrayListUnmanaged(types.WorkerRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, .{
+                .id = try allocStr(allocator, stmt, 0),
+                .url = try allocStr(allocator, stmt, 1),
+                .token = try allocStr(allocator, stmt, 2),
+                .tags_json = try allocStr(allocator, stmt, 3),
+                .max_concurrent = colInt(stmt, 4),
+                .source = try allocStr(allocator, stmt, 5),
+                .status = try allocStr(allocator, stmt, 6),
+                .last_health_ms = colIntOpt(stmt, 7),
+                .created_at_ms = colInt(stmt, 8),
+            });
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    pub fn getWorker(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.WorkerRow {
+        const sql = "SELECT id, url, token, tags_json, max_concurrent, source, status, last_health_ms, created_at_ms FROM workers WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return types.WorkerRow{
+            .id = try allocStr(allocator, stmt, 0),
+            .url = try allocStr(allocator, stmt, 1),
+            .token = try allocStr(allocator, stmt, 2),
+            .tags_json = try allocStr(allocator, stmt, 3),
+            .max_concurrent = colInt(stmt, 4),
+            .source = try allocStr(allocator, stmt, 5),
+            .status = try allocStr(allocator, stmt, 6),
+            .last_health_ms = colIntOpt(stmt, 7),
+            .created_at_ms = colInt(stmt, 8),
+        };
+    }
+
+    pub fn deleteWorker(self: *Self, id: []const u8) !void {
+        const sql = "DELETE FROM workers WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn updateWorkerStatus(self: *Self, id: []const u8, status: []const u8, health_ms: i64) !void {
+        const sql = "UPDATE workers SET status = ?, last_health_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, health_ms);
+        _ = c.sqlite3_bind_text(stmt, 3, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn deleteWorkersBySource(self: *Self, source: []const u8) !void {
+        const sql = "DELETE FROM workers WHERE source = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, source.ptr, @intCast(source.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    // ── Run CRUD ──────────────────────────────────────────────────────
+
+    pub fn insertRun(self: *Self, id: []const u8, status: []const u8, workflow_json: []const u8, input_json: []const u8, callbacks_json: []const u8) !void {
+        const sql = "INSERT INTO runs (id, status, workflow_json, input_json, callbacks_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        const now = ids.nowMs();
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, workflow_json.ptr, @intCast(workflow_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, input_json.ptr, @intCast(input_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 5, callbacks_json.ptr, @intCast(callbacks_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 6, now);
+        _ = c.sqlite3_bind_int64(stmt, 7, now);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getRun(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.RunRow {
+        const sql = "SELECT id, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return types.RunRow{
+            .id = try allocStr(allocator, stmt, 0),
+            .status = try allocStr(allocator, stmt, 1),
+            .workflow_json = try allocStr(allocator, stmt, 2),
+            .input_json = try allocStr(allocator, stmt, 3),
+            .callbacks_json = try allocStr(allocator, stmt, 4),
+            .error_text = try allocStrOpt(allocator, stmt, 5),
+            .created_at_ms = colInt(stmt, 6),
+            .updated_at_ms = colInt(stmt, 7),
+            .started_at_ms = colIntOpt(stmt, 8),
+            .ended_at_ms = colIntOpt(stmt, 9),
+        };
+    }
+
+    pub fn listRuns(self: *Self, allocator: std.mem.Allocator, status_filter: ?[]const u8, limit: i64) ![]types.RunRow {
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (status_filter != null) {
+            const sql = "SELECT id, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status = ? ORDER BY created_at_ms DESC LIMIT ?";
+            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+                return error.SqlitePrepareFailed;
+            }
+            _ = c.sqlite3_bind_text(stmt, 1, status_filter.?.ptr, @intCast(status_filter.?.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_int64(stmt, 2, limit);
+        } else {
+            const sql = "SELECT id, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs ORDER BY created_at_ms DESC LIMIT ?";
+            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+                return error.SqlitePrepareFailed;
+            }
+            _ = c.sqlite3_bind_int64(stmt, 1, limit);
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var list: std.ArrayListUnmanaged(types.RunRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, .{
+                .id = try allocStr(allocator, stmt, 0),
+                .status = try allocStr(allocator, stmt, 1),
+                .workflow_json = try allocStr(allocator, stmt, 2),
+                .input_json = try allocStr(allocator, stmt, 3),
+                .callbacks_json = try allocStr(allocator, stmt, 4),
+                .error_text = try allocStrOpt(allocator, stmt, 5),
+                .created_at_ms = colInt(stmt, 6),
+                .updated_at_ms = colInt(stmt, 7),
+                .started_at_ms = colIntOpt(stmt, 8),
+                .ended_at_ms = colIntOpt(stmt, 9),
+            });
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    pub fn updateRunStatus(self: *Self, id: []const u8, status: []const u8, error_text: ?[]const u8) !void {
+        const sql = "UPDATE runs SET status = ?, error_text = ?, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 2, error_text);
+        _ = c.sqlite3_bind_int64(stmt, 3, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 4, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getActiveRuns(self: *Self, allocator: std.mem.Allocator) ![]types.RunRow {
+        const sql = "SELECT id, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status IN ('running', 'paused') ORDER BY created_at_ms DESC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var list: std.ArrayListUnmanaged(types.RunRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, .{
+                .id = try allocStr(allocator, stmt, 0),
+                .status = try allocStr(allocator, stmt, 1),
+                .workflow_json = try allocStr(allocator, stmt, 2),
+                .input_json = try allocStr(allocator, stmt, 3),
+                .callbacks_json = try allocStr(allocator, stmt, 4),
+                .error_text = try allocStrOpt(allocator, stmt, 5),
+                .created_at_ms = colInt(stmt, 6),
+                .updated_at_ms = colInt(stmt, 7),
+                .started_at_ms = colIntOpt(stmt, 8),
+                .ended_at_ms = colIntOpt(stmt, 9),
+            });
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    // ── Step CRUD ─────────────────────────────────────────────────────
+
+    pub fn insertStep(self: *Self, id: []const u8, run_id: []const u8, def_step_id: []const u8, step_type: []const u8, status: []const u8, input_json: []const u8, max_attempts: i64, timeout_ms: ?i64, parent_step_id: ?[]const u8, item_index: ?i64) !void {
+        const sql = "INSERT INTO steps (id, run_id, def_step_id, type, status, input_json, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        const now = ids.nowMs();
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, def_step_id.ptr, @intCast(def_step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, step_type.ptr, @intCast(step_type.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 5, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 6, input_json.ptr, @intCast(input_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 7, max_attempts);
+        bindIntOpt(stmt, 8, timeout_ms);
+        bindTextOpt(stmt, 9, parent_step_id);
+        bindIntOpt(stmt, 10, item_index);
+        _ = c.sqlite3_bind_int64(stmt, 11, now);
+        _ = c.sqlite3_bind_int64(stmt, 12, now);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn insertStepDep(self: *Self, step_id: []const u8, depends_on: []const u8) !void {
+        const sql = "INSERT INTO step_deps (step_id, depends_on) VALUES (?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, depends_on.ptr, @intCast(depends_on.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getStepsByRun(self: *Self, allocator: std.mem.Allocator, run_id: []const u8) ![]types.StepRow {
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM steps WHERE run_id = ? ORDER BY created_at_ms ASC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.StepRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, try readStepRow(allocator, stmt));
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    pub fn getStep(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.StepRow {
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM steps WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return try readStepRow(allocator, stmt);
+    }
+
+    pub fn updateStepStatus(self: *Self, id: []const u8, status: []const u8, worker_id: ?[]const u8, output_json: ?[]const u8, error_text: ?[]const u8, attempt: i64) !void {
+        const sql = "UPDATE steps SET status = ?, worker_id = ?, output_json = ?, error_text = ?, attempt = ?, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 2, worker_id);
+        bindTextOpt(stmt, 3, output_json);
+        bindTextOpt(stmt, 4, error_text);
+        _ = c.sqlite3_bind_int64(stmt, 5, attempt);
+        _ = c.sqlite3_bind_int64(stmt, 6, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 7, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getReadySteps(self: *Self, allocator: std.mem.Allocator, run_id: []const u8) ![]types.StepRow {
+        const sql =
+            "SELECT s.id, s.run_id, s.def_step_id, s.type, s.status, s.worker_id, s.input_json, s.output_json, s.error_text, s.attempt, s.max_attempts, s.timeout_ms, s.parent_step_id, s.item_index, s.created_at_ms, s.updated_at_ms, s.started_at_ms, s.ended_at_ms " ++
+            "FROM steps s WHERE s.run_id = ? AND s.status = 'ready' " ++
+            "AND NOT EXISTS (" ++
+            "SELECT 1 FROM step_deps d JOIN steps dep ON dep.id = d.depends_on " ++
+            "WHERE d.step_id = s.id AND dep.status NOT IN ('completed', 'skipped'))";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.StepRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, try readStepRow(allocator, stmt));
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    pub fn countStepsByStatus(self: *Self, run_id: []const u8, status: []const u8) !i64 {
+        const sql = "SELECT COUNT(*) FROM steps WHERE run_id = ? AND status = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, status.ptr, @intCast(status.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return 0;
+        return colInt(stmt, 0);
+    }
+
+    pub fn getChildSteps(self: *Self, allocator: std.mem.Allocator, parent_step_id: []const u8) ![]types.StepRow {
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM steps WHERE parent_step_id = ? ORDER BY item_index ASC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, parent_step_id.ptr, @intCast(parent_step_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.StepRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, try readStepRow(allocator, stmt));
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    fn readStepRow(allocator: std.mem.Allocator, stmt: ?*c.sqlite3_stmt) !types.StepRow {
+        return types.StepRow{
+            .id = try allocStr(allocator, stmt, 0),
+            .run_id = try allocStr(allocator, stmt, 1),
+            .def_step_id = try allocStr(allocator, stmt, 2),
+            .type = try allocStr(allocator, stmt, 3),
+            .status = try allocStr(allocator, stmt, 4),
+            .worker_id = try allocStrOpt(allocator, stmt, 5),
+            .input_json = try allocStr(allocator, stmt, 6),
+            .output_json = try allocStrOpt(allocator, stmt, 7),
+            .error_text = try allocStrOpt(allocator, stmt, 8),
+            .attempt = colInt(stmt, 9),
+            .max_attempts = colInt(stmt, 10),
+            .timeout_ms = colIntOpt(stmt, 11),
+            .parent_step_id = try allocStrOpt(allocator, stmt, 12),
+            .item_index = colIntOpt(stmt, 13),
+            .created_at_ms = colInt(stmt, 14),
+            .updated_at_ms = colInt(stmt, 15),
+            .started_at_ms = colIntOpt(stmt, 16),
+            .ended_at_ms = colIntOpt(stmt, 17),
+        };
+    }
+
+    // ── Event CRUD ────────────────────────────────────────────────────
+
+    pub fn insertEvent(self: *Self, run_id: []const u8, step_id: ?[]const u8, kind: []const u8, data_json: []const u8) !void {
+        const sql = "INSERT INTO events (run_id, step_id, kind, data_json, ts_ms) VALUES (?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 2, step_id);
+        _ = c.sqlite3_bind_text(stmt, 3, kind.ptr, @intCast(kind.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, data_json.ptr, @intCast(data_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 5, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getEventsByRun(self: *Self, allocator: std.mem.Allocator, run_id: []const u8) ![]types.EventRow {
+        const sql = "SELECT id, run_id, step_id, kind, data_json, ts_ms FROM events WHERE run_id = ? ORDER BY id ASC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.EventRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, .{
+                .id = colInt(stmt, 0),
+                .run_id = try allocStr(allocator, stmt, 1),
+                .step_id = try allocStrOpt(allocator, stmt, 2),
+                .kind = try allocStr(allocator, stmt, 3),
+                .data_json = try allocStr(allocator, stmt, 4),
+                .ts_ms = colInt(stmt, 5),
+            });
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    // ── Artifact CRUD ─────────────────────────────────────────────────
+
+    pub fn insertArtifact(self: *Self, id: []const u8, run_id: []const u8, step_id: ?[]const u8, kind: []const u8, uri: []const u8, meta_json: []const u8) !void {
+        const sql = "INSERT INTO artifacts (id, run_id, step_id, kind, uri, meta_json, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 3, step_id);
+        _ = c.sqlite3_bind_text(stmt, 4, kind.ptr, @intCast(kind.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 5, uri.ptr, @intCast(uri.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 6, meta_json.ptr, @intCast(meta_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 7, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getArtifactsByRun(self: *Self, allocator: std.mem.Allocator, run_id: []const u8) ![]types.ArtifactRow {
+        const sql = "SELECT id, run_id, step_id, kind, uri, meta_json, created_at_ms FROM artifacts WHERE run_id = ? ORDER BY created_at_ms ASC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.ArtifactRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, .{
+                .id = try allocStr(allocator, stmt, 0),
+                .run_id = try allocStr(allocator, stmt, 1),
+                .step_id = try allocStrOpt(allocator, stmt, 2),
+                .kind = try allocStr(allocator, stmt, 3),
+                .uri = try allocStr(allocator, stmt, 4),
+                .meta_json = try allocStr(allocator, stmt, 5),
+                .created_at_ms = colInt(stmt, 6),
+            });
+        }
+        return list.toOwnedSlice(allocator);
+    }
 };
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+test "Store: init and deinit" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+}
+
+test "Store: insert and get worker" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "[\"coder\"]", 3, "config");
+    const w = (try s.getWorker(allocator, "w1")).?;
+    defer allocator.free(w.id);
+    defer allocator.free(w.url);
+    defer allocator.free(w.token);
+    defer allocator.free(w.tags_json);
+    defer allocator.free(w.source);
+    defer allocator.free(w.status);
+    try std.testing.expectEqualStrings("w1", w.id);
+    try std.testing.expectEqualStrings("http://localhost:3001", w.url);
+    try std.testing.expectEqual(@as(i64, 3), w.max_concurrent);
+}
+
+test "Store: insert and list workers" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
+    try s.insertWorker("w2", "http://localhost:3002", "tok", "[]", 2, "registered");
+    const workers = try s.listWorkers(allocator);
+    defer {
+        for (workers) |w| {
+            allocator.free(w.id);
+            allocator.free(w.url);
+            allocator.free(w.token);
+            allocator.free(w.tags_json);
+            allocator.free(w.source);
+            allocator.free(w.status);
+        }
+        allocator.free(workers);
+    }
+    try std.testing.expectEqual(@as(usize, 2), workers.len);
+}
+
+test "Store: delete worker" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
+    try s.deleteWorker("w1");
+    const w = try s.getWorker(allocator, "w1");
+    try std.testing.expect(w == null);
+}
+
+test "Store: update worker status" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
+    try s.updateWorkerStatus("w1", "draining", 12345);
+    const w = (try s.getWorker(allocator, "w1")).?;
+    defer allocator.free(w.id);
+    defer allocator.free(w.url);
+    defer allocator.free(w.token);
+    defer allocator.free(w.tags_json);
+    defer allocator.free(w.source);
+    defer allocator.free(w.status);
+    try std.testing.expectEqualStrings("draining", w.status);
+    try std.testing.expectEqual(@as(i64, 12345), w.last_health_ms.?);
+}
+
+test "Store: delete workers by source" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
+    try s.insertWorker("w2", "http://localhost:3002", "tok", "[]", 1, "config");
+    try s.insertWorker("w3", "http://localhost:3003", "tok", "[]", 1, "registered");
+    try s.deleteWorkersBySource("config");
+    const workers = try s.listWorkers(allocator);
+    defer {
+        for (workers) |w| {
+            allocator.free(w.id);
+            allocator.free(w.url);
+            allocator.free(w.token);
+            allocator.free(w.tags_json);
+            allocator.free(w.source);
+            allocator.free(w.status);
+        }
+        allocator.free(workers);
+    }
+    try std.testing.expectEqual(@as(usize, 1), workers.len);
+    try std.testing.expectEqualStrings("w3", workers[0].id);
+}
+
+test "Store: insert and get run" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    const run = (try s.getRun(allocator, "r1")).?;
+    defer {
+        allocator.free(run.id);
+        allocator.free(run.status);
+        allocator.free(run.workflow_json);
+        allocator.free(run.input_json);
+        allocator.free(run.callbacks_json);
+    }
+    try std.testing.expectEqualStrings("r1", run.id);
+    try std.testing.expectEqualStrings("running", run.status);
+}
+
+test "Store: list runs with filter" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r2", "pending", "{}", "{}", "[]");
+    try s.insertRun("r3", "running", "{}", "{}", "[]");
+
+    const running = try s.listRuns(allocator, "running", 100);
+    defer {
+        for (running) |r| {
+            allocator.free(r.id);
+            allocator.free(r.status);
+            allocator.free(r.workflow_json);
+            allocator.free(r.input_json);
+            allocator.free(r.callbacks_json);
+        }
+        allocator.free(running);
+    }
+    try std.testing.expectEqual(@as(usize, 2), running.len);
+
+    const all = try s.listRuns(allocator, null, 100);
+    defer {
+        for (all) |r| {
+            allocator.free(r.id);
+            allocator.free(r.status);
+            allocator.free(r.workflow_json);
+            allocator.free(r.input_json);
+            allocator.free(r.callbacks_json);
+        }
+        allocator.free(all);
+    }
+    try std.testing.expectEqual(@as(usize, 3), all.len);
+}
+
+test "Store: update run status" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.updateRunStatus("r1", "failed", "something broke");
+    const run = (try s.getRun(allocator, "r1")).?;
+    defer {
+        allocator.free(run.id);
+        allocator.free(run.status);
+        allocator.free(run.workflow_json);
+        allocator.free(run.input_json);
+        allocator.free(run.callbacks_json);
+        if (run.error_text) |et| allocator.free(et);
+    }
+    try std.testing.expectEqualStrings("failed", run.status);
+    try std.testing.expectEqualStrings("something broke", run.error_text.?);
+}
+
+test "Store: get active runs" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r2", "pending", "{}", "{}", "[]");
+    try s.insertRun("r3", "paused", "{}", "{}", "[]");
+    try s.insertRun("r4", "completed", "{}", "{}", "[]");
+
+    const active = try s.getActiveRuns(allocator);
+    defer {
+        for (active) |r| {
+            allocator.free(r.id);
+            allocator.free(r.status);
+            allocator.free(r.workflow_json);
+            allocator.free(r.input_json);
+            allocator.free(r.callbacks_json);
+        }
+        allocator.free(active);
+    }
+    try std.testing.expectEqual(@as(usize, 2), active.len);
+}
+
+test "Store: step deps and ready steps" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertStep("s1", "r1", "step1", "task", "ready", "{}", 1, null, null, null);
+    try s.insertStep("s2", "r1", "step2", "task", "ready", "{}", 1, null, null, null);
+    try s.insertStepDep("s2", "s1");
+
+    // s1 should be ready (no unsatisfied deps), s2 should NOT (depends on s1 which is 'ready' not 'completed')
+    const ready = try s.getReadySteps(allocator, "r1");
+    defer {
+        for (ready) |step| {
+            allocator.free(step.id);
+            allocator.free(step.run_id);
+            allocator.free(step.def_step_id);
+            allocator.free(step.type);
+            allocator.free(step.status);
+            allocator.free(step.input_json);
+        }
+        allocator.free(ready);
+    }
+    try std.testing.expectEqual(@as(usize, 1), ready.len);
+    try std.testing.expectEqualStrings("s1", ready[0].id);
+}
+
+test "Store: count steps by status" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertStep("s1", "r1", "step1", "task", "ready", "{}", 1, null, null, null);
+    try s.insertStep("s2", "r1", "step2", "task", "ready", "{}", 1, null, null, null);
+    try s.insertStep("s3", "r1", "step3", "task", "completed", "{}", 1, null, null, null);
+
+    const ready_count = try s.countStepsByStatus("r1", "ready");
+    try std.testing.expectEqual(@as(i64, 2), ready_count);
+
+    const completed_count = try s.countStepsByStatus("r1", "completed");
+    try std.testing.expectEqual(@as(i64, 1), completed_count);
+}
+
+test "Store: get child steps" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertStep("parent", "r1", "fan_out_1", "fan_out", "running", "{}", 1, null, null, null);
+    try s.insertStep("child0", "r1", "task_1", "task", "ready", "{}", 1, null, "parent", 0);
+    try s.insertStep("child1", "r1", "task_1", "task", "ready", "{}", 1, null, "parent", 1);
+
+    const children = try s.getChildSteps(allocator, "parent");
+    defer {
+        for (children) |step| {
+            allocator.free(step.id);
+            allocator.free(step.run_id);
+            allocator.free(step.def_step_id);
+            allocator.free(step.type);
+            allocator.free(step.status);
+            allocator.free(step.input_json);
+            if (step.parent_step_id) |pid| allocator.free(pid);
+        }
+        allocator.free(children);
+    }
+    try std.testing.expectEqual(@as(usize, 2), children.len);
+    try std.testing.expectEqualStrings("child0", children[0].id);
+    try std.testing.expectEqual(@as(i64, 0), children[0].item_index.?);
+    try std.testing.expectEqualStrings("child1", children[1].id);
+    try std.testing.expectEqual(@as(i64, 1), children[1].item_index.?);
+}
+
+test "Store: update step status" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
+    try s.insertStep("s1", "r1", "step1", "task", "ready", "{}", 3, null, null, null);
+    try s.updateStepStatus("s1", "completed", "w1", "{\"result\":42}", null, 1);
+
+    const step = (try s.getStep(allocator, "s1")).?;
+    defer {
+        allocator.free(step.id);
+        allocator.free(step.run_id);
+        allocator.free(step.def_step_id);
+        allocator.free(step.type);
+        allocator.free(step.status);
+        allocator.free(step.input_json);
+        if (step.worker_id) |wid| allocator.free(wid);
+        if (step.output_json) |oj| allocator.free(oj);
+    }
+    try std.testing.expectEqualStrings("completed", step.status);
+    try std.testing.expectEqualStrings("w1", step.worker_id.?);
+    try std.testing.expectEqualStrings("{\"result\":42}", step.output_json.?);
+    try std.testing.expectEqual(@as(i64, 1), step.attempt);
+}
+
+test "Store: insert and get events" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertEvent("r1", null, "run.started", "{}");
+    try s.insertEvent("r1", null, "step.completed", "{\"step\":\"s1\"}");
+    const events = try s.getEventsByRun(allocator, "r1");
+    defer {
+        for (events) |ev| {
+            allocator.free(ev.run_id);
+            allocator.free(ev.kind);
+            allocator.free(ev.data_json);
+        }
+        allocator.free(events);
+    }
+    try std.testing.expectEqual(@as(usize, 2), events.len);
+}
+
+test "Store: insert and get artifacts" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertArtifact("a1", "r1", null, "log", "file:///tmp/log.txt", "{}");
+    try s.insertArtifact("a2", "r1", null, "report", "s3://bucket/report.pdf", "{\"pages\":10}");
+
+    const artifacts = try s.getArtifactsByRun(allocator, "r1");
+    defer {
+        for (artifacts) |a| {
+            allocator.free(a.id);
+            allocator.free(a.run_id);
+            allocator.free(a.kind);
+            allocator.free(a.uri);
+            allocator.free(a.meta_json);
+        }
+        allocator.free(artifacts);
+    }
+    try std.testing.expectEqual(@as(usize, 2), artifacts.len);
+    try std.testing.expectEqualStrings("a1", artifacts[0].id);
+    try std.testing.expectEqualStrings("log", artifacts[0].kind);
+    try std.testing.expectEqualStrings("a2", artifacts[1].id);
+    try std.testing.expectEqualStrings("s3://bucket/report.pdf", artifacts[1].uri);
+}
+
+test "Store: get nonexistent worker returns null" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    const w = try s.getWorker(allocator, "nonexistent");
+    try std.testing.expect(w == null);
+}
+
+test "Store: get nonexistent run returns null" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    const r = try s.getRun(allocator, "nonexistent");
+    try std.testing.expect(r == null);
+}
+
+test "Store: get nonexistent step returns null" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+    const step = try s.getStep(allocator, "nonexistent");
+    try std.testing.expect(step == null);
+}
