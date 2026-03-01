@@ -131,6 +131,30 @@ pub const Store = struct {
         }
     }
 
+    pub fn beginTransaction(self: *Self) !void {
+        try self.execSql("BEGIN IMMEDIATE TRANSACTION;");
+    }
+
+    pub fn commitTransaction(self: *Self) !void {
+        try self.execSql("COMMIT;");
+    }
+
+    pub fn rollbackTransaction(self: *Self) !void {
+        try self.execSql("ROLLBACK;");
+    }
+
+    fn execSql(self: *Self, sql: [*:0]const u8) !void {
+        var err_msg: [*c]u8 = null;
+        const rc = c.sqlite3_exec(self.db, sql, null, null, &err_msg);
+        if (rc != c.SQLITE_OK) {
+            if (err_msg) |msg| {
+                log.warn("sql exec failed (rc={d}): {s}", .{ rc, std.mem.span(msg) });
+                c.sqlite3_free(msg);
+            }
+            return error.SqliteExecFailed;
+        }
+    }
+
     // ── Worker CRUD ───────────────────────────────────────────────────
 
     pub fn insertWorker(
@@ -1037,6 +1061,39 @@ test "Store: insert and get run" {
     }
     try std.testing.expectEqualStrings("r1", run.id);
     try std.testing.expectEqualStrings("running", run.status);
+}
+
+test "Store: transaction rollback discards inserted run" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.beginTransaction();
+    try s.insertRun("tx_rollback", "running", "{}", "{}", "[]");
+    try s.rollbackTransaction();
+
+    const run = try s.getRun(allocator, "tx_rollback");
+    try std.testing.expect(run == null);
+}
+
+test "Store: transaction commit persists inserted run" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.beginTransaction();
+    try s.insertRun("tx_commit", "running", "{}", "{}", "[]");
+    try s.commitTransaction();
+
+    const run = (try s.getRun(allocator, "tx_commit")).?;
+    defer {
+        allocator.free(run.id);
+        allocator.free(run.status);
+        allocator.free(run.workflow_json);
+        allocator.free(run.input_json);
+        allocator.free(run.callbacks_json);
+    }
+    try std.testing.expectEqualStrings("tx_commit", run.id);
 }
 
 test "Store: list runs with filter" {

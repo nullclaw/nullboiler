@@ -316,6 +316,16 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize callbacks\"}}");
     };
 
+    ctx.store.beginTransaction() catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to start transaction\"}}");
+    };
+    var tx_committed = false;
+    defer {
+        if (!tx_committed) {
+            ctx.store.rollbackTransaction() catch {};
+        }
+    }
+
     // Generate run_id
     const run_id_buf = ids.generateId();
     const run_id = ctx.allocator.dupe(u8, &run_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -412,6 +422,10 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
 
     // Return 201 with run info
     const run_id_json = jsonQuoted(ctx.allocator, run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    ctx.store.commitTransaction() catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to commit transaction\"}}");
+    };
+    tx_committed = true;
     const resp = std.fmt.allocPrint(ctx.allocator,
         \\{{"id":{s},"status":"running"}}
     , .{run_id_json}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");

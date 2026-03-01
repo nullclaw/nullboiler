@@ -5,7 +5,7 @@ This backlog tracks the main gaps that prevent `nullboiler` from matching produc
 ## P0 (Critical)
 
 - [x] `P0-01` API authentication and authorization boundary (token-based access for non-health endpoints).
-- [ ] `P0-02` Atomic run creation with DB transaction (no partial run/step persistence on failure).
+- [x] `P0-02` Atomic run creation with DB transaction (no partial run/step persistence on failure).
 - [ ] `P0-03` Worker health checks + quarantine/circuit-breaker states (dead/draining lifecycle automation).
 - [ ] `P0-04` Idempotent run submission (idempotency key to prevent duplicate workflow launches).
 
@@ -28,4 +28,5 @@ This backlog tracks the main gaps that prevent `nullboiler` from matching produc
 ## Current Execution
 
 - [x] `P0-01` completed: bearer auth implemented in API path, config/CLI wiring added, and nulltracker bridge updated with optional token propagation.
-- [ ] Next: `P0-02` atomic run creation transaction safety.
+- [x] `P0-02` completed: `POST /runs` now wrapped in DB transaction with rollback on any failure.
+- [ ] Next: `P0-03` worker health checks + circuit-breaker states.
