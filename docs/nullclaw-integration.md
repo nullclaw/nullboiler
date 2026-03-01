@@ -34,6 +34,7 @@ Point worker `url` to NullClaw gateway and use the same token from `gateway.pair
       "id": "nullclaw-1",
       "url": "http://localhost:3000",
       "token": "nb_worker_token_1",
+      "protocol": "webhook",
       "tags": ["coder"],
       "max_concurrent": 2
     }
@@ -48,5 +49,7 @@ NullBoiler accepts:
 1. Legacy shape: `{"output":"..."}`
 2. NullClaw shape: `{"status":"ok","response":"...","thread_events":[...]}`
 3. Plain text body (treated as output)
+4. ZeroClaw `api_chat`: `{"reply":"...","model":"..."}`
+5. OpenAI chat-completions: `{"choices":[{"message":{"content":"..."}}]}`
 
 `{"status":"received"}` without `output/response` is treated as an error because no synchronous step result is available for DAG progression.

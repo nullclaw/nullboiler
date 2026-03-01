@@ -133,8 +133,18 @@ pub const Store = struct {
 
     // ── Worker CRUD ───────────────────────────────────────────────────
 
-    pub fn insertWorker(self: *Self, id: []const u8, url: []const u8, token: []const u8, tags_json: []const u8, max_concurrent: i64, source: []const u8) !void {
-        const sql = "INSERT INTO workers (id, url, token, tags_json, max_concurrent, source, status, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, 'active', ?)";
+    pub fn insertWorker(
+        self: *Self,
+        id: []const u8,
+        url: []const u8,
+        token: []const u8,
+        protocol: []const u8,
+        model: ?[]const u8,
+        tags_json: []const u8,
+        max_concurrent: i64,
+        source: []const u8,
+    ) !void {
+        const sql = "INSERT INTO workers (id, url, token, protocol, model, tags_json, max_concurrent, source, status, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -144,10 +154,12 @@ pub const Store = struct {
         _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 2, url.ptr, @intCast(url.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 3, token.ptr, @intCast(token.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 4, tags_json.ptr, @intCast(tags_json.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 5, max_concurrent);
-        _ = c.sqlite3_bind_text(stmt, 6, source.ptr, @intCast(source.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 7, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 4, protocol.ptr, @intCast(protocol.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 5, model);
+        _ = c.sqlite3_bind_text(stmt, 6, tags_json.ptr, @intCast(tags_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 7, max_concurrent);
+        _ = c.sqlite3_bind_text(stmt, 8, source.ptr, @intCast(source.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 9, ids.nowMs());
 
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
             return error.SqliteStepFailed;
@@ -155,7 +167,7 @@ pub const Store = struct {
     }
 
     pub fn listWorkers(self: *Self, allocator: std.mem.Allocator) ![]types.WorkerRow {
-        const sql = "SELECT id, url, token, tags_json, max_concurrent, source, status, last_health_ms, created_at_ms FROM workers ORDER BY created_at_ms DESC";
+        const sql = "SELECT id, url, token, protocol, model, tags_json, max_concurrent, source, status, last_health_ms, created_at_ms FROM workers ORDER BY created_at_ms DESC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -168,19 +180,21 @@ pub const Store = struct {
                 .id = try allocStr(allocator, stmt, 0),
                 .url = try allocStr(allocator, stmt, 1),
                 .token = try allocStr(allocator, stmt, 2),
-                .tags_json = try allocStr(allocator, stmt, 3),
-                .max_concurrent = colInt(stmt, 4),
-                .source = try allocStr(allocator, stmt, 5),
-                .status = try allocStr(allocator, stmt, 6),
-                .last_health_ms = colIntOpt(stmt, 7),
-                .created_at_ms = colInt(stmt, 8),
+                .protocol = try allocStr(allocator, stmt, 3),
+                .model = try allocStrOpt(allocator, stmt, 4),
+                .tags_json = try allocStr(allocator, stmt, 5),
+                .max_concurrent = colInt(stmt, 6),
+                .source = try allocStr(allocator, stmt, 7),
+                .status = try allocStr(allocator, stmt, 8),
+                .last_health_ms = colIntOpt(stmt, 9),
+                .created_at_ms = colInt(stmt, 10),
             });
         }
         return list.toOwnedSlice(allocator);
     }
 
     pub fn getWorker(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.WorkerRow {
-        const sql = "SELECT id, url, token, tags_json, max_concurrent, source, status, last_health_ms, created_at_ms FROM workers WHERE id = ?";
+        const sql = "SELECT id, url, token, protocol, model, tags_json, max_concurrent, source, status, last_health_ms, created_at_ms FROM workers WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -195,12 +209,14 @@ pub const Store = struct {
             .id = try allocStr(allocator, stmt, 0),
             .url = try allocStr(allocator, stmt, 1),
             .token = try allocStr(allocator, stmt, 2),
-            .tags_json = try allocStr(allocator, stmt, 3),
-            .max_concurrent = colInt(stmt, 4),
-            .source = try allocStr(allocator, stmt, 5),
-            .status = try allocStr(allocator, stmt, 6),
-            .last_health_ms = colIntOpt(stmt, 7),
-            .created_at_ms = colInt(stmt, 8),
+            .protocol = try allocStr(allocator, stmt, 3),
+            .model = try allocStrOpt(allocator, stmt, 4),
+            .tags_json = try allocStr(allocator, stmt, 5),
+            .max_concurrent = colInt(stmt, 6),
+            .source = try allocStr(allocator, stmt, 7),
+            .status = try allocStr(allocator, stmt, 8),
+            .last_health_ms = colIntOpt(stmt, 9),
+            .created_at_ms = colInt(stmt, 10),
         };
     }
 
@@ -911,16 +927,20 @@ test "Store: insert and get worker" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertWorker("w1", "http://localhost:3001", "tok", "[\"coder\"]", 3, "config");
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "webhook", null, "[\"coder\"]", 3, "config");
     const w = (try s.getWorker(allocator, "w1")).?;
     defer allocator.free(w.id);
     defer allocator.free(w.url);
     defer allocator.free(w.token);
+    defer allocator.free(w.protocol);
+    if (w.model) |m| allocator.free(m);
     defer allocator.free(w.tags_json);
     defer allocator.free(w.source);
     defer allocator.free(w.status);
     try std.testing.expectEqualStrings("w1", w.id);
     try std.testing.expectEqualStrings("http://localhost:3001", w.url);
+    try std.testing.expectEqualStrings("webhook", w.protocol);
+    try std.testing.expect(w.model == null);
     try std.testing.expectEqual(@as(i64, 3), w.max_concurrent);
 }
 
@@ -928,14 +948,16 @@ test "Store: insert and list workers" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
-    try s.insertWorker("w2", "http://localhost:3002", "tok", "[]", 2, "registered");
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "webhook", null, "[]", 1, "config");
+    try s.insertWorker("w2", "http://localhost:3002", "tok", "webhook", null, "[]", 2, "registered");
     const workers = try s.listWorkers(allocator);
     defer {
         for (workers) |w| {
             allocator.free(w.id);
             allocator.free(w.url);
             allocator.free(w.token);
+            allocator.free(w.protocol);
+            if (w.model) |m| allocator.free(m);
             allocator.free(w.tags_json);
             allocator.free(w.source);
             allocator.free(w.status);
@@ -949,7 +971,7 @@ test "Store: delete worker" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "webhook", null, "[]", 1, "config");
     try s.deleteWorker("w1");
     const w = try s.getWorker(allocator, "w1");
     try std.testing.expect(w == null);
@@ -959,12 +981,14 @@ test "Store: update worker status" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "webhook", null, "[]", 1, "config");
     try s.updateWorkerStatus("w1", "draining", 12345);
     const w = (try s.getWorker(allocator, "w1")).?;
     defer allocator.free(w.id);
     defer allocator.free(w.url);
     defer allocator.free(w.token);
+    defer allocator.free(w.protocol);
+    if (w.model) |m| allocator.free(m);
     defer allocator.free(w.tags_json);
     defer allocator.free(w.source);
     defer allocator.free(w.status);
@@ -976,9 +1000,9 @@ test "Store: delete workers by source" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
-    try s.insertWorker("w2", "http://localhost:3002", "tok", "[]", 1, "config");
-    try s.insertWorker("w3", "http://localhost:3003", "tok", "[]", 1, "registered");
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "webhook", null, "[]", 1, "config");
+    try s.insertWorker("w2", "http://localhost:3002", "tok", "webhook", null, "[]", 1, "config");
+    try s.insertWorker("w3", "http://localhost:3003", "tok", "webhook", null, "[]", 1, "registered");
     try s.deleteWorkersBySource("config");
     const workers = try s.listWorkers(allocator);
     defer {
@@ -986,6 +1010,8 @@ test "Store: delete workers by source" {
             allocator.free(w.id);
             allocator.free(w.url);
             allocator.free(w.token);
+            allocator.free(w.protocol);
+            if (w.model) |m| allocator.free(m);
             allocator.free(w.tags_json);
             allocator.free(w.source);
             allocator.free(w.status);
@@ -1170,7 +1196,7 @@ test "Store: update step status" {
     defer s.deinit();
 
     try s.insertRun("r1", "running", "{}", "{}", "[]");
-    try s.insertWorker("w1", "http://localhost:3001", "tok", "[]", 1, "config");
+    try s.insertWorker("w1", "http://localhost:3001", "tok", "webhook", null, "[]", 1, "config");
     try s.insertStep("s1", "r1", "step1", "task", "ready", "{}", 3, null, null, null);
     try s.updateStepStatus("s1", "completed", "w1", "{\"result\":42}", null, 1);
 

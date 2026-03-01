@@ -113,6 +113,8 @@ pub const WorkerRow = struct {
     id: []const u8,
     url: []const u8,
     token: []const u8,
+    protocol: []const u8,
+    model: ?[]const u8,
     tags_json: []const u8,
     max_concurrent: i64,
     source: []const u8,

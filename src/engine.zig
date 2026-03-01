@@ -232,6 +232,8 @@ pub const Engine = struct {
                 .id = w.id,
                 .url = w.url,
                 .token = w.token,
+                .protocol = w.protocol,
+                .model = w.model,
                 .tags_json = w.tags_json,
                 .max_concurrent = w.max_concurrent,
                 .status = w.status,
@@ -264,7 +266,16 @@ pub const Engine = struct {
         var final_result: dispatch.DispatchResult = undefined;
 
         while (true) {
-            final_result = try dispatch.dispatchStep(alloc, current_worker.url, current_worker.token, run_row.id, step.id, current_prompt);
+            final_result = try dispatch.dispatchStep(
+                alloc,
+                current_worker.url,
+                current_worker.token,
+                current_worker.protocol,
+                current_worker.model,
+                run_row.id,
+                step.id,
+                current_prompt,
+            );
 
             if (!final_result.success) break;
 
@@ -518,6 +529,8 @@ pub const Engine = struct {
                 .id = w.id,
                 .url = w.url,
                 .token = w.token,
+                .protocol = w.protocol,
+                .model = w.model,
                 .tags_json = w.tags_json,
                 .max_concurrent = w.max_concurrent,
                 .status = w.status,
@@ -536,7 +549,16 @@ pub const Engine = struct {
         try self.store.updateStepStatus(step.id, "running", worker.id, null, null, step.attempt);
         try self.store.insertEvent(run_row.id, step.id, "step.running", "{}");
 
-        const result = try dispatch.dispatchStep(alloc, worker.url, worker.token, run_row.id, step.id, rendered_prompt);
+        const result = try dispatch.dispatchStep(
+            alloc,
+            worker.url,
+            worker.token,
+            worker.protocol,
+            worker.model,
+            run_row.id,
+            step.id,
+            rendered_prompt,
+        );
 
         if (result.success) {
             const output_json = try wrapOutput(alloc, result.output);
@@ -1481,6 +1503,8 @@ pub const Engine = struct {
                     .id = w.id,
                     .url = w.url,
                     .token = w.token,
+                    .protocol = w.protocol,
+                    .model = w.model,
                     .tags_json = w.tags_json,
                     .max_concurrent = w.max_concurrent,
                     .status = w.status,
@@ -1490,7 +1514,16 @@ pub const Engine = struct {
 
             const selected = try dispatch.selectWorker(alloc, worker_infos.items, tag_list.items);
             if (selected) |worker| {
-                const result = try dispatch.dispatchStep(alloc, worker.url, worker.token, run_row.id, step.id, rendered_prompt);
+                const result = try dispatch.dispatchStep(
+                    alloc,
+                    worker.url,
+                    worker.token,
+                    worker.protocol,
+                    worker.model,
+                    run_row.id,
+                    step.id,
+                    rendered_prompt,
+                );
                 if (result.success) {
                     try self.store.insertChatMessage(run_row.id, step.id, 1, role, worker.id, result.output);
                 } else {
@@ -1620,6 +1653,8 @@ pub const Engine = struct {
                     .id = w.id,
                     .url = w.url,
                     .token = w.token,
+                    .protocol = w.protocol,
+                    .model = w.model,
                     .tags_json = w.tags_json,
                     .max_concurrent = w.max_concurrent,
                     .status = w.status,
@@ -1629,7 +1664,16 @@ pub const Engine = struct {
 
             const selected = try dispatch.selectWorker(alloc, worker_infos.items, tag_list.items);
             if (selected) |worker| {
-                const result = try dispatch.dispatchStep(alloc, worker.url, worker.token, run_row.id, step.id, rendered);
+                const result = try dispatch.dispatchStep(
+                    alloc,
+                    worker.url,
+                    worker.token,
+                    worker.protocol,
+                    worker.model,
+                    run_row.id,
+                    step.id,
+                    rendered,
+                );
                 if (result.success) {
                     try self.store.insertChatMessage(run_row.id, step.id, next_round, role, worker.id, result.output);
                 } else {

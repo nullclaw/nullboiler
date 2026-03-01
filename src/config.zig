@@ -4,6 +4,8 @@ pub const WorkerConfig = struct {
     id: []const u8,
     url: []const u8,
     token: []const u8,
+    protocol: []const u8 = "webhook",
+    model: ?[]const u8 = null,
     tags: []const []const u8 = &.{},
     max_concurrent: u32 = 1,
 };

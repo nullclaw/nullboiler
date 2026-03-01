@@ -73,13 +73,27 @@ pub fn main() !void {
     };
 
     for (cfg.workers) |w| {
+        const protocol_supported =
+            std.mem.eql(u8, w.protocol, "webhook") or
+            std.mem.eql(u8, w.protocol, "api_chat") or
+            std.mem.eql(u8, w.protocol, "openai_chat");
+        if (!protocol_supported) {
+            std.debug.print("warning: skipped config worker {s}: unsupported protocol {s}\n", .{ w.id, w.protocol });
+            continue;
+        }
+
+        if (std.mem.eql(u8, w.protocol, "openai_chat") and w.model == null) {
+            std.debug.print("warning: skipped config worker {s}: openai_chat protocol requires model\n", .{w.id});
+            continue;
+        }
+
         // Serialize tags to JSON array string
         const tags_json = serializeTagsJson(cfg_arena.allocator(), w.tags) catch |err| {
             std.debug.print("warning: failed to serialize tags for worker {s}: {}\n", .{ w.id, err });
             continue;
         };
 
-        store.insertWorker(w.id, w.url, w.token, tags_json, @intCast(w.max_concurrent), "config") catch |err| {
+        store.insertWorker(w.id, w.url, w.token, w.protocol, w.model, tags_json, @intCast(w.max_concurrent), "config") catch |err| {
             std.debug.print("warning: failed to insert config worker {s}: {}\n", .{ w.id, err });
         };
         std.debug.print("registered config worker: {s}\n", .{w.id});

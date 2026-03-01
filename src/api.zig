@@ -156,13 +156,20 @@ fn handleListWorkers(ctx: *Context) HttpResponse {
         }
         const id_json = jsonQuoted(ctx.allocator, w.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         const url_json = jsonQuoted(ctx.allocator, w.url) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const protocol_json = jsonQuoted(ctx.allocator, w.protocol) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const model_json = if (w.model) |model|
+            jsonQuoted(ctx.allocator, model) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}")
+        else
+            "null";
         const source_json = jsonQuoted(ctx.allocator, w.source) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         const status_json = jsonQuoted(ctx.allocator, w.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":{s},"url":{s},"tags":{s},"max_concurrent":{d},"source":{s},"status":{s},"created_at_ms":{d}}}
+            \\{{"id":{s},"url":{s},"protocol":{s},"model":{s},"tags":{s},"max_concurrent":{d},"source":{s},"status":{s},"created_at_ms":{d}}}
         , .{
             id_json,
             url_json,
+            protocol_json,
+            model_json,
             w.tags_json,
             w.max_concurrent,
             source_json,
@@ -199,6 +206,15 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: url\"}}");
     };
     const token = getJsonString(obj, "token") orelse "";
+    const protocol = getJsonString(obj, "protocol") orelse "webhook";
+    const model = getJsonString(obj, "model");
+
+    if (!isSupportedWorkerProtocol(protocol)) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid protocol (expected webhook|api_chat|openai_chat)\"}}");
+    }
+    if (std.mem.eql(u8, protocol, "openai_chat") and model == null) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"openai_chat protocol requires model\"}}");
+    }
 
     // Extract tags as JSON string
     const tags_json = if (obj.get("tags")) |tags_val| blk: {
@@ -214,14 +230,15 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
         break :blk 1;
     } else 1;
 
-    ctx.store.insertWorker(worker_id, url, token, tags_json, max_concurrent, "registered") catch {
+    ctx.store.insertWorker(worker_id, url, token, protocol, model, tags_json, max_concurrent, "registered") catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to insert worker\"}}");
     };
 
     const worker_id_json = jsonQuoted(ctx.allocator, worker_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const protocol_json = jsonQuoted(ctx.allocator, protocol) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"id":{s},"status":"active"}}
-    , .{worker_id_json}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        \\{{"id":{s},"status":"active","protocol":{s}}}
+    , .{ worker_id_json, protocol_json }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(201, resp);
 }
 
@@ -795,6 +812,12 @@ fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const val = obj.get(key) orelse return null;
     if (val == .string) return val.string;
     return null;
+}
+
+fn isSupportedWorkerProtocol(protocol: []const u8) bool {
+    return std.mem.eql(u8, protocol, "webhook") or
+        std.mem.eql(u8, protocol, "api_chat") or
+        std.mem.eql(u8, protocol, "openai_chat");
 }
 
 fn serializeJsonValue(allocator: std.mem.Allocator, val: ?std.json.Value) ![]const u8 {

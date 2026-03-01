@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS workers (
     id TEXT PRIMARY KEY,
     url TEXT NOT NULL,
     token TEXT NOT NULL,
+    protocol TEXT NOT NULL DEFAULT 'webhook',
+    model TEXT,
     tags_json TEXT NOT NULL DEFAULT '[]',
     max_concurrent INTEGER NOT NULL DEFAULT 1,
     source TEXT NOT NULL DEFAULT 'config',

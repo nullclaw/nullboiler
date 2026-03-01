@@ -16,7 +16,7 @@ DAG-based workflow orchestrator for NullClaw AI bot agents. Part of the Null eco
 | `api.zig` | REST API routing and 16 endpoint handlers (incl. signal, chat) |
 | `store.zig` | SQLite layer, 30+ CRUD methods, schema migrations |
 | `engine.zig` | DAG scheduler: tick loop, 14 step type handlers, graph cycles, worker handoff |
-| `dispatch.zig` | Worker selection (tags, capacity), HTTP POST to `/webhook` |
+| `dispatch.zig` | Worker selection (tags, capacity), protocol-aware HTTP dispatch (`webhook`, `api_chat`, `openai_chat`) |
 | `templates.zig` | Prompt template rendering: `{{input.X}}`, `{{steps.ID.output}}`, `{{item}}`, `{{debate_responses}}`, `{{chat_history}}`, `{{role}}` |
 | `callbacks.zig` | Fire-and-forget webhook callbacks on step/run events |
 | `config.zig` | JSON config loader (`Config`, `WorkerConfig`, `EngineConfig`) |
