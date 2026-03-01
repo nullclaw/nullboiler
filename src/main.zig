@@ -147,18 +147,21 @@ pub fn main() !void {
 }
 
 fn serializeTagsJson(allocator: std.mem.Allocator, tags: []const []const u8) ![]const u8 {
-    if (tags.len == 0) return "[]";
+    return std.json.Stringify.valueAlloc(allocator, tags, .{});
+}
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try buf.append(allocator, '[');
-    for (tags, 0..) |tag, i| {
-        if (i > 0) try buf.append(allocator, ',');
-        try buf.append(allocator, '"');
-        try buf.appendSlice(allocator, tag);
-        try buf.append(allocator, '"');
-    }
-    try buf.append(allocator, ']');
-    return try buf.toOwnedSlice(allocator);
+test "serializeTagsJson escapes special chars" {
+    const allocator = std.testing.allocator;
+    const tags = [_][]const u8{
+        "dev\"ops",
+        "path\\with\\slashes",
+        "line\nbreak",
+    };
+
+    const got = try serializeTagsJson(allocator, &tags);
+    defer allocator.free(got);
+
+    try std.testing.expectEqualStrings("[\"dev\\\"ops\",\"path\\\\with\\\\slashes\",\"line\\nbreak\"]", got);
 }
 
 comptime {

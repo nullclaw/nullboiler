@@ -152,15 +152,19 @@ fn handleListWorkers(ctx: *Context) HttpResponse {
         if (i > 0) {
             buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         }
+        const id_json = jsonQuoted(ctx.allocator, w.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const url_json = jsonQuoted(ctx.allocator, w.url) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const source_json = jsonQuoted(ctx.allocator, w.source) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const status_json = jsonQuoted(ctx.allocator, w.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":"{s}","url":"{s}","tags":{s},"max_concurrent":{d},"source":"{s}","status":"{s}","created_at_ms":{d}}}
+            \\{{"id":{s},"url":{s},"tags":{s},"max_concurrent":{d},"source":{s},"status":{s},"created_at_ms":{d}}}
         , .{
-            w.id,
-            w.url,
+            id_json,
+            url_json,
             w.tags_json,
             w.max_concurrent,
-            w.source,
-            w.status,
+            source_json,
+            status_json,
             w.created_at_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -212,9 +216,10 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to insert worker\"}}");
     };
 
+    const worker_id_json = jsonQuoted(ctx.allocator, worker_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"id":"{s}","status":"active"}}
-    , .{worker_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        \\{{"id":{s},"status":"active"}}
+    , .{worker_id_json}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(201, resp);
 }
 
@@ -254,6 +259,78 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"steps array must not be empty\"}}");
     }
 
+    // Validate steps before creating DB records.
+    var step_defs = std.StringHashMap(void).init(ctx.allocator);
+    for (steps_array) |step_val| {
+        if (step_val != .object) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"each step must be an object\"}}");
+        }
+        const step_obj = step_val.object;
+
+        const def_step_id = getJsonString(step_obj, "id") orelse {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"each step must have string field 'id'\"}}");
+        };
+        if (def_step_id.len == 0) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"step id must not be empty\"}}");
+        }
+        if (step_defs.contains(def_step_id)) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"duplicate step id\"}}");
+        }
+        step_defs.put(def_step_id, {}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+        const step_type = getJsonString(step_obj, "type") orelse "task";
+
+        // Validate required fields for advanced step types
+        if (std.mem.eql(u8, step_type, "loop") and step_obj.get("body") == null) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}");
+        }
+        if (std.mem.eql(u8, step_type, "sub_workflow") and step_obj.get("workflow") == null) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}");
+        }
+        if (std.mem.eql(u8, step_type, "wait")) {
+            if (step_obj.get("duration_ms") == null and step_obj.get("until_ms") == null and step_obj.get("signal") == null) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait step requires 'duration_ms', 'until_ms', or 'signal'\"}}");
+            }
+        }
+        if (std.mem.eql(u8, step_type, "router") and step_obj.get("routes") == null) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"router step requires 'routes' field\"}}");
+        }
+        if (std.mem.eql(u8, step_type, "saga") and step_obj.get("body") == null) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"saga step requires 'body' field\"}}");
+        }
+        if (std.mem.eql(u8, step_type, "debate")) {
+            if (step_obj.get("count") == null) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"debate step requires 'count' field\"}}");
+            }
+        }
+        if (std.mem.eql(u8, step_type, "group_chat")) {
+            if (step_obj.get("participants") == null) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"group_chat step requires 'participants' field\"}}");
+            }
+        }
+
+        if (step_obj.get("depends_on")) |deps_val| {
+            if (deps_val != .array) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on must be an array\"}}");
+            }
+            for (deps_val.array.items) |dep_item| {
+                if (dep_item != .string) {
+                    return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on items must be strings\"}}");
+                }
+            }
+        }
+    }
+
+    for (steps_array) |step_val| {
+        const step_obj = step_val.object;
+        const deps_val = step_obj.get("depends_on") orelse continue;
+        for (deps_val.array.items) |dep_item| {
+            if (!step_defs.contains(dep_item.string)) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on references unknown step id\"}}");
+            }
+        }
+    }
+
     // Serialize input and callbacks back to JSON for storage
     const input_json = serializeJsonValue(ctx.allocator, obj.get("input")) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize input\"}}");
@@ -278,40 +355,12 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
 
     // First pass: create all steps
     for (steps_array) |step_val| {
-        if (step_val != .object) continue;
         const step_obj = step_val.object;
 
-        const def_step_id = getJsonString(step_obj, "id") orelse continue;
+        const def_step_id = getJsonString(step_obj, "id") orelse {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"validated step missing id\"}}");
+        };
         const step_type = getJsonString(step_obj, "type") orelse "task";
-
-        // Validate required fields for advanced step types
-        if (eql(step_type, "loop") and step_obj.get("body") == null) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}");
-        }
-        if (eql(step_type, "sub_workflow") and step_obj.get("workflow") == null) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}");
-        }
-        if (eql(step_type, "wait")) {
-            if (step_obj.get("duration_ms") == null and step_obj.get("until_ms") == null and step_obj.get("signal") == null) {
-                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait step requires 'duration_ms', 'until_ms', or 'signal'\"}}");
-            }
-        }
-        if (eql(step_type, "router") and step_obj.get("routes") == null) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"router step requires 'routes' field\"}}");
-        }
-        if (eql(step_type, "saga") and step_obj.get("body") == null) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"saga step requires 'body' field\"}}");
-        }
-        if (eql(step_type, "debate")) {
-            if (step_obj.get("count") == null) {
-                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"debate step requires 'count' field\"}}");
-            }
-        }
-        if (eql(step_type, "group_chat")) {
-            if (step_obj.get("participants") == null) {
-                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"group_chat step requires 'participants' field\"}}");
-            }
-        }
 
         // Generate step_id
         const step_id_buf = ids.generateId();
@@ -350,24 +399,33 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
 
     // Second pass: insert step dependencies
     for (steps_array) |step_val| {
-        if (step_val != .object) continue;
         const step_obj = step_val.object;
 
-        const def_step_id = getJsonString(step_obj, "id") orelse continue;
+        const def_step_id = getJsonString(step_obj, "id") orelse {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"validated step missing id\"}}");
+        };
 
         // Find the generated step_id for this def_step_id
-        const step_id = lookupGenId(def_ids.items, gen_ids.items, def_step_id) orelse continue;
+        const step_id = lookupGenId(def_ids.items, gen_ids.items, def_step_id) orelse {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"validated step id lookup failed\"}}");
+        };
 
         // Process depends_on
         const deps_val = step_obj.get("depends_on") orelse continue;
-        if (deps_val != .array) continue;
+        if (deps_val != .array) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on must be an array\"}}");
+        }
 
         for (deps_val.array.items) |dep_item| {
-            if (dep_item != .string) continue;
+            if (dep_item != .string) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on items must be strings\"}}");
+            }
             const dep_def_id = dep_item.string;
 
             // Find the generated step_id for this dependency
-            const dep_step_id = lookupGenId(def_ids.items, gen_ids.items, dep_def_id) orelse continue;
+            const dep_step_id = lookupGenId(def_ids.items, gen_ids.items, dep_def_id) orelse {
+                return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"validated dependency lookup failed\"}}");
+            };
 
             ctx.store.insertStepDep(step_id, dep_step_id) catch {
                 return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to insert step dependency\"}}");
@@ -376,9 +434,10 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
     }
 
     // Return 201 with run info
+    const run_id_json = jsonQuoted(ctx.allocator, run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"id":"{s}","status":"running"}}
-    , .{run_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        \\{{"id":{s},"status":"running"}}
+    , .{run_id_json}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(201, resp);
 }
 
@@ -398,10 +457,10 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to build steps JSON\"}}");
     };
 
-    const error_field = if (run.error_text) |et|
-        std.fmt.allocPrint(ctx.allocator, ",\"error_text\":\"{s}\"", .{et}) catch ""
-    else
-        "";
+    const error_field = if (run.error_text) |et| blk: {
+        const et_json = jsonQuoted(ctx.allocator, et) catch "";
+        break :blk std.fmt.allocPrint(ctx.allocator, ",\"error_text\":{s}", .{et_json}) catch "";
+    } else "";
 
     const started_field = if (run.started_at_ms) |s|
         std.fmt.allocPrint(ctx.allocator, ",\"started_at_ms\":{d}", .{s}) catch ""
@@ -413,11 +472,13 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
     else
         "";
 
+    const run_id_json = jsonQuoted(ctx.allocator, run.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const run_status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"id":"{s}","status":"{s}","created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s},"steps":{s}}}
+        \\{{"id":{s},"status":{s},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s},"steps":{s}}}
     , .{
-        run.id,
-        run.status,
+        run_id_json,
+        run_status_json,
         run.created_at_ms,
         run.updated_at_ms,
         error_field,
@@ -441,11 +502,13 @@ fn handleListRuns(ctx: *Context) HttpResponse {
         if (i > 0) {
             buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         }
+        const run_id_json = jsonQuoted(ctx.allocator, r.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const run_status_json = jsonQuoted(ctx.allocator, r.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":"{s}","status":"{s}","created_at_ms":{d},"updated_at_ms":{d}}}
+            \\{{"id":{s},"status":{s},"created_at_ms":{d},"updated_at_ms":{d}}}
         , .{
-            r.id,
-            r.status,
+            run_id_json,
+            run_status_json,
             r.created_at_ms,
             r.updated_at_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -478,12 +541,15 @@ fn handleListSteps(ctx: *Context, run_id: []const u8) HttpResponse {
     return jsonResponse(200, steps_json);
 }
 
-fn handleGetStep(ctx: *Context, _: []const u8, step_id: []const u8) HttpResponse {
+fn handleGetStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
     const step = ctx.store.getStep(ctx.allocator, step_id) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
     } orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
     };
+    if (!std.mem.eql(u8, step.run_id, run_id)) {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    }
 
     const step_json = buildSingleStepJson(ctx.allocator, step) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to build step JSON\"}}");
@@ -591,6 +657,9 @@ fn handleApproveStep(ctx: *Context, run_id: []const u8, step_id: []const u8) Htt
     } orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
     };
+    if (!std.mem.eql(u8, step.run_id, run_id)) {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    }
 
     // 2. Must be "waiting_approval"
     if (!std.mem.eql(u8, step.status, "waiting_approval")) {
@@ -622,6 +691,9 @@ fn handleRejectStep(ctx: *Context, run_id: []const u8, step_id: []const u8) Http
     } orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
     };
+    if (!std.mem.eql(u8, step.run_id, run_id)) {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    }
 
     // 2. Must be "waiting_approval"
     if (!std.mem.eql(u8, step.status, "waiting_approval")) {
@@ -653,6 +725,9 @@ fn handleSignalStep(ctx: *Context, run_id: []const u8, step_id: []const u8, body
     } orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
     };
+    if (!std.mem.eql(u8, step.run_id, run_id)) {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    }
 
     // 2. Must be "waiting_approval" (signal mode uses this status)
     if (!std.mem.eql(u8, step.status, "waiting_approval")) {
@@ -721,18 +796,20 @@ fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
             buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         }
 
-        const step_field = if (ev.step_id) |sid|
-            std.fmt.allocPrint(ctx.allocator, ",\"step_id\":\"{s}\"", .{sid}) catch ""
-        else
-            "";
+        const step_field = if (ev.step_id) |sid| blk: {
+            const sid_json = jsonQuoted(ctx.allocator, sid) catch "";
+            break :blk std.fmt.allocPrint(ctx.allocator, ",\"step_id\":{s}", .{sid_json}) catch "";
+        } else "";
+        const run_id_json = jsonQuoted(ctx.allocator, ev.run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const kind_json = jsonQuoted(ctx.allocator, ev.kind) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
 
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":{d},"run_id":"{s}"{s},"kind":"{s}","data":{s},"ts_ms":{d}}}
+            \\{{"id":{d},"run_id":{s}{s},"kind":{s},"data":{s},"ts_ms":{d}}}
         , .{
             ev.id,
-            ev.run_id,
+            run_id_json,
             step_field,
-            ev.kind,
+            kind_json,
             ev.data_json,
             ev.ts_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -746,7 +823,16 @@ fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
 
 // ── Chat Transcript Handler ──────────────────────────────────────────
 
-fn handleGetChatTranscript(ctx: *Context, _: []const u8, step_id: []const u8) HttpResponse {
+fn handleGetChatTranscript(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
+    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    };
+    if (!std.mem.eql(u8, step.run_id, run_id)) {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    }
+
     const messages = ctx.store.getChatMessages(ctx.allocator, step_id) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get chat messages\"}}");
     };
@@ -760,21 +846,25 @@ fn handleGetChatTranscript(ctx: *Context, _: []const u8, step_id: []const u8) Ht
             buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         }
 
-        const worker_field = if (msg.worker_id) |wid|
-            std.fmt.allocPrint(ctx.allocator, ",\"worker_id\":\"{s}\"", .{wid}) catch ""
-        else
-            "";
+        const worker_field = if (msg.worker_id) |wid| blk: {
+            const wid_json = jsonQuoted(ctx.allocator, wid) catch "";
+            break :blk std.fmt.allocPrint(ctx.allocator, ",\"worker_id\":{s}", .{wid_json}) catch "";
+        } else "";
+        const msg_run_id_json = jsonQuoted(ctx.allocator, msg.run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const msg_step_id_json = jsonQuoted(ctx.allocator, msg.step_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const role_json = jsonQuoted(ctx.allocator, msg.role) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const message_json = jsonQuoted(ctx.allocator, msg.message) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
 
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":{d},"run_id":"{s}","step_id":"{s}","round":{d},"role":"{s}"{s},"message":"{s}","ts_ms":{d}}}
+            \\{{"id":{d},"run_id":{s},"step_id":{s},"round":{d},"role":{s}{s},"message":{s},"ts_ms":{d}}}
         , .{
             msg.id,
-            msg.run_id,
-            msg.step_id,
+            msg_run_id_json,
+            msg_step_id_json,
             msg.round,
-            msg.role,
+            role_json,
             worker_field,
-            msg.message,
+            message_json,
             msg.ts_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -802,6 +892,10 @@ fn serializeJsonValue(allocator: std.mem.Allocator, val: ?std.json.Value) ![]con
     return try out.toOwnedSlice();
 }
 
+fn jsonQuoted(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    return std.json.Stringify.valueAlloc(allocator, value, .{});
+}
+
 fn lookupGenId(def_ids: []const []const u8, gen_ids: []const []const u8, target: []const u8) ?[]const u8 {
     for (def_ids, 0..) |did, i| {
         if (std.mem.eql(u8, did, target)) return gen_ids[i];
@@ -826,30 +920,36 @@ fn buildStepsJson(allocator: std.mem.Allocator, steps: []const @import("types.zi
 }
 
 fn buildSingleStepJson(allocator: std.mem.Allocator, s: @import("types.zig").StepRow) ![]const u8 {
-    const worker_field = if (s.worker_id) |wid|
-        try std.fmt.allocPrint(allocator, ",\"worker_id\":\"{s}\"", .{wid})
-    else
-        "";
+    const id_json = try jsonQuoted(allocator, s.id);
+    const run_id_json = try jsonQuoted(allocator, s.run_id);
+    const def_step_id_json = try jsonQuoted(allocator, s.def_step_id);
+    const type_json = try jsonQuoted(allocator, s.type);
+    const status_json = try jsonQuoted(allocator, s.status);
+
+    const worker_field = if (s.worker_id) |wid| blk: {
+        const wid_json = try jsonQuoted(allocator, wid);
+        break :blk try std.fmt.allocPrint(allocator, ",\"worker_id\":{s}", .{wid_json});
+    } else "";
 
     const output_field = if (s.output_json) |oj|
         try std.fmt.allocPrint(allocator, ",\"output_json\":{s}", .{oj})
     else
         "";
 
-    const error_field = if (s.error_text) |et|
-        try std.fmt.allocPrint(allocator, ",\"error_text\":\"{s}\"", .{et})
-    else
-        "";
+    const error_field = if (s.error_text) |et| blk: {
+        const et_json = try jsonQuoted(allocator, et);
+        break :blk try std.fmt.allocPrint(allocator, ",\"error_text\":{s}", .{et_json});
+    } else "";
 
     const timeout_field = if (s.timeout_ms) |t|
         try std.fmt.allocPrint(allocator, ",\"timeout_ms\":{d}", .{t})
     else
         "";
 
-    const parent_field = if (s.parent_step_id) |pid|
-        try std.fmt.allocPrint(allocator, ",\"parent_step_id\":\"{s}\"", .{pid})
-    else
-        "";
+    const parent_field = if (s.parent_step_id) |pid| blk: {
+        const pid_json = try jsonQuoted(allocator, pid);
+        break :blk try std.fmt.allocPrint(allocator, ",\"parent_step_id\":{s}", .{pid_json});
+    } else "";
 
     const item_field = if (s.item_index) |idx|
         try std.fmt.allocPrint(allocator, ",\"item_index\":{d}", .{idx})
@@ -866,19 +966,19 @@ fn buildSingleStepJson(allocator: std.mem.Allocator, s: @import("types.zig").Ste
     else
         "";
 
-    const child_run_field = if (s.child_run_id) |crid|
-        try std.fmt.allocPrint(allocator, ",\"child_run_id\":\"{s}\"", .{crid})
-    else
-        "";
+    const child_run_field = if (s.child_run_id) |crid| blk: {
+        const crid_json = try jsonQuoted(allocator, crid);
+        break :blk try std.fmt.allocPrint(allocator, ",\"child_run_id\":{s}", .{crid_json});
+    } else "";
 
     return try std.fmt.allocPrint(allocator,
-        \\{{"id":"{s}","run_id":"{s}","def_step_id":"{s}","type":"{s}","status":"{s}","attempt":{d},"max_attempts":{d},"iteration_index":{d},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s}{s}{s}{s}}}
+        \\{{"id":{s},"run_id":{s},"def_step_id":{s},"type":{s},"status":{s},"attempt":{d},"max_attempts":{d},"iteration_index":{d},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s}{s}{s}{s}}}
     , .{
-        s.id,
-        s.run_id,
-        s.def_step_id,
-        s.type,
-        s.status,
+        id_json,
+        run_id_json,
+        def_step_id_json,
+        type_json,
+        status_json,
         s.attempt,
         s.max_attempts,
         s.iteration_index,
@@ -943,4 +1043,76 @@ fn jsonResponse(status_code: u16, body: []const u8) HttpResponse {
         .body = body,
         .status_code = status_code,
     };
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+test "API: create run rejects unknown dependency" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work","depends_on":["missing"]}]}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: get step enforces run ownership" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    try store.insertRun("run-a", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertRun("run-b", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertStep("step-b-1", "run-b", "s1", "task", "ready", "{}", 1, null, null, null);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const resp = handleRequest(&ctx, "GET", "/runs/run-a/steps/step-b-1", "");
+    try std.testing.expectEqual(@as(u16, 404), resp.status_code);
+}
+
+test "API: chat transcript escapes message content" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    try store.insertRun("run-chat", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertStep("step-chat-1", "run-chat", "chat", "group_chat", "completed", "{}", 1, null, null, null);
+    try store.insertChatMessage("run-chat", "step-chat-1", 1, "agent", null, "He said \"go\"\\nline");
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const resp = handleRequest(&ctx, "GET", "/runs/run-chat/steps/step-chat-1/chat", "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const msg = parsed.value.array.items[0].object.get("message").?;
+    try std.testing.expectEqualStrings("He said \"go\"\\nline", msg.string);
 }
