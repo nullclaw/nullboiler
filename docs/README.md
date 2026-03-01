@@ -6,7 +6,7 @@ This directory contains integration guides for different deployment modes.
 
 1. Single orchestrator with NullClaw workers:
    `nullboiler + nullclaw`
-   See: `nullclaw-integration.md`
+   See: `single-nullclaw-integration.md`
 2. Multi-agent/multi-provider orchestration:
    `nullboiler + (nullclaw | zeroclaw | openclaw | picoclaw bridge)`
    See: `multi-bot-integration.md`
@@ -19,7 +19,7 @@ This directory contains integration guides for different deployment modes.
 
 ## Document map
 
-- `nullclaw-integration.md`
+- `single-nullclaw-integration.md`
   Required gateway pairing/token setup and supported response payloads.
 - `multi-bot-integration.md`
   Worker protocol matrix, config examples, PicoClaw bridge, and tracker bridge entrypoint.
