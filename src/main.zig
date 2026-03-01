@@ -95,4 +95,5 @@ comptime {
     _ = @import("store.zig");
     _ = @import("api.zig");
     _ = @import("templates.zig");
+    _ = @import("dispatch.zig");
 }
