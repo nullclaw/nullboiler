@@ -135,3 +135,107 @@ test "validateStepsForCreateRun: rejects duplicate ids" {
     defer parsed.deinit();
     try std.testing.expectError(error.StepIdDuplicate, validateStepsForCreateRun(allocator, parsed.value.array.items));
 }
+
+test "validateStepsForCreateRun: rejects non-object step item" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  "not-an-object"
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.StepMustBeObject, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects missing string id" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"type":"task"}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.StepIdMissingOrNotString, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects non-array depends_on" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"a","type":"task","depends_on":"x"}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.DependsOnNotArray, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects non-string depends_on item" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"a","type":"task","depends_on":[1]}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.DependsOnItemNotString, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects missing sub_workflow workflow field" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"sw","type":"sub_workflow"}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.SubWorkflowRequired, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects missing saga body field" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"sg","type":"saga"}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.SagaBodyRequired, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects missing debate count field" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"db","type":"debate","prompt_template":"x"}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.DebateCountRequired, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects missing group_chat participants field" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"gc","type":"group_chat","prompt_template":"x"}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.GroupChatParticipantsRequired, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}

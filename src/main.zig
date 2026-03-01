@@ -241,6 +241,27 @@ test "serializeTagsJson escapes special chars" {
     try std.testing.expectEqualStrings("[\"dev\\\"ops\",\"path\\\\with\\\\slashes\",\"line\\nbreak\"]", got);
 }
 
+test "parseContentLength returns zero when missing header" {
+    const headers = "POST /runs HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Content-Type: application/json";
+    try std.testing.expectEqual(@as(?usize, 0), parseContentLength(headers));
+}
+
+test "parseContentLength parses header case-insensitively with whitespace" {
+    const headers = "POST /runs HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "content-length:   123  ";
+    try std.testing.expectEqual(@as(?usize, 123), parseContentLength(headers));
+}
+
+test "parseContentLength returns null for invalid number" {
+    const headers = "POST /runs HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Content-Length: not-a-number";
+    try std.testing.expectEqual(@as(?usize, null), parseContentLength(headers));
+}
+
 comptime {
     _ = @import("ids.zig");
     _ = @import("types.zig");

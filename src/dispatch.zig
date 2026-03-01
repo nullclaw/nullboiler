@@ -647,3 +647,49 @@ test "parseWorkerResponse treats plain text as output" {
     try std.testing.expect(result.success);
     try std.testing.expectEqualStrings("plain text", result.output);
 }
+
+test "buildRequestBody: openai_chat requires model" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.MissingWorkerModel,
+        buildRequestBody(allocator, .openai_chat, null, "run-1", "step-1", "hello"),
+    );
+}
+
+test "parseWorkerResponse returns error for status received without output" {
+    const allocator = std.testing.allocator;
+    const result = try parseWorkerResponse(allocator, "{\"status\":\"received\"}");
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings(
+        "worker acknowledged request but returned no synchronous output",
+        result.error_text.?,
+    );
+}
+
+test "parseWorkerResponse returns worker error from error.message object" {
+    const allocator = std.testing.allocator;
+    const result = try parseWorkerResponse(
+        allocator,
+        "{\"error\":{\"message\":\"rate limit\"}}",
+    );
+    defer allocator.free(result.error_text.?);
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("rate limit", result.error_text.?);
+}
+
+test "parseWorkerResponse rejects JSON arrays" {
+    const allocator = std.testing.allocator;
+    const result = try parseWorkerResponse(allocator, "[\"not\",\"object\"]");
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("worker response must be a JSON object", result.error_text.?);
+}
+
+test "parseWorkerResponse rejects object without recognized fields" {
+    const allocator = std.testing.allocator;
+    const result = try parseWorkerResponse(allocator, "{\"status\":\"ok\"}");
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings(
+        "worker response missing output/response/reply/choices field",
+        result.error_text.?,
+    );
+}

@@ -1187,3 +1187,23 @@ test "API: approve route does not match extra path segment" {
     const step = (try store.getStep(arena.allocator(), "s1")).?;
     try std.testing.expectEqualStrings("waiting_approval", step.status);
 }
+
+test "API: register openai_chat worker requires model" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"id":"openai-1","url":"http://localhost:42617/v1/chat/completions","protocol":"openai_chat"}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/workers", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
