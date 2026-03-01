@@ -24,6 +24,7 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
     const seg2 = getPathSegment(path, 2);
     const seg3 = getPathSegment(path, 3);
     const seg4 = getPathSegment(path, 4);
+    const seg5 = getPathSegment(path, 5);
 
     const is_get = eql(method, "GET");
     const is_post = eql(method, "POST");
@@ -77,6 +78,16 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
     // POST /runs/{id}/steps/{step_id}/reject
     if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "reject")) {
         return handleRejectStep(ctx, seg1.?, seg3.?);
+    }
+
+    // POST /runs/{id}/steps/{step_id}/signal
+    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "signal")) {
+        return handleSignalStep(ctx, seg1.?, seg3.?, body);
+    }
+
+    // GET /runs/{id}/steps/{step_id}/chat
+    if (is_get and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "chat") and seg5 == null) {
+        return handleGetChatTranscript(ctx, seg1.?, seg3.?);
     }
 
     // GET /runs/{id}/events
@@ -272,6 +283,35 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
 
         const def_step_id = getJsonString(step_obj, "id") orelse continue;
         const step_type = getJsonString(step_obj, "type") orelse "task";
+
+        // Validate required fields for advanced step types
+        if (eql(step_type, "loop") and step_obj.get("body") == null) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}");
+        }
+        if (eql(step_type, "sub_workflow") and step_obj.get("workflow") == null) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}");
+        }
+        if (eql(step_type, "wait")) {
+            if (step_obj.get("duration_ms") == null and step_obj.get("until_ms") == null and step_obj.get("signal") == null) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait step requires 'duration_ms', 'until_ms', or 'signal'\"}}");
+            }
+        }
+        if (eql(step_type, "router") and step_obj.get("routes") == null) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"router step requires 'routes' field\"}}");
+        }
+        if (eql(step_type, "saga") and step_obj.get("body") == null) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"saga step requires 'body' field\"}}");
+        }
+        if (eql(step_type, "debate")) {
+            if (step_obj.get("count") == null) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"debate step requires 'count' field\"}}");
+            }
+        }
+        if (eql(step_type, "group_chat")) {
+            if (step_obj.get("participants") == null) {
+                return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"group_chat step requires 'participants' field\"}}");
+            }
+        }
 
         // Generate step_id
         const step_id_buf = ids.generateId();
@@ -606,6 +646,66 @@ fn handleRejectStep(ctx: *Context, run_id: []const u8, step_id: []const u8) Http
     return jsonResponse(200, resp);
 }
 
+fn handleSignalStep(ctx: *Context, run_id: []const u8, step_id: []const u8, body: []const u8) HttpResponse {
+    // 1. Get step from store
+    const step = ctx.store.getStep(ctx.allocator, step_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get step\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"step not found\"}}");
+    };
+
+    // 2. Must be "waiting_approval" (signal mode uses this status)
+    if (!std.mem.eql(u8, step.status, "waiting_approval")) {
+        const resp = std.fmt.allocPrint(ctx.allocator,
+            \\{{"error":{{"code":"conflict","message":"step is not waiting for signal (current: {s})"}}}}
+        , .{step.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"step is not waiting for signal\"}}");
+        return jsonResponse(409, resp);
+    }
+
+    // 3. Parse optional signal data from body
+    var signal_data: []const u8 = "{}";
+    if (body.len > 0) {
+        const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+            // Body is not valid JSON; use empty
+            signal_data = "{}";
+            // Continue anyway
+            const output = std.fmt.allocPrint(ctx.allocator,
+                \\{{"output":"signaled","data":{{}}}}
+            , .{}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+            ctx.store.updateStepStatus(step_id, "completed", null, output, null, step.attempt) catch {
+                return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
+            };
+            ctx.store.insertEvent(run_id, step_id, "step.signaled", output) catch {};
+            const resp = std.fmt.allocPrint(ctx.allocator,
+                \\{{"step_id":"{s}","status":"completed"}}
+            , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            return jsonResponse(200, resp);
+        };
+        _ = parsed;
+        signal_data = body;
+    }
+
+    // 4. Build output with signal data
+    const output = std.fmt.allocPrint(ctx.allocator,
+        \\{{"output":"signaled","data":{s}}}
+    , .{signal_data}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    // 5. Update step to "completed"
+    ctx.store.updateStepStatus(step_id, "completed", null, output, null, step.attempt) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
+    };
+
+    // 6. Insert event
+    ctx.store.insertEvent(run_id, step_id, "step.signaled", output) catch {};
+
+    // 7. Return 200
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"step_id":"{s}","status":"completed"}}
+    , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
+}
+
 fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
     // 1. Get events from store
     const events = ctx.store.getEventsByRun(ctx.allocator, run_id) catch {
@@ -635,6 +735,47 @@ fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
             ev.kind,
             ev.data_json,
             ev.ts_ms,
+        }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    }
+
+    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, json_body);
+}
+
+// ── Chat Transcript Handler ──────────────────────────────────────────
+
+fn handleGetChatTranscript(ctx: *Context, _: []const u8, step_id: []const u8) HttpResponse {
+    const messages = ctx.store.getChatMessages(ctx.allocator, step_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get chat messages\"}}");
+    };
+
+    // Build JSON array of chat messages
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    for (messages, 0..) |msg, i| {
+        if (i > 0) {
+            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        }
+
+        const worker_field = if (msg.worker_id) |wid|
+            std.fmt.allocPrint(ctx.allocator, ",\"worker_id\":\"{s}\"", .{wid}) catch ""
+        else
+            "";
+
+        const entry = std.fmt.allocPrint(ctx.allocator,
+            \\{{"id":{d},"run_id":"{s}","step_id":"{s}","round":{d},"role":"{s}"{s},"message":"{s}","ts_ms":{d}}}
+        , .{
+            msg.id,
+            msg.run_id,
+            msg.step_id,
+            msg.round,
+            msg.role,
+            worker_field,
+            msg.message,
+            msg.ts_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     }
@@ -725,8 +866,13 @@ fn buildSingleStepJson(allocator: std.mem.Allocator, s: @import("types.zig").Ste
     else
         "";
 
+    const child_run_field = if (s.child_run_id) |crid|
+        try std.fmt.allocPrint(allocator, ",\"child_run_id\":\"{s}\"", .{crid})
+    else
+        "";
+
     return try std.fmt.allocPrint(allocator,
-        \\{{"id":"{s}","run_id":"{s}","def_step_id":"{s}","type":"{s}","status":"{s}","attempt":{d},"max_attempts":{d},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s}{s}{s}}}
+        \\{{"id":"{s}","run_id":"{s}","def_step_id":"{s}","type":"{s}","status":"{s}","attempt":{d},"max_attempts":{d},"iteration_index":{d},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s}{s}{s}{s}}}
     , .{
         s.id,
         s.run_id,
@@ -735,6 +881,7 @@ fn buildSingleStepJson(allocator: std.mem.Allocator, s: @import("types.zig").Ste
         s.status,
         s.attempt,
         s.max_attempts,
+        s.iteration_index,
         s.created_at_ms,
         s.updated_at_ms,
         worker_field,
@@ -745,6 +892,7 @@ fn buildSingleStepJson(allocator: std.mem.Allocator, s: @import("types.zig").Ste
         item_field,
         started_field,
         ended_field,
+        child_run_field,
     });
 }
 

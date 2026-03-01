@@ -107,15 +107,43 @@ pub const Store = struct {
     }
 
     fn migrate(self: *Self) !void {
-        const sql = @embedFile("migrations/001_init.sql");
+        // Migration 001
+        const sql_001 = @embedFile("migrations/001_init.sql");
         var err_msg: [*c]u8 = null;
-        const prc = c.sqlite3_exec(self.db, sql.ptr, null, null, &err_msg);
+        var prc = c.sqlite3_exec(self.db, sql_001.ptr, null, null, &err_msg);
         if (prc != c.SQLITE_OK) {
             if (err_msg) |msg| {
-                log.err("migration failed (rc={d}): {s}", .{ prc, std.mem.span(msg) });
+                log.err("migration 001 failed (rc={d}): {s}", .{ prc, std.mem.span(msg) });
                 c.sqlite3_free(msg);
             }
             return error.MigrationFailed;
+        }
+
+        // Migration 002 — new tables (idempotent via IF NOT EXISTS)
+        const sql_002 = @embedFile("migrations/002_advanced_steps.sql");
+        prc = c.sqlite3_exec(self.db, sql_002.ptr, null, null, &err_msg);
+        if (prc != c.SQLITE_OK) {
+            if (err_msg) |msg| {
+                log.err("migration 002 failed (rc={d}): {s}", .{ prc, std.mem.span(msg) });
+                c.sqlite3_free(msg);
+            }
+            return error.MigrationFailed;
+        }
+
+        // ALTER TABLE additions (ignore errors for idempotency)
+        self.execIgnoreError("ALTER TABLE steps ADD COLUMN child_run_id TEXT REFERENCES runs(id);");
+        self.execIgnoreError("ALTER TABLE steps ADD COLUMN iteration_index INTEGER DEFAULT 0;");
+    }
+
+    fn execIgnoreError(self: *Self, sql: [*:0]const u8) void {
+        var err_msg: [*c]u8 = null;
+        const prc = c.sqlite3_exec(self.db, sql, null, null, &err_msg);
+        if (prc != c.SQLITE_OK) {
+            if (err_msg) |msg| {
+                // This is expected on re-run (duplicate column name) — just log at debug level
+                log.debug("ALTER TABLE skipped (rc={d}): {s}", .{ prc, std.mem.span(msg) });
+                c.sqlite3_free(msg);
+            }
         }
     }
 
@@ -398,6 +426,34 @@ pub const Store = struct {
         }
     }
 
+    pub fn insertStepWithIteration(self: *Self, id: []const u8, run_id: []const u8, def_step_id: []const u8, step_type: []const u8, status: []const u8, input_json: []const u8, max_attempts: i64, timeout_ms: ?i64, parent_step_id: ?[]const u8, item_index: ?i64, iteration_index: i64) !void {
+        const sql = "INSERT INTO steps (id, run_id, def_step_id, type, status, input_json, max_attempts, timeout_ms, parent_step_id, item_index, iteration_index, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        const now = ids.nowMs();
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, def_step_id.ptr, @intCast(def_step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, step_type.ptr, @intCast(step_type.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 5, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 6, input_json.ptr, @intCast(input_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 7, max_attempts);
+        bindIntOpt(stmt, 8, timeout_ms);
+        bindTextOpt(stmt, 9, parent_step_id);
+        bindIntOpt(stmt, 10, item_index);
+        _ = c.sqlite3_bind_int64(stmt, 11, iteration_index);
+        _ = c.sqlite3_bind_int64(stmt, 12, now);
+        _ = c.sqlite3_bind_int64(stmt, 13, now);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
     pub fn insertStepDep(self: *Self, step_id: []const u8, depends_on: []const u8) !void {
         const sql = "INSERT INTO step_deps (step_id, depends_on) VALUES (?, ?)";
         var stmt: ?*c.sqlite3_stmt = null;
@@ -415,7 +471,7 @@ pub const Store = struct {
     }
 
     pub fn getStepsByRun(self: *Self, allocator: std.mem.Allocator, run_id: []const u8) ![]types.StepRow {
-        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM steps WHERE run_id = ? ORDER BY created_at_ms ASC";
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE run_id = ? ORDER BY created_at_ms ASC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -432,7 +488,7 @@ pub const Store = struct {
     }
 
     pub fn getStep(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.StepRow {
-        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM steps WHERE id = ?";
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -469,7 +525,7 @@ pub const Store = struct {
 
     pub fn getReadySteps(self: *Self, allocator: std.mem.Allocator, run_id: []const u8) ![]types.StepRow {
         const sql =
-            "SELECT s.id, s.run_id, s.def_step_id, s.type, s.status, s.worker_id, s.input_json, s.output_json, s.error_text, s.attempt, s.max_attempts, s.timeout_ms, s.parent_step_id, s.item_index, s.created_at_ms, s.updated_at_ms, s.started_at_ms, s.ended_at_ms " ++
+            "SELECT s.id, s.run_id, s.def_step_id, s.type, s.status, s.worker_id, s.input_json, s.output_json, s.error_text, s.attempt, s.max_attempts, s.timeout_ms, s.parent_step_id, s.item_index, s.created_at_ms, s.updated_at_ms, s.started_at_ms, s.ended_at_ms, s.child_run_id, s.iteration_index " ++
             "FROM steps s WHERE s.run_id = ? AND s.status = 'ready' " ++
             "AND NOT EXISTS (" ++
             "SELECT 1 FROM step_deps d JOIN steps dep ON dep.id = d.depends_on " ++
@@ -505,7 +561,7 @@ pub const Store = struct {
     }
 
     pub fn getChildSteps(self: *Self, allocator: std.mem.Allocator, parent_step_id: []const u8) ![]types.StepRow {
-        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM steps WHERE parent_step_id = ? ORDER BY item_index ASC";
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE parent_step_id = ? ORDER BY item_index ASC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -554,6 +610,24 @@ pub const Store = struct {
         return colInt(stmt, 0);
     }
 
+    /// Set started_at_ms for a step (used by wait steps to track timer start).
+    pub fn setStepStartedAt(self: *Self, step_id: []const u8, ts_ms: i64) !void {
+        const sql = "UPDATE steps SET started_at_ms = ?, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_int64(stmt, 1, ts_ms);
+        _ = c.sqlite3_bind_int64(stmt, 2, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 3, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
     fn readStepRow(allocator: std.mem.Allocator, stmt: ?*c.sqlite3_stmt) !types.StepRow {
         return types.StepRow{
             .id = try allocStr(allocator, stmt, 0),
@@ -574,6 +648,8 @@ pub const Store = struct {
             .updated_at_ms = colInt(stmt, 15),
             .started_at_ms = colIntOpt(stmt, 16),
             .ended_at_ms = colIntOpt(stmt, 17),
+            .child_run_id = try allocStrOpt(allocator, stmt, 18),
+            .iteration_index = colIntOpt(stmt, 19) orelse 0,
         };
     }
 
@@ -668,6 +744,174 @@ pub const Store = struct {
             });
         }
         return list.toOwnedSlice(allocator);
+    }
+
+    // ── Cycle State CRUD ─────────────────────────────────────────────
+
+    pub fn getCycleState(self: *Self, run_id: []const u8, cycle_key: []const u8) !?struct { iteration_count: i64, max_iterations: i64 } {
+        const sql = "SELECT iteration_count, max_iterations FROM cycle_state WHERE run_id = ? AND cycle_key = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, cycle_key.ptr, @intCast(cycle_key.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return .{
+            .iteration_count = colInt(stmt, 0),
+            .max_iterations = colInt(stmt, 1),
+        };
+    }
+
+    pub fn upsertCycleState(self: *Self, run_id: []const u8, cycle_key: []const u8, iteration_count: i64, max_iterations: i64) !void {
+        const sql = "INSERT OR REPLACE INTO cycle_state (run_id, cycle_key, iteration_count, max_iterations) VALUES (?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, cycle_key.ptr, @intCast(cycle_key.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 3, iteration_count);
+        _ = c.sqlite3_bind_int64(stmt, 4, max_iterations);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    // ── Chat Message CRUD ────────────────────────────────────────────
+
+    pub fn insertChatMessage(self: *Self, run_id: []const u8, step_id: []const u8, round: i64, role: []const u8, worker_id: ?[]const u8, message: []const u8) !void {
+        const sql = "INSERT INTO chat_messages (run_id, step_id, round, role, worker_id, message, ts_ms) VALUES (?, ?, ?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 3, round);
+        _ = c.sqlite3_bind_text(stmt, 4, role.ptr, @intCast(role.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 5, worker_id);
+        _ = c.sqlite3_bind_text(stmt, 6, message.ptr, @intCast(message.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 7, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getChatMessages(self: *Self, allocator: std.mem.Allocator, step_id: []const u8) ![]types.ChatMessageRow {
+        const sql = "SELECT id, run_id, step_id, round, role, worker_id, message, ts_ms FROM chat_messages WHERE step_id = ? ORDER BY round, id";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.ChatMessageRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, .{
+                .id = colInt(stmt, 0),
+                .run_id = try allocStr(allocator, stmt, 1),
+                .step_id = try allocStr(allocator, stmt, 2),
+                .round = colInt(stmt, 3),
+                .role = try allocStr(allocator, stmt, 4),
+                .worker_id = try allocStrOpt(allocator, stmt, 5),
+                .message = try allocStr(allocator, stmt, 6),
+                .ts_ms = colInt(stmt, 7),
+            });
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    // ── Saga State CRUD ──────────────────────────────────────────────
+
+    pub fn insertSagaState(self: *Self, run_id: []const u8, saga_step_id: []const u8, body_step_id: []const u8, compensation_step_id: ?[]const u8) !void {
+        const sql = "INSERT INTO saga_state (run_id, saga_step_id, body_step_id, compensation_step_id, status) VALUES (?, ?, ?, ?, 'pending')";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, saga_step_id.ptr, @intCast(saga_step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, body_step_id.ptr, @intCast(body_step_id.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 4, compensation_step_id);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn updateSagaState(self: *Self, run_id: []const u8, saga_step_id: []const u8, body_step_id: []const u8, status: []const u8) !void {
+        const sql = "UPDATE saga_state SET status = ? WHERE run_id = ? AND saga_step_id = ? AND body_step_id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, saga_step_id.ptr, @intCast(saga_step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, body_step_id.ptr, @intCast(body_step_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getSagaStates(self: *Self, allocator: std.mem.Allocator, run_id: []const u8, saga_step_id: []const u8) ![]types.SagaStateRow {
+        const sql = "SELECT run_id, saga_step_id, body_step_id, compensation_step_id, status FROM saga_state WHERE run_id = ? AND saga_step_id = ? ORDER BY rowid";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, saga_step_id.ptr, @intCast(saga_step_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.SagaStateRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, .{
+                .run_id = try allocStr(allocator, stmt, 0),
+                .saga_step_id = try allocStr(allocator, stmt, 1),
+                .body_step_id = try allocStr(allocator, stmt, 2),
+                .compensation_step_id = try allocStrOpt(allocator, stmt, 3),
+                .status = try allocStr(allocator, stmt, 4),
+            });
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    // ── Sub-workflow Helper ──────────────────────────────────────────
+
+    pub fn updateStepChildRunId(self: *Self, step_id: []const u8, child_run_id: []const u8) !void {
+        const sql = "UPDATE steps SET child_run_id = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, child_run_id.ptr, @intCast(child_run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
     }
 };
 
@@ -1030,4 +1274,139 @@ test "Store: get nonexistent step returns null" {
     defer s.deinit();
     const step = try s.getStep(allocator, "nonexistent");
     try std.testing.expect(step == null);
+}
+
+test "cycle state: upsert and get" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    // Insert a run first (cycle_state references runs(id))
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+
+    // Upsert cycle state
+    try s.upsertCycleState("r1", "loop_A", 1, 10);
+
+    // Get and verify values
+    const cs = (try s.getCycleState("r1", "loop_A")).?;
+    try std.testing.expectEqual(@as(i64, 1), cs.iteration_count);
+    try std.testing.expectEqual(@as(i64, 10), cs.max_iterations);
+
+    // Upsert again with new iteration_count
+    try s.upsertCycleState("r1", "loop_A", 5, 10);
+
+    // Verify updated value
+    const cs2 = (try s.getCycleState("r1", "loop_A")).?;
+    try std.testing.expectEqual(@as(i64, 5), cs2.iteration_count);
+    try std.testing.expectEqual(@as(i64, 10), cs2.max_iterations);
+}
+
+test "cycle state: get returns null for nonexistent" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    const cs = try s.getCycleState("no_run", "no_key");
+    try std.testing.expect(cs == null);
+}
+
+test "chat messages: insert and get ordered by round" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertStep("s1", "r1", "chat_step", "group_chat", "running", "{}", 1, null, null, null);
+
+    // Insert messages with different rounds (out of order)
+    try s.insertChatMessage("r1", "s1", 2, "assistant", "w1", "round 2 message");
+    try s.insertChatMessage("r1", "s1", 1, "user", null, "round 1 message");
+    try s.insertChatMessage("r1", "s1", 1, "assistant", "w1", "round 1 reply");
+
+    // Verify getChatMessages returns them ordered by round, id
+    const msgs = try s.getChatMessages(allocator, "s1");
+    defer {
+        for (msgs) |m| {
+            allocator.free(m.run_id);
+            allocator.free(m.step_id);
+            allocator.free(m.role);
+            if (m.worker_id) |wid| allocator.free(wid);
+            allocator.free(m.message);
+        }
+        allocator.free(msgs);
+    }
+    try std.testing.expectEqual(@as(usize, 3), msgs.len);
+    // First two should be round 1 (ordered by id within round)
+    try std.testing.expectEqual(@as(i64, 1), msgs[0].round);
+    try std.testing.expectEqual(@as(i64, 1), msgs[1].round);
+    try std.testing.expectEqual(@as(i64, 2), msgs[2].round);
+    try std.testing.expectEqualStrings("round 1 message", msgs[0].message);
+    try std.testing.expectEqualStrings("round 1 reply", msgs[1].message);
+    try std.testing.expectEqualStrings("round 2 message", msgs[2].message);
+}
+
+test "saga state: insert, update status, and get" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertStep("saga1", "r1", "saga_def", "saga", "running", "{}", 1, null, null, null);
+    try s.insertStep("body1", "r1", "body_def1", "task", "pending", "{}", 1, null, "saga1", null);
+    try s.insertStep("body2", "r1", "body_def2", "task", "pending", "{}", 1, null, "saga1", null);
+    try s.insertStep("comp1", "r1", "comp_def1", "task", "pending", "{}", 1, null, "saga1", null);
+
+    // Insert saga states for body steps
+    try s.insertSagaState("r1", "saga1", "body1", "comp1");
+    try s.insertSagaState("r1", "saga1", "body2", null);
+
+    // Update one to 'completed'
+    try s.updateSagaState("r1", "saga1", "body1", "completed");
+
+    // Verify getSagaStates returns correct statuses
+    const states = try s.getSagaStates(allocator, "r1", "saga1");
+    defer {
+        for (states) |st| {
+            allocator.free(st.run_id);
+            allocator.free(st.saga_step_id);
+            allocator.free(st.body_step_id);
+            if (st.compensation_step_id) |cid| allocator.free(cid);
+            allocator.free(st.status);
+        }
+        allocator.free(states);
+    }
+    try std.testing.expectEqual(@as(usize, 2), states.len);
+    try std.testing.expectEqualStrings("body1", states[0].body_step_id);
+    try std.testing.expectEqualStrings("completed", states[0].status);
+    try std.testing.expectEqualStrings("comp1", states[0].compensation_step_id.?);
+    try std.testing.expectEqualStrings("body2", states[1].body_step_id);
+    try std.testing.expectEqualStrings("pending", states[1].status);
+    try std.testing.expect(states[1].compensation_step_id == null);
+}
+
+test "updateStepChildRunId: sets child_run_id on step" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    // Create a run and step
+    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("child_r1", "running", "{}", "{}", "[]");
+    try s.insertStep("s1", "r1", "sub_wf", "sub_workflow", "running", "{}", 1, null, null, null);
+
+    // Update child_run_id
+    try s.updateStepChildRunId("s1", "child_r1");
+
+    // Get step and verify child_run_id is set
+    const step = (try s.getStep(allocator, "s1")).?;
+    defer {
+        allocator.free(step.id);
+        allocator.free(step.run_id);
+        allocator.free(step.def_step_id);
+        allocator.free(step.type);
+        allocator.free(step.status);
+        allocator.free(step.input_json);
+        if (step.child_run_id) |crid| allocator.free(crid);
+    }
+    try std.testing.expectEqualStrings("child_r1", step.child_run_id.?);
 }

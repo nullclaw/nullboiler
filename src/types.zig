@@ -53,6 +53,14 @@ pub const StepType = enum {
     condition,
     approval,
     reduce,
+    loop,
+    sub_workflow,
+    wait,
+    router,
+    transform,
+    saga,
+    debate,
+    group_chat,
 
     pub fn toString(self: StepType) []const u8 {
         return @tagName(self);
@@ -145,6 +153,8 @@ pub const StepRow = struct {
     updated_at_ms: i64,
     started_at_ms: ?i64,
     ended_at_ms: ?i64,
+    child_run_id: ?[]const u8,
+    iteration_index: i64,
 };
 
 pub const EventRow = struct {
@@ -164,6 +174,25 @@ pub const ArtifactRow = struct {
     uri: []const u8,
     meta_json: []const u8,
     created_at_ms: i64,
+};
+
+pub const ChatMessageRow = struct {
+    id: i64,
+    run_id: []const u8,
+    step_id: []const u8,
+    round: i64,
+    role: []const u8,
+    worker_id: ?[]const u8,
+    message: []const u8,
+    ts_ms: i64,
+};
+
+pub const SagaStateRow = struct {
+    run_id: []const u8,
+    saga_step_id: []const u8,
+    body_step_id: []const u8,
+    compensation_step_id: ?[]const u8,
+    status: []const u8,
 };
 
 // ── API Response Types ─────────────────────────────────────────────────

@@ -13,16 +13,17 @@ DAG-based workflow orchestrator for NullClaw AI bot agents. Part of the Null eco
 | File | Role |
 |------|------|
 | `main.zig` | CLI args (`--port`, `--db`, `--config`, `--version`), HTTP accept loop, engine thread |
-| `api.zig` | REST API routing and 14 endpoint handlers |
-| `store.zig` | SQLite layer, 22+ CRUD methods, schema migration |
-| `engine.zig` | DAG scheduler: tick loop, 6 step type handlers |
+| `api.zig` | REST API routing and 16 endpoint handlers (incl. signal, chat) |
+| `store.zig` | SQLite layer, 30+ CRUD methods, schema migrations |
+| `engine.zig` | DAG scheduler: tick loop, 14 step type handlers, graph cycles, worker handoff |
 | `dispatch.zig` | Worker selection (tags, capacity), HTTP POST to `/webhook` |
-| `templates.zig` | Prompt template rendering: `{{input.X}}`, `{{steps.ID.output}}`, `{{item}}` |
+| `templates.zig` | Prompt template rendering: `{{input.X}}`, `{{steps.ID.output}}`, `{{item}}`, `{{debate_responses}}`, `{{chat_history}}`, `{{role}}` |
 | `callbacks.zig` | Fire-and-forget webhook callbacks on step/run events |
 | `config.zig` | JSON config loader (`Config`, `WorkerConfig`, `EngineConfig`) |
-| `types.zig` | `RunStatus`, `StepStatus`, `StepType`, `WorkerStatus`, row types |
+| `types.zig` | `RunStatus`, `StepStatus`, `StepType` (14 types), `WorkerStatus`, row types |
 | `ids.zig` | UUID v4 generation, `nowMs()` |
 | `migrations/001_init.sql` | 6 tables: workers, runs, steps, step_deps, events, artifacts |
+| `migrations/002_advanced_steps.sql` | 3 tables: cycle_state, chat_messages, saga_state + ALTER TABLE |
 
 ## Build / Test / Run
 
@@ -51,10 +52,12 @@ zig build && bash tests/test_e2e.sh   # e2e tests (requires Python 3 for mock wo
 | POST | `/runs/{id}/steps/{step_id}/approve` | Approve approval step |
 | POST | `/runs/{id}/steps/{step_id}/reject` | Reject approval step |
 | GET | `/runs/{id}/events` | List run events |
+| POST | `/runs/{id}/steps/{step_id}/signal` | Signal a waiting step |
+| GET | `/runs/{id}/steps/{step_id}/chat` | Get group_chat transcript |
 
 ## Step Types
 
-`task`, `fan_out`, `map`, `condition`, `approval`, `reduce`
+`task`, `fan_out`, `map`, `condition`, `approval`, `reduce`, `loop`, `sub_workflow`, `wait`, `router`, `transform`, `saga`, `debate`, `group_chat`
 
 ## Coding Conventions
 
@@ -71,9 +74,12 @@ zig build && bash tests/test_e2e.sh   # e2e tests (requires Python 3 for mock wo
 - Background engine thread polls DB for active runs
 - `std.atomic.Value(bool)` for coordinated shutdown
 - Config workers seeded into DB on startup (source = "config")
-- Schema in `migrations/001_init.sql`, applied on `Store.init`
+- Schema in `migrations/001_init.sql` + `002_advanced_steps.sql`, applied on `Store.init`
+- Graph cycles: condition/router can route back to completed steps, engine creates new step instances per iteration
+- Worker handoff: dispatch result can include `handoff_to` for chained delegation (max 5)
 
 ## Database
 
-SQLite with WAL mode. Schema: 6 tables (workers, runs, steps, step_deps, events, artifacts).
-See `src/migrations/001_init.sql` for full schema.
+SQLite with WAL mode. Schema: 9 tables across 2 migrations.
+- `001_init.sql`: workers, runs, steps, step_deps, events, artifacts
+- `002_advanced_steps.sql`: cycle_state, chat_messages, saga_state + iteration_index/child_run_id columns on steps

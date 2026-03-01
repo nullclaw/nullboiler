@@ -15,6 +15,9 @@ pub const Context = struct {
     input_json: []const u8, // raw JSON string of workflow input
     step_outputs: []const StepOutput, // completed step outputs
     item: ?[]const u8, // current map item (null if not in map)
+    debate_responses: ?[]const u8 = null, // JSON array string for debate judge template
+    chat_history: ?[]const u8 = null, // formatted chat transcript for group_chat round_template
+    role: ?[]const u8 = null, // participant role for group_chat round_template
 
     pub const StepOutput = struct {
         step_id: []const u8,
@@ -81,6 +84,27 @@ fn resolveExpression(allocator: std.mem.Allocator, expr: []const u8, ctx: Contex
             return allocator.dupe(u8, item) catch return error.OutOfMemory;
         }
         return error.ItemNotAvailable;
+    }
+
+    if (std.mem.eql(u8, expr, "debate_responses")) {
+        if (ctx.debate_responses) |dr| {
+            return allocator.dupe(u8, dr) catch return error.OutOfMemory;
+        }
+        return allocator.dupe(u8, "[]") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.eql(u8, expr, "chat_history")) {
+        if (ctx.chat_history) |ch| {
+            return allocator.dupe(u8, ch) catch return error.OutOfMemory;
+        }
+        return allocator.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.eql(u8, expr, "role")) {
+        if (ctx.role) |r| {
+            return allocator.dupe(u8, r) catch return error.OutOfMemory;
+        }
+        return allocator.dupe(u8, "") catch return error.OutOfMemory;
     }
 
     if (std.mem.startsWith(u8, expr, "input.")) {
@@ -360,4 +384,41 @@ test "item without map context returns error" {
         .item = null,
     });
     try std.testing.expectError(error.ItemNotAvailable, err);
+}
+
+test "render debate_responses expression" {
+    const allocator = std.testing.allocator;
+    const result = try render(allocator, "Pick best:\n{{debate_responses}}", .{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .debate_responses = "[\"resp1\",\"resp2\"]",
+    });
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "resp1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "resp2") != null);
+}
+
+test "render chat_history and role expressions" {
+    const allocator = std.testing.allocator;
+    const result = try render(allocator, "Previous:\n{{chat_history}}\nYour role: {{role}}", .{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .chat_history = "Architect: design first",
+        .role = "Frontend Dev",
+    });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Previous:\nArchitect: design first\nYour role: Frontend Dev", result);
+}
+
+test "debate_responses defaults to empty array when not set" {
+    const allocator = std.testing.allocator;
+    const result = try render(allocator, "{{debate_responses}}", .{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+    });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("[]", result);
 }

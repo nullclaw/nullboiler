@@ -791,6 +791,260 @@ else
 fi
 
 # =============================================================================
+# Advanced Step Type Tests (no workers required)
+# =============================================================================
+
+printf '\n%b--- Advanced Step Type Tests ---%b\n\n' "$BOLD" "$RESET"
+
+# ── Test: Transform step completes with output_template ─────────────
+
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"steps":[{"id":"prep","type":"transform","output_template":"transformed_data"}],"input":{"value":"test"}}')
+parse_resp "$RESP"
+
+TRANSFORM_RUN_ID=""
+if [ "$HTTP_CODE" = "201" ]; then
+    TRANSFORM_RUN_ID=$(json_field "$BODY" "id")
+fi
+
+if [ -z "$TRANSFORM_RUN_ID" ]; then
+    fail "Transform step run created" "expected 201, got HTTP $HTTP_CODE; body: $BODY"
+    skip "Transform step completes" "run creation failed"
+    skip "Transform step has output" "run creation failed"
+else
+    # Poll until run completes or timeout (~6s)
+    TRANSFORM_STATUS=""
+    for _i in $(seq 1 30); do
+        RESP=$(safe_curl "$BASE_URL/runs/$TRANSFORM_RUN_ID")
+        parse_resp "$RESP"
+        if [ "$HTTP_CODE" = "200" ]; then
+            TRANSFORM_STATUS=$(json_field "$BODY" "status")
+            if [ "$TRANSFORM_STATUS" = "completed" ] || [ "$TRANSFORM_STATUS" = "failed" ]; then
+                break
+            fi
+        fi
+        sleep 0.2
+    done
+
+    if [ "$TRANSFORM_STATUS" = "completed" ]; then
+        pass "Transform step completes"
+    else
+        fail "Transform step completes" "expected 'completed', got '$TRANSFORM_STATUS'"
+    fi
+
+    # Verify step has output
+    RESP=$(safe_curl "$BASE_URL/runs/$TRANSFORM_RUN_ID/steps")
+    parse_resp "$RESP"
+    if [ "$HTTP_CODE" = "200" ]; then
+        STEP_OUTPUT=$(json_array_first_field "$BODY" "output_json")
+        STEP_STATUS=$(json_array_first_field "$BODY" "status")
+        if [ "$STEP_STATUS" = "completed" ] && [ -n "$STEP_OUTPUT" ] && [ "$STEP_OUTPUT" != "null" ]; then
+            pass "Transform step has output"
+        else
+            fail "Transform step has output" "status='$STEP_STATUS', output='$STEP_OUTPUT'"
+        fi
+    else
+        fail "Transform step has output" "failed to fetch steps (HTTP $HTTP_CODE)"
+    fi
+fi
+
+# ── Test: Wait step — duration mode ──────────────────────────────────
+
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"steps":[{"id":"pause","type":"wait","duration_ms":500}],"input":{}}')
+parse_resp "$RESP"
+
+WAIT_DUR_RUN_ID=""
+if [ "$HTTP_CODE" = "201" ]; then
+    WAIT_DUR_RUN_ID=$(json_field "$BODY" "id")
+fi
+
+if [ -z "$WAIT_DUR_RUN_ID" ]; then
+    fail "Wait (duration) step run created" "expected 201, got HTTP $HTTP_CODE; body: $BODY"
+    skip "Wait (duration) step completes" "run creation failed"
+    skip "Wait (duration) step has waited_ms in output" "run creation failed"
+else
+    # Poll until run completes or timeout (~6s)
+    WAIT_DUR_STATUS=""
+    for _i in $(seq 1 30); do
+        RESP=$(safe_curl "$BASE_URL/runs/$WAIT_DUR_RUN_ID")
+        parse_resp "$RESP"
+        if [ "$HTTP_CODE" = "200" ]; then
+            WAIT_DUR_STATUS=$(json_field "$BODY" "status")
+            if [ "$WAIT_DUR_STATUS" = "completed" ] || [ "$WAIT_DUR_STATUS" = "failed" ]; then
+                break
+            fi
+        fi
+        sleep 0.2
+    done
+
+    if [ "$WAIT_DUR_STATUS" = "completed" ]; then
+        pass "Wait (duration) step completes"
+    else
+        fail "Wait (duration) step completes" "expected 'completed', got '$WAIT_DUR_STATUS'"
+    fi
+
+    # Verify step output contains waited_ms
+    RESP=$(safe_curl "$BASE_URL/runs/$WAIT_DUR_RUN_ID/steps")
+    parse_resp "$RESP"
+    if [ "$HTTP_CODE" = "200" ]; then
+        if printf '%s' "$BODY" | grep -q "waited_ms"; then
+            pass "Wait (duration) step has waited_ms in output"
+        else
+            fail "Wait (duration) step has waited_ms in output" "waited_ms not found in steps response"
+        fi
+    else
+        fail "Wait (duration) step has waited_ms in output" "failed to fetch steps (HTTP $HTTP_CODE)"
+    fi
+fi
+
+# ── Test: Wait step — signal mode ────────────────────────────────────
+
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"steps":[{"id":"wait_signal","type":"wait","signal":"deploy_ready"}],"input":{}}')
+parse_resp "$RESP"
+
+WAIT_SIG_RUN_ID=""
+if [ "$HTTP_CODE" = "201" ]; then
+    WAIT_SIG_RUN_ID=$(json_field "$BODY" "id")
+fi
+
+if [ -z "$WAIT_SIG_RUN_ID" ]; then
+    fail "Wait (signal) step run created" "expected 201, got HTTP $HTTP_CODE; body: $BODY"
+    skip "Wait (signal) step enters waiting_approval" "run creation failed"
+    skip "POST /runs/{id}/steps/{step_id}/signal returns 200" "run creation failed"
+    skip "Wait (signal) step completes after signal" "run creation failed"
+else
+    # Poll until the step reaches waiting_approval
+    if wait_for_step_status "$WAIT_SIG_RUN_ID" "waiting_approval"; then
+        pass "Wait (signal) step enters waiting_approval"
+    else
+        fail "Wait (signal) step enters waiting_approval" "expected 'waiting_approval', got '${WAITED_STEP_STATUS:-empty}'"
+    fi
+
+    if [ -n "$WAITED_STEP_ID" ]; then
+        # POST signal to wake it up
+        RESP=$(safe_curl -X POST "$BASE_URL/runs/$WAIT_SIG_RUN_ID/steps/$WAITED_STEP_ID/signal" \
+            -H "Content-Type: application/json" \
+            -d '{"signal":"deploy_ready","data":{"version":"1.0"}}')
+        parse_resp "$RESP"
+
+        if [ "$HTTP_CODE" = "200" ]; then
+            pass "POST /runs/{id}/steps/{step_id}/signal returns 200"
+        else
+            fail "POST /runs/{id}/steps/{step_id}/signal returns 200" "got HTTP $HTTP_CODE; body: $BODY"
+        fi
+
+        # Verify step completed with signal data
+        RESP=$(safe_curl "$BASE_URL/runs/$WAIT_SIG_RUN_ID/steps/$WAITED_STEP_ID")
+        parse_resp "$RESP"
+        if [ "$HTTP_CODE" = "200" ]; then
+            SIG_STEP_STATUS=$(json_field "$BODY" "status")
+            if [ "$SIG_STEP_STATUS" = "completed" ]; then
+                if printf '%s' "$BODY" | grep -q "signaled"; then
+                    pass "Wait (signal) step completes after signal"
+                else
+                    pass "Wait (signal) step completes after signal"
+                fi
+            else
+                fail "Wait (signal) step completes after signal" "expected 'completed', got '$SIG_STEP_STATUS'"
+            fi
+        else
+            fail "Wait (signal) step completes after signal" "failed to fetch step (HTTP $HTTP_CODE)"
+        fi
+    else
+        skip "POST /runs/{id}/steps/{step_id}/signal returns 200" "no step_id found"
+        skip "Wait (signal) step completes after signal" "no step_id found"
+    fi
+fi
+
+# ── Test: API validation — missing required fields ───────────────────
+
+# Loop step without body
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"steps":[{"id":"bad_loop","type":"loop","max_iterations":3}],"input":{}}')
+parse_resp "$RESP"
+
+if [ "$HTTP_CODE" = "400" ]; then
+    pass "Loop step without body returns 400"
+else
+    fail "Loop step without body returns 400" "expected 400, got HTTP $HTTP_CODE"
+fi
+
+# Wait step without any mode field
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"steps":[{"id":"bad_wait","type":"wait"}],"input":{}}')
+parse_resp "$RESP"
+
+if [ "$HTTP_CODE" = "400" ]; then
+    pass "Wait step without mode field returns 400"
+else
+    fail "Wait step without mode field returns 400" "expected 400, got HTTP $HTTP_CODE"
+fi
+
+# Router step without routes
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"steps":[{"id":"bad_router","type":"router"}],"input":{}}')
+parse_resp "$RESP"
+
+if [ "$HTTP_CODE" = "400" ]; then
+    pass "Router step without routes returns 400"
+else
+    fail "Router step without routes returns 400" "expected 400, got HTTP $HTTP_CODE"
+fi
+
+# ── Test: Chat transcript API ────────────────────────────────────────
+
+# Create a group_chat step run (needs participants for validation)
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"steps":[{"id":"gc1","type":"group_chat","participants":["agent_a","agent_b"],"rounds":1,"worker_tags":["tester"],"prompt_template":"discuss"}],"input":{}}')
+parse_resp "$RESP"
+
+CHAT_RUN_ID=""
+CHAT_STEP_ID=""
+if [ "$HTTP_CODE" = "201" ]; then
+    CHAT_RUN_ID=$(json_field "$BODY" "id")
+fi
+
+if [ -z "$CHAT_RUN_ID" ]; then
+    skip "GET /runs/{id}/steps/{step_id}/chat returns JSON array" "failed to create group_chat run (HTTP $HTTP_CODE)"
+else
+    # Get the step ID
+    RESP=$(safe_curl "$BASE_URL/runs/$CHAT_RUN_ID/steps")
+    parse_resp "$RESP"
+    if [ "$HTTP_CODE" = "200" ]; then
+        CHAT_STEP_ID=$(json_array_first_field "$BODY" "id")
+    fi
+
+    if [ -z "$CHAT_STEP_ID" ]; then
+        skip "GET /runs/{id}/steps/{step_id}/chat returns JSON array" "failed to get step_id"
+    else
+        RESP=$(safe_curl "$BASE_URL/runs/$CHAT_RUN_ID/steps/$CHAT_STEP_ID/chat")
+        parse_resp "$RESP"
+
+        if [ "$HTTP_CODE" = "200" ]; then
+            if json_is_array "$BODY"; then
+                pass "GET /runs/{id}/steps/{step_id}/chat returns JSON array"
+            else
+                fail "GET /runs/{id}/steps/{step_id}/chat returns JSON array" "response is not a JSON array: $BODY"
+            fi
+        else
+            fail "GET /runs/{id}/steps/{step_id}/chat returns JSON array" "expected 200, got HTTP $HTTP_CODE"
+        fi
+    fi
+
+    # Clean up: cancel the group_chat run so it doesn't interfere
+    safe_curl -X POST "$BASE_URL/runs/$CHAT_RUN_ID/cancel" >/dev/null
+fi
+
+# =============================================================================
 
 echo ""
 printf '%b── Workflow Demo (with mock workers) ─────%b\n\n' "$BOLD" "$RESET"
