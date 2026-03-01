@@ -178,7 +178,7 @@ pub fn dispatchStep(
     };
 
     // Copy output to caller-owned memory since parsed will be freed
-    const output = try allocator.dupe(u8, parsed.output.value);
+    const output = try allocator.dupe(u8, parsed.value.output);
     defer parsed.deinit();
 
     return DispatchResult{

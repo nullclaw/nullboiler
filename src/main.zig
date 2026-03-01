@@ -2,6 +2,7 @@ const std = @import("std");
 const Store = @import("store.zig").Store;
 const api = @import("api.zig");
 const config = @import("config.zig");
+const engine_mod = @import("engine.zig");
 
 const version = "0.1.0";
 
@@ -94,7 +95,19 @@ pub fn main() !void {
     };
     defer server.deinit();
 
+    // Start DAG engine on a background thread
+    const poll_ms: u64 = cfg.engine.poll_interval_ms;
+    var engine = engine_mod.Engine.init(&store, allocator, poll_ms);
+    const engine_thread = try std.Thread.spawn(.{}, engine_mod.Engine.run, .{&engine});
+
     std.debug.print("listening on http://127.0.0.1:{d}\n", .{port});
+    std.debug.print("engine started (poll_interval={d}ms)\n", .{poll_ms});
+
+    defer {
+        engine.stop();
+        engine_thread.join();
+        std.debug.print("engine stopped\n", .{});
+    }
 
     while (true) {
         const conn = server.accept() catch |err| {
@@ -156,4 +169,5 @@ comptime {
     _ = @import("templates.zig");
     _ = @import("dispatch.zig");
     _ = @import("config.zig");
+    _ = @import("engine.zig");
 }

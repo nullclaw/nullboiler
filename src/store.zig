@@ -521,6 +521,39 @@ pub const Store = struct {
         return list.toOwnedSlice(allocator);
     }
 
+    /// Get the IDs of steps that a given step depends on.
+    pub fn getStepDeps(self: *Self, allocator: std.mem.Allocator, step_id: []const u8) ![][]const u8 {
+        const sql = "SELECT depends_on FROM step_deps WHERE step_id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, try allocStr(allocator, stmt, 0));
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    /// Count how many running tasks a worker currently has.
+    pub fn countRunningStepsByWorker(self: *Self, worker_id: []const u8) !i64 {
+        const sql = "SELECT COUNT(*) FROM steps WHERE worker_id = ? AND status = 'running'";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, worker_id.ptr, @intCast(worker_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return 0;
+        return colInt(stmt, 0);
+    }
+
     fn readStepRow(allocator: std.mem.Allocator, stmt: ?*c.sqlite3_stmt) !types.StepRow {
         return types.StepRow{
             .id = try allocStr(allocator, stmt, 0),
