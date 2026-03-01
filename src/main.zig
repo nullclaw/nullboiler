@@ -94,4 +94,5 @@ comptime {
     _ = @import("types.zig");
     _ = @import("store.zig");
     _ = @import("api.zig");
+    _ = @import("templates.zig");
 }
