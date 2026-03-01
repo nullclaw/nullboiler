@@ -16,6 +16,9 @@ pub const ValidateError = error{
     SagaBodyRequired,
     DebateCountRequired,
     GroupChatParticipantsRequired,
+    RetryMustBeObject,
+    MaxAttemptsMustBePositiveInteger,
+    TimeoutMsMustBePositiveInteger,
     OutOfMemory,
 };
 
@@ -39,6 +42,7 @@ pub fn validateStepsForCreateRun(
 
         const step_type = getJsonString(step_obj, "type") orelse "task";
         validateStepTypeRules(step_type, step_obj) catch |err| return err;
+        validateExecutionControls(step_obj) catch |err| return err;
         validateDependsOnTypes(allocator, step_obj) catch |err| return err;
     }
 
@@ -94,6 +98,23 @@ fn validateDependsOnTypes(allocator: std.mem.Allocator, step_obj: std.json.Objec
             if (dep_item != .string) return error.DependsOnItemNotString;
             if (seen.contains(dep_item.string)) return error.DependsOnDuplicate;
             seen.put(dep_item.string, {}) catch return error.OutOfMemory;
+        }
+    }
+}
+
+fn validateExecutionControls(step_obj: std.json.ObjectMap) ValidateError!void {
+    if (step_obj.get("retry")) |retry_val| {
+        if (retry_val != .object) return error.RetryMustBeObject;
+        if (retry_val.object.get("max_attempts")) |ma| {
+            if (ma != .integer or ma.integer < 1) {
+                return error.MaxAttemptsMustBePositiveInteger;
+            }
+        }
+    }
+
+    if (step_obj.get("timeout_ms")) |timeout_val| {
+        if (timeout_val != .integer or timeout_val.integer < 1) {
+            return error.TimeoutMsMustBePositiveInteger;
         }
     }
 }
@@ -257,4 +278,43 @@ test "validateStepsForCreateRun: rejects missing group_chat participants field" 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
     try std.testing.expectError(error.GroupChatParticipantsRequired, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects non-object retry field" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"a","type":"task","retry":1}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.RetryMustBeObject, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects non-positive max_attempts" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"a","type":"task","retry":{"max_attempts":0}}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.MaxAttemptsMustBePositiveInteger, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects non-positive timeout_ms" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"a","type":"task","timeout_ms":0}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.TimeoutMsMustBePositiveInteger, validateStepsForCreateRun(allocator, parsed.value.array.items));
 }

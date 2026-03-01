@@ -870,6 +870,9 @@ fn validationErrorResponse(err: workflow_validation.ValidateError) HttpResponse 
         error.SagaBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"saga step requires 'body' field\"}}"),
         error.DebateCountRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"debate step requires 'count' field\"}}"),
         error.GroupChatParticipantsRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"group_chat step requires 'participants' field\"}}"),
+        error.RetryMustBeObject => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"retry must be an object\"}}"),
+        error.MaxAttemptsMustBePositiveInteger => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"retry.max_attempts must be a positive integer\"}}"),
+        error.TimeoutMsMustBePositiveInteger => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"timeout_ms must be a positive integer\"}}"),
         error.OutOfMemory => jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}"),
     };
 }
@@ -1057,6 +1060,69 @@ test "API: create run rejects unknown dependency" {
 
     const body =
         \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work","depends_on":["missing"]}]}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: create run rejects non-object retry field" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work","retry":1}]}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: create run rejects non-positive retry.max_attempts" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work","retry":{"max_attempts":0}}]}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: create run rejects non-positive timeout_ms" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work","timeout_ms":0}]}
     ;
 
     const resp = handleRequest(&ctx, "POST", "/runs", body);
