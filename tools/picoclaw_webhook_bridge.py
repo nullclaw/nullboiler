@@ -5,7 +5,7 @@ Exposes POST /webhook and forwards requests to:
     picoclaw agent --message "<message>" --session "<session_key>"
 
 Response shape:
-    {"output":"..."}
+    {"status":"ok","response":"..."}
 """
 
 import json
@@ -88,7 +88,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not output:
             output = "(empty response)"
 
-        self._write_json(200, {"output": output})
+        self._write_json(200, {"status": "ok", "response": output})
 
     def do_GET(self):
         if self.path == "/health":

@@ -276,11 +276,14 @@ class Executor:
             raise RuntimeError(f"nullboiler run create failed: status={status} body={raw[:400]}")
         return data["id"]
 
-    def poll_boiler_run(self, ctx: ClaimContext, boiler_run_id: str) -> Dict[str, Any]:
+    def poll_boiler_run(self, ctx: ClaimContext, boiler_run_id: str, heartbeat: HeartbeatLoop) -> Dict[str, Any]:
         last_run_status: Optional[str] = None
         step_statuses: Dict[str, str] = {}
 
         while True:
+            if heartbeat.failed.is_set():
+                raise RuntimeError("tracker lease heartbeat failed during nullboiler run polling")
+
             status, data, raw = self.boiler.request_json(
                 "GET",
                 f"/runs/{boiler_run_id}",
@@ -327,6 +330,7 @@ class Executor:
             time.sleep(self.args.poll_interval_sec)
 
     def create_tracker_artifact(self, ctx: ClaimContext, report_path: pathlib.Path, boiler_run_id: str) -> None:
+        headers = {"Authorization": f"Bearer {ctx.lease_token}"}
         payload = {
             "task_id": ctx.task.get("id"),
             "run_id": ctx.tracker_run_id,
@@ -337,7 +341,7 @@ class Executor:
                 "nullboiler_run_id": boiler_run_id,
             },
         }
-        status, _, raw = self.tracker.request_json("POST", "/artifacts", payload=payload)
+        status, _, raw = self.tracker.request_json("POST", "/artifacts", payload=payload, headers=headers)
         if status not in (200, 201):
             log(f"artifact create failed: status={status} body={raw[:200]}")
 
@@ -426,7 +430,7 @@ class Executor:
         )
 
         try:
-            run_payload = self.poll_boiler_run(ctx, boiler_run_id)
+            run_payload = self.poll_boiler_run(ctx, boiler_run_id, heartbeat)
         except Exception as err:
             self.fail_tracker_run(
                 ctx,

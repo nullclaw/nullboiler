@@ -19,19 +19,19 @@ pub fn parse(allocator: std.mem.Allocator, response_data: []const u8) !ParseResu
     if (parsed.value != .object) return failure(invalid_json_error);
     const obj = parsed.value.object;
 
-    if (extractOutput(obj)) |output| {
-        return .{
-            .output = try allocator.dupe(u8, output),
-            .success = true,
-            .error_text = null,
-        };
-    }
-
     if (try extractErrorMessage(allocator, obj)) |error_text| {
         return .{
             .output = "",
             .success = false,
             .error_text = error_text,
+        };
+    }
+
+    if (extractOutput(obj)) |output| {
+        return .{
+            .output = try allocator.dupe(u8, output),
+            .success = true,
+            .error_text = null,
         };
     }
 
@@ -140,6 +140,14 @@ test "parse returns worker error message from error object" {
     defer allocator.free(result.error_text.?);
     try std.testing.expect(!result.success);
     try std.testing.expectEqualStrings("boom", result.error_text.?);
+}
+
+test "parse prioritizes error field over output fields" {
+    const allocator = std.testing.allocator;
+    const result = try parse(allocator, "{\"response\":\"partial\",\"error\":\"hard failure\"}");
+    defer allocator.free(result.error_text.?);
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("hard failure", result.error_text.?);
 }
 
 test "parse rejects status received without output" {

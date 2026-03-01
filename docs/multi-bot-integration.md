@@ -57,6 +57,12 @@ Use `tools/picoclaw_webhook_bridge.py` to expose a synchronous `/webhook` endpoi
 picoclaw agent --message "<prompt>" --session "<session_key>"
 ```
 
+Bridge response is strict webhook-compatible JSON:
+
+```json
+{"status":"ok","response":"..."}
+```
+
 Then register that bridge endpoint in NullBoiler with protocol `webhook`.
 
 ## nullTracker bridge
