@@ -91,17 +91,41 @@ curl -sS http://127.0.0.1:8080/runs/<run_id>
 
 When completed, step output is in `steps[].output_json.output`.
 
-### 4) Run continuously all night with one bot
+### 4) Run all night with orchestration strategy (no shell loop)
 
-If you have a list of tasks, submit runs in a loop from shell (single worker still executes by capacity limits):
+Use one run with a `loop` step that keeps executing a task step until the bot reports completion token.
 
 ```bash
-while IFS= read -r task; do
-  curl -sS -X POST http://127.0.0.1:8080/runs \
-    -H 'Content-Type: application/json' \
-    -d "{\"steps\":[{\"id\":\"night-task\",\"type\":\"task\",\"worker_tags\":[\"coder\"],\"prompt_template\":\"$task\"}]}"
-done < night_tasks.txt
+curl -sS -X POST http://127.0.0.1:8080/runs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input": {
+      "repo": "openclaw",
+      "task_file": "night_tasks.md"
+    },
+    "steps": [
+      {
+        "id": "night-loop",
+        "type": "loop",
+        "max_iterations": 1000,
+        "exit_condition": "BACKLOG_DONE",
+        "body": ["execute-next-task"]
+      },
+      {
+        "id": "execute-next-task",
+        "type": "task",
+        "worker_tags": ["coder"],
+        "prompt_template": "Repository: {{input.repo}}\nTask source file: {{input.task_file}}\n\nDo exactly one next unchecked task from the file.\nApply code changes and tests.\nMark the task as done in the same file.\nIf no unchecked tasks remain, return exactly: BACKLOG_DONE.\nOtherwise return a short summary prefixed with: CONTINUE."
+      }
+    ]
+  }'
 ```
+
+How it works:
+
+1. `loop` creates a child `execute-next-task` step.
+2. After each iteration, NullBoiler checks child output for `BACKLOG_DONE`.
+3. If found, run completes; otherwise next iteration starts automatically.
 
 ## Required worker response shape
 
