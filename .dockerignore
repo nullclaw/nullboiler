@@ -1,0 +1,17 @@
+.git
+.gitignore
+zig-out
+zig-cache
+.zig-cache
+*.md
+*.png
+*.svg
+*.jpg
+*.jpeg
+*.db
+*.db-journal
+.DS_Store
+.env
+.env.*
+.idea
+.vscode

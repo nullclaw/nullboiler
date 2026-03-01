@@ -1,0 +1,34 @@
+services:
+  agent:
+    build: .
+    image: nullboiler:latest
+    profiles: ["agent"]
+    stdin_open: true
+    tty: true
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - nullboiler-data:/root/.nullboiler
+    restart: unless-stopped
+
+  gateway:
+    build: .
+    image: nullboiler:latest
+    profiles: ["gateway"]
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - nullboiler-data:/root/.nullboiler
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  nullboiler-data:
