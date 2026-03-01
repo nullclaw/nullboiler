@@ -12,6 +12,9 @@ pub const ValidateError = error{
     LoopBodyRequired,
     SubWorkflowRequired,
     WaitConditionRequired,
+    WaitDurationInvalid,
+    WaitUntilInvalid,
+    WaitSignalInvalid,
     RouterRoutesRequired,
     SagaBodyRequired,
     DebateCountRequired,
@@ -73,6 +76,28 @@ fn validateStepTypeRules(step_type: []const u8, step_obj: std.json.ObjectMap) Va
     if (std.mem.eql(u8, step_type, "wait")) {
         if (step_obj.get("duration_ms") == null and step_obj.get("until_ms") == null and step_obj.get("signal") == null) {
             return error.WaitConditionRequired;
+        }
+        if (step_obj.get("duration_ms")) |duration_val| {
+            switch (duration_val) {
+                .integer => {
+                    if (duration_val.integer < 0) return error.WaitDurationInvalid;
+                },
+                .string => {
+                    const parsed = std.fmt.parseInt(i64, duration_val.string, 10) catch return error.WaitDurationInvalid;
+                    if (parsed < 0) return error.WaitDurationInvalid;
+                },
+                else => return error.WaitDurationInvalid,
+            }
+        }
+        if (step_obj.get("until_ms")) |until_val| {
+            if (until_val != .integer or until_val.integer < 0) {
+                return error.WaitUntilInvalid;
+            }
+        }
+        if (step_obj.get("signal")) |signal_val| {
+            if (signal_val != .string or signal_val.string.len == 0) {
+                return error.WaitSignalInvalid;
+            }
         }
     }
     if (std.mem.eql(u8, step_type, "router") and step_obj.get("routes") == null) {
@@ -317,4 +342,43 @@ test "validateStepsForCreateRun: rejects non-positive timeout_ms" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
     try std.testing.expectError(error.TimeoutMsMustBePositiveInteger, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects invalid wait duration string" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"w","type":"wait","duration_ms":"abc"}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.WaitDurationInvalid, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects negative wait duration" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"w","type":"wait","duration_ms":-1}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.WaitDurationInvalid, validateStepsForCreateRun(allocator, parsed.value.array.items));
+}
+
+test "validateStepsForCreateRun: rejects invalid wait signal type" {
+    const allocator = std.testing.allocator;
+    const payload =
+        \\[
+        \\  {"id":"w","type":"wait","signal":1}
+        \\]
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.WaitSignalInvalid, validateStepsForCreateRun(allocator, parsed.value.array.items));
 }

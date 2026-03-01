@@ -732,9 +732,21 @@ pub const Engine = struct {
         // Duration mode (supports both string and integer values)
         const duration_opt: ?i64 = blk: {
             if (try getStepField(alloc, run_row.workflow_json, step.def_step_id, "duration_ms")) |dur_str| {
-                break :blk std.fmt.parseInt(i64, dur_str, 10) catch 0;
+                const parsed = std.fmt.parseInt(i64, dur_str, 10) catch {
+                    try self.failStepWithError(alloc, run_row, step, "invalid duration_ms value");
+                    return;
+                };
+                if (parsed < 0) {
+                    try self.failStepWithError(alloc, run_row, step, "duration_ms must be >= 0");
+                    return;
+                }
+                break :blk parsed;
             }
             if (try getStepFieldInt(alloc, run_row.workflow_json, step.def_step_id, "duration_ms")) |dur_int| {
+                if (dur_int < 0) {
+                    try self.failStepWithError(alloc, run_row, step, "duration_ms must be >= 0");
+                    return;
+                }
                 break :blk dur_int;
             }
             break :blk null;
@@ -763,6 +775,10 @@ pub const Engine = struct {
 
         // Until_ms mode (check integer field)
         if (try getStepFieldInt(alloc, run_row.workflow_json, step.def_step_id, "until_ms")) |until| {
+            if (until < 0) {
+                try self.failStepWithError(alloc, run_row, step, "until_ms must be >= 0");
+                return;
+            }
             if (now >= until) {
                 const output = try std.fmt.allocPrint(alloc, "{{\"output\":\"waited\",\"waited_ms\":{d}}}", .{now - (step.started_at_ms orelse now)});
                 try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
@@ -778,7 +794,7 @@ pub const Engine = struct {
         }
 
         // No wait configuration -- fail
-        try self.store.updateStepStatus(step.id, "failed", null, null, "wait step missing duration_ms, until_ms, or signal", step.attempt);
+        try self.failStepWithError(alloc, run_row, step, "wait step missing duration_ms, until_ms, or signal");
     }
 
     // ── executeRouterStep ────────────────────────────────────────────
@@ -2382,6 +2398,12 @@ pub const Engine = struct {
         }
         _ = alloc;
     }
+
+    fn failStepWithError(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, step: types.StepRow, err_text: []const u8) !void {
+        try self.store.updateStepStatus(step.id, "failed", null, null, err_text, step.attempt);
+        try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
+        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+    }
 };
 
 // ── Free functions (workflow JSON helpers) ────────────────────────────
@@ -3344,6 +3366,31 @@ test "Engine: wait step without config fails" {
 
     const s = (try store.getStep(arena.allocator(), "step_w1")).?;
     try std.testing.expectEqualStrings("failed", s.status);
+}
+
+test "Engine: wait step with invalid duration string fails" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    const wf =
+        \\{"steps":[{"id":"w1","type":"wait","duration_ms":"abc"}]}
+    ;
+    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertStep("step_w1", "r1", "w1", "wait", "ready", "{}", 1, null, null, null);
+
+    var engine = Engine.init(&store, allocator, 500);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const run_row = (try store.getRun(arena.allocator(), "r1")).?;
+    try engine.processRun(arena.allocator(), run_row);
+
+    const s = (try store.getStep(arena.allocator(), "step_w1")).?;
+    try std.testing.expectEqualStrings("failed", s.status);
+    try std.testing.expect(s.error_text != null);
+    try std.testing.expect(std.mem.indexOf(u8, s.error_text.?, "invalid duration_ms") != null);
 }
 
 // ── Router step tests ────────────────────────────────────────────────

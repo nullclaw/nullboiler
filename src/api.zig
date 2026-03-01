@@ -866,6 +866,9 @@ fn validationErrorResponse(err: workflow_validation.ValidateError) HttpResponse 
         error.LoopBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}"),
         error.SubWorkflowRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}"),
         error.WaitConditionRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait step requires 'duration_ms', 'until_ms', or 'signal'\"}}"),
+        error.WaitDurationInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.duration_ms must be a non-negative integer or numeric string\"}}"),
+        error.WaitUntilInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.until_ms must be a non-negative integer\"}}"),
+        error.WaitSignalInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.signal must be a non-empty string\"}}"),
         error.RouterRoutesRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"router step requires 'routes' field\"}}"),
         error.SagaBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"saga step requires 'body' field\"}}"),
         error.DebateCountRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"debate step requires 'count' field\"}}"),
@@ -1123,6 +1126,48 @@ test "API: create run rejects non-positive timeout_ms" {
 
     const body =
         \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work","timeout_ms":0}]}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: create run rejects invalid wait duration string" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"steps":[{"id":"w1","type":"wait","duration_ms":"abc"}]}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: create run rejects invalid wait signal type" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"steps":[{"id":"w1","type":"wait","signal":1}]}
     ;
 
     const resp = handleRequest(&ctx, "POST", "/runs", body);
