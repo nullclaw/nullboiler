@@ -356,6 +356,9 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
             return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to check idempotency key\"}}");
         };
         if (existing_run) |run| {
+            if (!std.mem.eql(u8, run.workflow_json, body)) {
+                return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"idempotency key already used with different payload\"}}");
+            }
             if (ctx.metrics) |m| {
                 metrics_mod.Metrics.incr(&m.runs_idempotent_replays_total);
             }
@@ -412,6 +415,9 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
         if (idempotency_key) |ik| {
             const existing = ctx.store.getRunByIdempotencyKey(ctx.allocator, ik) catch null;
             if (existing) |run| {
+                if (!std.mem.eql(u8, run.workflow_json, body)) {
+                    return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"idempotency key already used with different payload\"}}");
+                }
                 if (ctx.metrics) |m| {
                     metrics_mod.Metrics.incr(&m.runs_idempotent_replays_total);
                 }
@@ -1682,6 +1688,34 @@ test "API: create run idempotency key replays existing run" {
     const second = handleRequest(&ctx, "POST", "/runs", body);
     try std.testing.expectEqual(@as(u16, 200), second.status_code);
     try std.testing.expect(std.mem.indexOf(u8, second.body, "\"idempotent_replay\":true") != null);
+}
+
+test "API: idempotency key with different payload returns conflict" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .request_idempotency_key = "idem-diff",
+    };
+
+    const body_a =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"a"}]}
+    ;
+    const body_b =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"b"}]}
+    ;
+
+    const first = handleRequest(&ctx, "POST", "/runs", body_a);
+    try std.testing.expectEqual(@as(u16, 201), first.status_code);
+
+    const second = handleRequest(&ctx, "POST", "/runs", body_b);
+    try std.testing.expectEqual(@as(u16, 409), second.status_code);
 }
 
 test "API: create run returns 503 in drain mode" {
