@@ -188,6 +188,31 @@ pub fn dispatchStep(
     return try worker_response.parse(allocator, response_data);
 }
 
+pub fn probeWorker(
+    allocator: std.mem.Allocator,
+    worker_url: []const u8,
+    worker_protocol_raw: []const u8,
+) bool {
+    const protocol = worker_protocol.parse(worker_protocol_raw) orelse return false;
+    const url = worker_protocol.buildRequestUrl(allocator, worker_url, protocol) catch return false;
+    defer allocator.free(url);
+
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
+    var response_body: std.io.Writer.Allocating = .init(allocator);
+    defer response_body.deinit();
+
+    const result = client.fetch(.{
+        .location = .{ .url = url },
+        .method = .GET,
+        .response_writer = &response_body.writer,
+    }) catch return false;
+
+    const status_code = @intFromEnum(result.status);
+    return status_code < 500;
+}
+
 fn buildRequestBody(
     allocator: std.mem.Allocator,
     protocol: worker_protocol.Protocol,

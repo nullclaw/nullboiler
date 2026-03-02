@@ -10,12 +10,16 @@ CREATE TABLE IF NOT EXISTS workers (
     max_concurrent INTEGER NOT NULL DEFAULT 1,
     source TEXT NOT NULL DEFAULT 'config',
     status TEXT NOT NULL DEFAULT 'active',
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    circuit_open_until_ms INTEGER,
+    last_error_text TEXT,
     last_health_ms INTEGER,
     created_at_ms INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
+    idempotency_key TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     workflow_json TEXT NOT NULL,
     input_json TEXT NOT NULL DEFAULT '{}',
@@ -27,6 +31,7 @@ CREATE TABLE IF NOT EXISTS runs (
     ended_at_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency_key ON runs(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS steps (
     id TEXT PRIMARY KEY,
@@ -41,6 +46,7 @@ CREATE TABLE IF NOT EXISTS steps (
     attempt INTEGER NOT NULL DEFAULT 1,
     max_attempts INTEGER NOT NULL DEFAULT 1,
     timeout_ms INTEGER,
+    next_attempt_at_ms INTEGER,
     parent_step_id TEXT REFERENCES steps(id),
     item_index INTEGER,
     created_at_ms INTEGER NOT NULL,

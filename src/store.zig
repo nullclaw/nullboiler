@@ -191,7 +191,7 @@ pub const Store = struct {
     }
 
     pub fn listWorkers(self: *Self, allocator: std.mem.Allocator) ![]types.WorkerRow {
-        const sql = "SELECT id, url, token, protocol, model, tags_json, max_concurrent, source, status, last_health_ms, created_at_ms FROM workers ORDER BY created_at_ms DESC";
+        const sql = "SELECT id, url, token, protocol, model, tags_json, max_concurrent, source, status, consecutive_failures, circuit_open_until_ms, last_error_text, last_health_ms, created_at_ms FROM workers ORDER BY created_at_ms DESC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -210,15 +210,18 @@ pub const Store = struct {
                 .max_concurrent = colInt(stmt, 6),
                 .source = try allocStr(allocator, stmt, 7),
                 .status = try allocStr(allocator, stmt, 8),
-                .last_health_ms = colIntOpt(stmt, 9),
-                .created_at_ms = colInt(stmt, 10),
+                .consecutive_failures = colInt(stmt, 9),
+                .circuit_open_until_ms = colIntOpt(stmt, 10),
+                .last_error_text = try allocStrOpt(allocator, stmt, 11),
+                .last_health_ms = colIntOpt(stmt, 12),
+                .created_at_ms = colInt(stmt, 13),
             });
         }
         return list.toOwnedSlice(allocator);
     }
 
     pub fn getWorker(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.WorkerRow {
-        const sql = "SELECT id, url, token, protocol, model, tags_json, max_concurrent, source, status, last_health_ms, created_at_ms FROM workers WHERE id = ?";
+        const sql = "SELECT id, url, token, protocol, model, tags_json, max_concurrent, source, status, consecutive_failures, circuit_open_until_ms, last_error_text, last_health_ms, created_at_ms FROM workers WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -239,8 +242,11 @@ pub const Store = struct {
             .max_concurrent = colInt(stmt, 6),
             .source = try allocStr(allocator, stmt, 7),
             .status = try allocStr(allocator, stmt, 8),
-            .last_health_ms = colIntOpt(stmt, 9),
-            .created_at_ms = colInt(stmt, 10),
+            .consecutive_failures = colInt(stmt, 9),
+            .circuit_open_until_ms = colIntOpt(stmt, 10),
+            .last_error_text = try allocStrOpt(allocator, stmt, 11),
+            .last_health_ms = colIntOpt(stmt, 12),
+            .created_at_ms = colInt(stmt, 13),
         };
     }
 
@@ -276,6 +282,56 @@ pub const Store = struct {
         }
     }
 
+    pub fn markWorkerSuccess(self: *Self, id: []const u8, health_ms: i64) !void {
+        const sql = "UPDATE workers SET status = 'active', consecutive_failures = 0, circuit_open_until_ms = NULL, last_error_text = NULL, last_health_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_int64(stmt, 1, health_ms);
+        _ = c.sqlite3_bind_text(stmt, 2, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn markWorkerFailure(
+        self: *Self,
+        id: []const u8,
+        error_text: []const u8,
+        health_ms: i64,
+        failure_threshold: i64,
+        circuit_open_until_ms: i64,
+    ) !void {
+        const sql =
+            "UPDATE workers SET " ++
+            "consecutive_failures = consecutive_failures + 1, " ++
+            "last_error_text = ?, " ++
+            "last_health_ms = ?, " ++
+            "status = CASE WHEN consecutive_failures + 1 >= ? THEN 'dead' ELSE status END, " ++
+            "circuit_open_until_ms = CASE WHEN consecutive_failures + 1 >= ? THEN ? ELSE circuit_open_until_ms END " ++
+            "WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, error_text.ptr, @intCast(error_text.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, health_ms);
+        _ = c.sqlite3_bind_int64(stmt, 3, failure_threshold);
+        _ = c.sqlite3_bind_int64(stmt, 4, failure_threshold);
+        _ = c.sqlite3_bind_int64(stmt, 5, circuit_open_until_ms);
+        _ = c.sqlite3_bind_text(stmt, 6, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
     pub fn deleteWorkersBySource(self: *Self, source: []const u8) !void {
         const sql = "DELETE FROM workers WHERE source = ?";
         var stmt: ?*c.sqlite3_stmt = null;
@@ -293,8 +349,16 @@ pub const Store = struct {
 
     // ── Run CRUD ──────────────────────────────────────────────────────
 
-    pub fn insertRun(self: *Self, id: []const u8, status: []const u8, workflow_json: []const u8, input_json: []const u8, callbacks_json: []const u8) !void {
-        const sql = "INSERT INTO runs (id, status, workflow_json, input_json, callbacks_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)";
+    pub fn insertRun(
+        self: *Self,
+        id: []const u8,
+        idempotency_key: ?[]const u8,
+        status: []const u8,
+        workflow_json: []const u8,
+        input_json: []const u8,
+        callbacks_json: []const u8,
+    ) !void {
+        const sql = "INSERT INTO runs (id, idempotency_key, status, workflow_json, input_json, callbacks_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -303,12 +367,13 @@ pub const Store = struct {
 
         const now = ids.nowMs();
         _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 2, status.ptr, @intCast(status.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 3, workflow_json.ptr, @intCast(workflow_json.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 4, input_json.ptr, @intCast(input_json.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 5, callbacks_json.ptr, @intCast(callbacks_json.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 6, now);
+        bindTextOpt(stmt, 2, idempotency_key);
+        _ = c.sqlite3_bind_text(stmt, 3, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, workflow_json.ptr, @intCast(workflow_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 5, input_json.ptr, @intCast(input_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 6, callbacks_json.ptr, @intCast(callbacks_json.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_int64(stmt, 7, now);
+        _ = c.sqlite3_bind_int64(stmt, 8, now);
 
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
             return error.SqliteStepFailed;
@@ -316,7 +381,7 @@ pub const Store = struct {
     }
 
     pub fn getRun(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.RunRow {
-        const sql = "SELECT id, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE id = ?";
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -329,33 +394,62 @@ pub const Store = struct {
 
         return types.RunRow{
             .id = try allocStr(allocator, stmt, 0),
-            .status = try allocStr(allocator, stmt, 1),
-            .workflow_json = try allocStr(allocator, stmt, 2),
-            .input_json = try allocStr(allocator, stmt, 3),
-            .callbacks_json = try allocStr(allocator, stmt, 4),
-            .error_text = try allocStrOpt(allocator, stmt, 5),
-            .created_at_ms = colInt(stmt, 6),
-            .updated_at_ms = colInt(stmt, 7),
-            .started_at_ms = colIntOpt(stmt, 8),
-            .ended_at_ms = colIntOpt(stmt, 9),
+            .idempotency_key = try allocStrOpt(allocator, stmt, 1),
+            .status = try allocStr(allocator, stmt, 2),
+            .workflow_json = try allocStr(allocator, stmt, 3),
+            .input_json = try allocStr(allocator, stmt, 4),
+            .callbacks_json = try allocStr(allocator, stmt, 5),
+            .error_text = try allocStrOpt(allocator, stmt, 6),
+            .created_at_ms = colInt(stmt, 7),
+            .updated_at_ms = colInt(stmt, 8),
+            .started_at_ms = colIntOpt(stmt, 9),
+            .ended_at_ms = colIntOpt(stmt, 10),
         };
     }
 
-    pub fn listRuns(self: *Self, allocator: std.mem.Allocator, status_filter: ?[]const u8, limit: i64) ![]types.RunRow {
+    pub fn getRunByIdempotencyKey(self: *Self, allocator: std.mem.Allocator, key: []const u8) !?types.RunRow {
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE idempotency_key = ? ORDER BY created_at_ms DESC LIMIT 1";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, key.ptr, @intCast(key.len), SQLITE_STATIC);
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return types.RunRow{
+            .id = try allocStr(allocator, stmt, 0),
+            .idempotency_key = try allocStrOpt(allocator, stmt, 1),
+            .status = try allocStr(allocator, stmt, 2),
+            .workflow_json = try allocStr(allocator, stmt, 3),
+            .input_json = try allocStr(allocator, stmt, 4),
+            .callbacks_json = try allocStr(allocator, stmt, 5),
+            .error_text = try allocStrOpt(allocator, stmt, 6),
+            .created_at_ms = colInt(stmt, 7),
+            .updated_at_ms = colInt(stmt, 8),
+            .started_at_ms = colIntOpt(stmt, 9),
+            .ended_at_ms = colIntOpt(stmt, 10),
+        };
+    }
+
+    pub fn listRuns(self: *Self, allocator: std.mem.Allocator, status_filter: ?[]const u8, limit: i64, offset: i64) ![]types.RunRow {
         var stmt: ?*c.sqlite3_stmt = null;
         if (status_filter != null) {
-            const sql = "SELECT id, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status = ? ORDER BY created_at_ms DESC LIMIT ?";
+            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status = ? ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
             if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
                 return error.SqlitePrepareFailed;
             }
             _ = c.sqlite3_bind_text(stmt, 1, status_filter.?.ptr, @intCast(status_filter.?.len), SQLITE_STATIC);
             _ = c.sqlite3_bind_int64(stmt, 2, limit);
+            _ = c.sqlite3_bind_int64(stmt, 3, offset);
         } else {
-            const sql = "SELECT id, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs ORDER BY created_at_ms DESC LIMIT ?";
+            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
             if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
                 return error.SqlitePrepareFailed;
             }
             _ = c.sqlite3_bind_int64(stmt, 1, limit);
+            _ = c.sqlite3_bind_int64(stmt, 2, offset);
         }
         defer _ = c.sqlite3_finalize(stmt);
 
@@ -363,15 +457,16 @@ pub const Store = struct {
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             try list.append(allocator, .{
                 .id = try allocStr(allocator, stmt, 0),
-                .status = try allocStr(allocator, stmt, 1),
-                .workflow_json = try allocStr(allocator, stmt, 2),
-                .input_json = try allocStr(allocator, stmt, 3),
-                .callbacks_json = try allocStr(allocator, stmt, 4),
-                .error_text = try allocStrOpt(allocator, stmt, 5),
-                .created_at_ms = colInt(stmt, 6),
-                .updated_at_ms = colInt(stmt, 7),
-                .started_at_ms = colIntOpt(stmt, 8),
-                .ended_at_ms = colIntOpt(stmt, 9),
+                .idempotency_key = try allocStrOpt(allocator, stmt, 1),
+                .status = try allocStr(allocator, stmt, 2),
+                .workflow_json = try allocStr(allocator, stmt, 3),
+                .input_json = try allocStr(allocator, stmt, 4),
+                .callbacks_json = try allocStr(allocator, stmt, 5),
+                .error_text = try allocStrOpt(allocator, stmt, 6),
+                .created_at_ms = colInt(stmt, 7),
+                .updated_at_ms = colInt(stmt, 8),
+                .started_at_ms = colIntOpt(stmt, 9),
+                .ended_at_ms = colIntOpt(stmt, 10),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -396,7 +491,7 @@ pub const Store = struct {
     }
 
     pub fn getActiveRuns(self: *Self, allocator: std.mem.Allocator) ![]types.RunRow {
-        const sql = "SELECT id, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status IN ('running', 'paused') ORDER BY created_at_ms DESC";
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status IN ('running', 'paused') ORDER BY created_at_ms DESC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -407,15 +502,16 @@ pub const Store = struct {
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             try list.append(allocator, .{
                 .id = try allocStr(allocator, stmt, 0),
-                .status = try allocStr(allocator, stmt, 1),
-                .workflow_json = try allocStr(allocator, stmt, 2),
-                .input_json = try allocStr(allocator, stmt, 3),
-                .callbacks_json = try allocStr(allocator, stmt, 4),
-                .error_text = try allocStrOpt(allocator, stmt, 5),
-                .created_at_ms = colInt(stmt, 6),
-                .updated_at_ms = colInt(stmt, 7),
-                .started_at_ms = colIntOpt(stmt, 8),
-                .ended_at_ms = colIntOpt(stmt, 9),
+                .idempotency_key = try allocStrOpt(allocator, stmt, 1),
+                .status = try allocStr(allocator, stmt, 2),
+                .workflow_json = try allocStr(allocator, stmt, 3),
+                .input_json = try allocStr(allocator, stmt, 4),
+                .callbacks_json = try allocStr(allocator, stmt, 5),
+                .error_text = try allocStrOpt(allocator, stmt, 6),
+                .created_at_ms = colInt(stmt, 7),
+                .updated_at_ms = colInt(stmt, 8),
+                .started_at_ms = colIntOpt(stmt, 9),
+                .ended_at_ms = colIntOpt(stmt, 10),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -424,7 +520,7 @@ pub const Store = struct {
     // ── Step CRUD ─────────────────────────────────────────────────────
 
     pub fn insertStep(self: *Self, id: []const u8, run_id: []const u8, def_step_id: []const u8, step_type: []const u8, status: []const u8, input_json: []const u8, max_attempts: i64, timeout_ms: ?i64, parent_step_id: ?[]const u8, item_index: ?i64) !void {
-        const sql = "INSERT INTO steps (id, run_id, def_step_id, type, status, input_json, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        const sql = "INSERT INTO steps (id, run_id, def_step_id, type, status, input_json, max_attempts, timeout_ms, next_attempt_at_ms, parent_step_id, item_index, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -451,7 +547,7 @@ pub const Store = struct {
     }
 
     pub fn insertStepWithIteration(self: *Self, id: []const u8, run_id: []const u8, def_step_id: []const u8, step_type: []const u8, status: []const u8, input_json: []const u8, max_attempts: i64, timeout_ms: ?i64, parent_step_id: ?[]const u8, item_index: ?i64, iteration_index: i64) !void {
-        const sql = "INSERT INTO steps (id, run_id, def_step_id, type, status, input_json, max_attempts, timeout_ms, parent_step_id, item_index, iteration_index, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        const sql = "INSERT INTO steps (id, run_id, def_step_id, type, status, input_json, max_attempts, timeout_ms, next_attempt_at_ms, parent_step_id, item_index, iteration_index, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -495,7 +591,7 @@ pub const Store = struct {
     }
 
     pub fn getStepsByRun(self: *Self, allocator: std.mem.Allocator, run_id: []const u8) ![]types.StepRow {
-        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE run_id = ? ORDER BY created_at_ms ASC";
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, next_attempt_at_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE run_id = ? ORDER BY created_at_ms ASC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -512,7 +608,7 @@ pub const Store = struct {
     }
 
     pub fn getStep(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.StepRow {
-        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE id = ?";
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, next_attempt_at_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -527,7 +623,7 @@ pub const Store = struct {
     }
 
     pub fn updateStepStatus(self: *Self, id: []const u8, status: []const u8, worker_id: ?[]const u8, output_json: ?[]const u8, error_text: ?[]const u8, attempt: i64) !void {
-        const sql = "UPDATE steps SET status = ?, worker_id = ?, output_json = ?, error_text = ?, attempt = ?, updated_at_ms = ? WHERE id = ?";
+        const sql = "UPDATE steps SET status = ?, worker_id = ?, output_json = ?, error_text = ?, attempt = ?, next_attempt_at_ms = NULL, updated_at_ms = ? WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -547,9 +643,48 @@ pub const Store = struct {
         }
     }
 
+    pub fn claimReadyStep(self: *Self, step_id: []const u8, worker_id: ?[]const u8, now_ms: i64) !bool {
+        const sql =
+            "UPDATE steps SET status = 'running', worker_id = ?, updated_at_ms = ?, started_at_ms = COALESCE(started_at_ms, ?) " ++
+            "WHERE id = ? AND status = 'ready' AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        bindTextOpt(stmt, 1, worker_id);
+        _ = c.sqlite3_bind_int64(stmt, 2, now_ms);
+        _ = c.sqlite3_bind_int64(stmt, 3, now_ms);
+        _ = c.sqlite3_bind_text(stmt, 4, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 5, now_ms);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.SqliteStepFailed;
+        return c.sqlite3_changes(self.db) > 0;
+    }
+
+    pub fn scheduleStepRetry(self: *Self, step_id: []const u8, next_attempt: i64, attempt: i64, error_text: []const u8) !void {
+        const sql = "UPDATE steps SET status = 'ready', worker_id = NULL, output_json = NULL, error_text = ?, attempt = ?, next_attempt_at_ms = ?, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, error_text.ptr, @intCast(error_text.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, attempt);
+        _ = c.sqlite3_bind_int64(stmt, 3, next_attempt);
+        _ = c.sqlite3_bind_int64(stmt, 4, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 5, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
     pub fn getReadySteps(self: *Self, allocator: std.mem.Allocator, run_id: []const u8) ![]types.StepRow {
         const sql =
-            "SELECT s.id, s.run_id, s.def_step_id, s.type, s.status, s.worker_id, s.input_json, s.output_json, s.error_text, s.attempt, s.max_attempts, s.timeout_ms, s.parent_step_id, s.item_index, s.created_at_ms, s.updated_at_ms, s.started_at_ms, s.ended_at_ms, s.child_run_id, s.iteration_index " ++
+            "SELECT s.id, s.run_id, s.def_step_id, s.type, s.status, s.worker_id, s.input_json, s.output_json, s.error_text, s.attempt, s.max_attempts, s.timeout_ms, s.next_attempt_at_ms, s.parent_step_id, s.item_index, s.created_at_ms, s.updated_at_ms, s.started_at_ms, s.ended_at_ms, s.child_run_id, s.iteration_index " ++
             "FROM steps s WHERE s.run_id = ? AND s.status = 'ready' " ++
             "AND NOT EXISTS (" ++
             "SELECT 1 FROM step_deps d JOIN steps dep ON dep.id = d.depends_on " ++
@@ -585,7 +720,7 @@ pub const Store = struct {
     }
 
     pub fn getChildSteps(self: *Self, allocator: std.mem.Allocator, parent_step_id: []const u8) ![]types.StepRow {
-        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE parent_step_id = ? ORDER BY item_index ASC";
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, next_attempt_at_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE parent_step_id = ? ORDER BY item_index ASC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -666,14 +801,15 @@ pub const Store = struct {
             .attempt = colInt(stmt, 9),
             .max_attempts = colInt(stmt, 10),
             .timeout_ms = colIntOpt(stmt, 11),
-            .parent_step_id = try allocStrOpt(allocator, stmt, 12),
-            .item_index = colIntOpt(stmt, 13),
-            .created_at_ms = colInt(stmt, 14),
-            .updated_at_ms = colInt(stmt, 15),
-            .started_at_ms = colIntOpt(stmt, 16),
-            .ended_at_ms = colIntOpt(stmt, 17),
-            .child_run_id = try allocStrOpt(allocator, stmt, 18),
-            .iteration_index = colIntOpt(stmt, 19) orelse 0,
+            .next_attempt_at_ms = colIntOpt(stmt, 12),
+            .parent_step_id = try allocStrOpt(allocator, stmt, 13),
+            .item_index = colIntOpt(stmt, 14),
+            .created_at_ms = colInt(stmt, 15),
+            .updated_at_ms = colInt(stmt, 16),
+            .started_at_ms = colIntOpt(stmt, 17),
+            .ended_at_ms = colIntOpt(stmt, 18),
+            .child_run_id = try allocStrOpt(allocator, stmt, 19),
+            .iteration_index = colIntOpt(stmt, 20) orelse 0,
         };
     }
 
@@ -1050,10 +1186,11 @@ test "Store: insert and get run" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     const run = (try s.getRun(allocator, "r1")).?;
     defer {
         allocator.free(run.id);
+        if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
@@ -1069,7 +1206,7 @@ test "Store: transaction rollback discards inserted run" {
     defer s.deinit();
 
     try s.beginTransaction();
-    try s.insertRun("tx_rollback", "running", "{}", "{}", "[]");
+    try s.insertRun("tx_rollback", null, "running", "{}", "{}", "[]");
     try s.rollbackTransaction();
 
     const run = try s.getRun(allocator, "tx_rollback");
@@ -1082,12 +1219,13 @@ test "Store: transaction commit persists inserted run" {
     defer s.deinit();
 
     try s.beginTransaction();
-    try s.insertRun("tx_commit", "running", "{}", "{}", "[]");
+    try s.insertRun("tx_commit", null, "running", "{}", "{}", "[]");
     try s.commitTransaction();
 
     const run = (try s.getRun(allocator, "tx_commit")).?;
     defer {
         allocator.free(run.id);
+        if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
@@ -1100,14 +1238,15 @@ test "Store: list runs with filter" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
-    try s.insertRun("r2", "pending", "{}", "{}", "[]");
-    try s.insertRun("r3", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
+    try s.insertRun("r2", null, "pending", "{}", "{}", "[]");
+    try s.insertRun("r3", null, "running", "{}", "{}", "[]");
 
-    const running = try s.listRuns(allocator, "running", 100);
+    const running = try s.listRuns(allocator, "running", 100, 0);
     defer {
         for (running) |r| {
             allocator.free(r.id);
+            if (r.idempotency_key) |ik| allocator.free(ik);
             allocator.free(r.status);
             allocator.free(r.workflow_json);
             allocator.free(r.input_json);
@@ -1117,10 +1256,11 @@ test "Store: list runs with filter" {
     }
     try std.testing.expectEqual(@as(usize, 2), running.len);
 
-    const all = try s.listRuns(allocator, null, 100);
+    const all = try s.listRuns(allocator, null, 100, 0);
     defer {
         for (all) |r| {
             allocator.free(r.id);
+            if (r.idempotency_key) |ik| allocator.free(ik);
             allocator.free(r.status);
             allocator.free(r.workflow_json);
             allocator.free(r.input_json);
@@ -1135,11 +1275,12 @@ test "Store: update run status" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.updateRunStatus("r1", "failed", "something broke");
     const run = (try s.getRun(allocator, "r1")).?;
     defer {
         allocator.free(run.id);
+        if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
@@ -1154,15 +1295,16 @@ test "Store: get active runs" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
-    try s.insertRun("r2", "pending", "{}", "{}", "[]");
-    try s.insertRun("r3", "paused", "{}", "{}", "[]");
-    try s.insertRun("r4", "completed", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
+    try s.insertRun("r2", null, "pending", "{}", "{}", "[]");
+    try s.insertRun("r3", null, "paused", "{}", "{}", "[]");
+    try s.insertRun("r4", null, "completed", "{}", "{}", "[]");
 
     const active = try s.getActiveRuns(allocator);
     defer {
         for (active) |r| {
             allocator.free(r.id);
+            if (r.idempotency_key) |ik| allocator.free(ik);
             allocator.free(r.status);
             allocator.free(r.workflow_json);
             allocator.free(r.input_json);
@@ -1178,7 +1320,7 @@ test "Store: step deps and ready steps" {
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
 
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertStep("s1", "r1", "step1", "task", "ready", "{}", 1, null, null, null);
     try s.insertStep("s2", "r1", "step2", "task", "ready", "{}", 1, null, null, null);
     try s.insertStepDep("s2", "s1");
@@ -1205,7 +1347,7 @@ test "Store: count steps by status" {
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
 
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertStep("s1", "r1", "step1", "task", "ready", "{}", 1, null, null, null);
     try s.insertStep("s2", "r1", "step2", "task", "ready", "{}", 1, null, null, null);
     try s.insertStep("s3", "r1", "step3", "task", "completed", "{}", 1, null, null, null);
@@ -1222,7 +1364,7 @@ test "Store: get child steps" {
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
 
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertStep("parent", "r1", "fan_out_1", "fan_out", "running", "{}", 1, null, null, null);
     try s.insertStep("child0", "r1", "task_1", "task", "ready", "{}", 1, null, "parent", 0);
     try s.insertStep("child1", "r1", "task_1", "task", "ready", "{}", 1, null, "parent", 1);
@@ -1252,7 +1394,7 @@ test "Store: update step status" {
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
 
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertWorker("w1", "http://localhost:3001", "tok", "webhook", null, "[]", 1, "config");
     try s.insertStep("s1", "r1", "step1", "task", "ready", "{}", 3, null, null, null);
     try s.updateStepStatus("s1", "completed", "w1", "{\"result\":42}", null, 1);
@@ -1278,7 +1420,7 @@ test "Store: insert and get events" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertEvent("r1", null, "run.started", "{}");
     try s.insertEvent("r1", null, "step.completed", "{\"step\":\"s1\"}");
     const events = try s.getEventsByRun(allocator, "r1");
@@ -1297,7 +1439,7 @@ test "Store: insert and get artifacts" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertArtifact("a1", "r1", null, "log", "file:///tmp/log.txt", "{}");
     try s.insertArtifact("a2", "r1", null, "report", "s3://bucket/report.pdf", "{\"pages\":10}");
 
@@ -1349,7 +1491,7 @@ test "cycle state: upsert and get" {
     defer s.deinit();
 
     // Insert a run first (cycle_state references runs(id))
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
 
     // Upsert cycle state
     try s.upsertCycleState("r1", "loop_A", 1, 10);
@@ -1382,7 +1524,7 @@ test "chat messages: insert and get ordered by round" {
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
 
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertStep("s1", "r1", "chat_step", "group_chat", "running", "{}", 1, null, null, null);
 
     // Insert messages with different rounds (out of order)
@@ -1417,7 +1559,7 @@ test "saga state: insert, update status, and get" {
     var s = try Store.init(allocator, ":memory:");
     defer s.deinit();
 
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertStep("saga1", "r1", "saga_def", "saga", "running", "{}", 1, null, null, null);
     try s.insertStep("body1", "r1", "body_def1", "task", "pending", "{}", 1, null, "saga1", null);
     try s.insertStep("body2", "r1", "body_def2", "task", "pending", "{}", 1, null, "saga1", null);
@@ -1457,8 +1599,8 @@ test "updateStepChildRunId: sets child_run_id on step" {
     defer s.deinit();
 
     // Create a run and step
-    try s.insertRun("r1", "running", "{}", "{}", "[]");
-    try s.insertRun("child_r1", "running", "{}", "{}", "[]");
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
+    try s.insertRun("child_r1", null, "running", "{}", "{}", "[]");
     try s.insertStep("s1", "r1", "sub_wf", "sub_workflow", "running", "{}", 1, null, null, null);
 
     // Update child_run_id

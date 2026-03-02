@@ -1,6 +1,5 @@
 /// Domain types for NullBoiler orchestrator.
 /// Enums, DB row types, and API response types.
-
 const std = @import("std");
 
 // ── Enums ──────────────────────────────────────────────────────────────
@@ -119,12 +118,16 @@ pub const WorkerRow = struct {
     max_concurrent: i64,
     source: []const u8,
     status: []const u8,
+    consecutive_failures: i64,
+    circuit_open_until_ms: ?i64,
+    last_error_text: ?[]const u8,
     last_health_ms: ?i64,
     created_at_ms: i64,
 };
 
 pub const RunRow = struct {
     id: []const u8,
+    idempotency_key: ?[]const u8,
     status: []const u8,
     workflow_json: []const u8,
     input_json: []const u8,
@@ -149,6 +152,7 @@ pub const StepRow = struct {
     attempt: i64,
     max_attempts: i64,
     timeout_ms: ?i64,
+    next_attempt_at_ms: ?i64,
     parent_step_id: ?[]const u8,
     item_index: ?i64,
     created_at_ms: i64,

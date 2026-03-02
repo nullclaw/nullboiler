@@ -425,24 +425,39 @@ echo ""
 printf '%b--- Run Retrieval ---%b\n' "$BOLD" "$RESET"
 
 if [ -z "$RUN_ID" ]; then
-    skip "GET /runs returns array containing the created run" "RUN_ID not set (run creation failed)"
+    skip "GET /runs returns paginated object containing the created run" "RUN_ID not set (run creation failed)"
     skip "GET /runs/{id} returns correct run" "RUN_ID not set"
     skip "GET /runs/{id} includes steps array" "RUN_ID not set"
 else
 
-    # 13. GET /runs — list runs
+    # 13. GET /runs — list runs (paginated object)
     RESP=$(safe_curl "$BASE_URL/runs")
     parse_resp "$RESP"
 
     if [ "$HTTP_CODE" = "200" ]; then
-        if json_is_array "$BODY"; then
-            if printf '%s' "$BODY" | grep -q "$RUN_ID"; then
-                pass "GET /runs returns array containing the created run"
+        if command -v jq &>/dev/null; then
+            ITEMS=$(printf '%s' "$BODY" | jq -c '.items // empty' 2>/dev/null)
+            HAS_MORE=$(printf '%s' "$BODY" | jq -r 'if has("has_more") then (.has_more|tostring) else "" end' 2>/dev/null)
+            if [ -n "$ITEMS" ] && json_is_array "$ITEMS"; then
+                if printf '%s' "$ITEMS" | grep -q "$RUN_ID"; then
+                    pass "GET /runs returns paginated object containing the created run"
+                else
+                    fail "GET /runs items contains run" "run $RUN_ID not found in items"
+                fi
+                if [ "$HAS_MORE" = "true" ] || [ "$HAS_MORE" = "false" ]; then
+                    pass "GET /runs includes has_more flag"
+                else
+                    fail "GET /runs has_more flag" "missing/invalid has_more field"
+                fi
             else
-                fail "GET /runs contains run" "run $RUN_ID not found in response"
+                fail "GET /runs items array" "response has no valid items array"
             fi
         else
-            fail "GET /runs returns array" "response is not a JSON array"
+            if printf '%s' "$BODY" | grep -q '"items"' && printf '%s' "$BODY" | grep -q "$RUN_ID"; then
+                pass "GET /runs returns paginated object containing the created run"
+            else
+                fail "GET /runs paginated shape" "missing items object or run id"
+            fi
         fi
     else
         fail "GET /runs returns 200" "got HTTP $HTTP_CODE"

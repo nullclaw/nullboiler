@@ -3,11 +3,22 @@ const Store = @import("store.zig").Store;
 const api = @import("api.zig");
 const config = @import("config.zig");
 const engine_mod = @import("engine.zig");
+const ids = @import("ids.zig");
+const metrics_mod = @import("metrics.zig");
 const worker_protocol = @import("worker_protocol.zig");
+const c = @cImport({
+    @cInclude("signal.h");
+});
 
 const version = "0.1.0";
 const max_request_size: usize = 8 * 1024 * 1024;
 const request_read_chunk: usize = 4096;
+var shutdown_requested = std.atomic.Value(bool).init(false);
+
+fn onSignal(sig: c_int) callconv(.c) void {
+    _ = sig;
+    shutdown_requested.store(true, .seq_cst);
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -86,6 +97,8 @@ pub fn main() !void {
 
     var store = try Store.init(allocator, db_path);
     defer store.deinit();
+    var metrics = metrics_mod.Metrics{};
+    var drain_mode = std.atomic.Value(bool).init(false);
 
     // Seed workers from config
     store.deleteWorkersBySource("config") catch |err| {
@@ -129,9 +142,22 @@ pub fn main() !void {
     };
     defer server.deinit();
 
+    // SIGINT/SIGTERM should switch process into drain/shutdown mode.
+    _ = c.signal(c.SIGINT, onSignal);
+    _ = c.signal(c.SIGTERM, onSignal);
+
     // Start DAG engine on a background thread
     const poll_ms: u64 = cfg.engine.poll_interval_ms;
     var engine = engine_mod.Engine.init(&store, allocator, poll_ms);
+    engine.configure(.{
+        .health_check_interval_ms = @as(i64, @intCast(cfg.engine.health_check_interval_ms)),
+        .worker_failure_threshold = @as(i64, @intCast(cfg.engine.worker_failure_threshold)),
+        .worker_circuit_breaker_ms = @as(i64, @intCast(cfg.engine.worker_circuit_breaker_ms)),
+        .retry_base_delay_ms = @as(i64, @intCast(cfg.engine.retry_base_delay_ms)),
+        .retry_max_delay_ms = @as(i64, @intCast(cfg.engine.retry_max_delay_ms)),
+        .retry_jitter_ms = @as(i64, @intCast(cfg.engine.retry_jitter_ms)),
+        .retry_max_elapsed_ms = @as(i64, @intCast(cfg.engine.retry_max_elapsed_ms)),
+    }, &metrics);
     const engine_thread = try std.Thread.spawn(.{}, engine_mod.Engine.run, .{&engine});
 
     std.debug.print("listening on http://{s}:{d}\n", .{ bind_host, port });
@@ -144,6 +170,25 @@ pub fn main() !void {
     }
 
     while (true) {
+        if (shutdown_requested.load(.acquire)) {
+            drain_mode.store(true, .release);
+            std.debug.print("shutdown signal received, draining runs\n", .{});
+            break;
+        }
+
+        var poll_fds = [_]std.posix.pollfd{
+            .{
+                .fd = server.stream.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            },
+        };
+        const ready = std.posix.poll(&poll_fds, 50) catch {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            continue;
+        };
+        if (ready == 0) continue;
+
         var conn = server.accept() catch |err| {
             std.debug.print("accept error: {}\n", .{err});
             continue;
@@ -164,13 +209,27 @@ pub fn main() !void {
             .allocator = req_alloc,
             .required_api_token = api_token,
             .request_bearer_token = request.bearer_token,
+            .request_idempotency_key = request.idempotency_key,
+            .request_id = request.request_id,
+            .traceparent = request.traceparent,
+            .metrics = &metrics,
+            .drain_mode = &drain_mode,
         };
         const response = api.handleRequest(&ctx, request.method, request.target, request.body);
 
-        const header = std.fmt.allocPrint(req_alloc, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ response.status, response.body.len }) catch continue;
+        const header = std.fmt.allocPrint(req_alloc, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nX-Request-Id: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ response.status, response.content_type, request.request_id, response.body.len }) catch continue;
 
         conn.stream.writeAll(header) catch continue;
         conn.stream.writeAll(response.body) catch continue;
+    }
+
+    const drain_deadline = ids.nowMs() + @as(i64, @intCast(cfg.engine.shutdown_grace_ms));
+    while (ids.nowMs() < drain_deadline) {
+        var drain_arena = std.heap.ArenaAllocator.init(allocator);
+        defer drain_arena.deinit();
+        const active = store.getActiveRuns(drain_arena.allocator()) catch break;
+        if (active.len == 0) break;
+        std.Thread.sleep(200 * std.time.ns_per_ms);
     }
 }
 
@@ -183,6 +242,9 @@ const ParsedHttpRequest = struct {
     target: []const u8,
     body: []const u8,
     bearer_token: ?[]const u8,
+    idempotency_key: ?[]const u8,
+    request_id: []const u8,
+    traceparent: ?[]const u8,
 };
 
 fn readHttpRequest(allocator: std.mem.Allocator, stream: *std.net.Stream, max_bytes: usize) !?ParsedHttpRequest {
@@ -227,12 +289,21 @@ fn readHttpRequest(allocator: std.mem.Allocator, stream: *std.net.Stream, max_by
     const body = req_bytes[header_end.? + 4 .. req_total];
     const headers_raw = req_bytes[0..header_end.?];
     const bearer_token = parseBearerToken(headers_raw);
+    const idempotency_key = parseHeaderValue(headers_raw, "Idempotency-Key");
+    const traceparent = parseHeaderValue(headers_raw, "Traceparent");
+    const request_id = parseHeaderValue(headers_raw, "X-Request-Id") orelse blk: {
+        const rid_buf = ids.generateId();
+        break :blk try allocator.dupe(u8, &rid_buf);
+    };
 
     return .{
         .method = method,
         .target = target,
         .body = body,
         .bearer_token = bearer_token,
+        .idempotency_key = idempotency_key,
+        .request_id = request_id,
+        .traceparent = traceparent,
     };
 }
 
@@ -255,6 +326,17 @@ fn parseContentLength(headers_raw: []const u8) ?usize {
 }
 
 fn parseBearerToken(headers_raw: []const u8) ?[]const u8 {
+    const raw_value = parseHeaderValue(headers_raw, "Authorization") orelse return null;
+    const space_idx = std.mem.indexOfScalar(u8, raw_value, ' ') orelse return null;
+    const scheme = std.mem.trim(u8, raw_value[0..space_idx], " \t");
+    if (!std.ascii.eqlIgnoreCase(scheme, "Bearer")) return null;
+
+    const token = std.mem.trim(u8, raw_value[space_idx + 1 ..], " \t");
+    if (token.len == 0) return null;
+    return token;
+}
+
+fn parseHeaderValue(headers_raw: []const u8, name_query: []const u8) ?[]const u8 {
     var lines = std.mem.splitSequence(u8, headers_raw, "\r\n");
     _ = lines.next(); // request line
 
@@ -263,18 +345,9 @@ fn parseBearerToken(headers_raw: []const u8) ?[]const u8 {
 
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         const name = std.mem.trim(u8, line[0..colon], " \t");
-        if (!std.ascii.eqlIgnoreCase(name, "Authorization")) continue;
-
-        const raw_value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        const space_idx = std.mem.indexOfScalar(u8, raw_value, ' ') orelse return null;
-        const scheme = std.mem.trim(u8, raw_value[0..space_idx], " \t");
-        if (!std.ascii.eqlIgnoreCase(scheme, "Bearer")) return null;
-
-        const token = std.mem.trim(u8, raw_value[space_idx + 1 ..], " \t");
-        if (token.len == 0) return null;
-        return token;
+        if (!std.ascii.eqlIgnoreCase(name, name_query)) continue;
+        return std.mem.trim(u8, line[colon + 1 ..], " \t");
     }
-
     return null;
 }
 
@@ -360,4 +433,5 @@ comptime {
     _ = @import("workflow_validation.zig");
     _ = @import("worker_protocol.zig");
     _ = @import("worker_response.zig");
+    _ = @import("metrics.zig");
 }

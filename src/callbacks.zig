@@ -4,10 +4,10 @@
 /// (step.completed, step.failed, run.completed, run.failed, etc.).
 ///
 /// Callbacks are fire-and-forget: errors are logged but never propagated.
-
 const std = @import("std");
 const log = std.log.scoped(.callbacks);
 const ids = @import("ids.zig");
+const metrics_mod = @import("metrics.zig");
 
 /// Fire webhook callbacks for a given event.
 ///
@@ -25,6 +25,7 @@ pub fn fireCallbacks(
     run_id: []const u8,
     step_id: ?[]const u8,
     data_json: []const u8,
+    metrics: ?*metrics_mod.Metrics,
 ) void {
     // Parse callbacks_json as a JSON array of objects
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, callbacks_json, .{}) catch |err| {
@@ -84,20 +85,45 @@ pub fn fireCallbacks(
             continue;
         };
 
-        // Extract custom headers
-        const custom_headers = extractHeaders(allocator, cb_obj);
+        var headers: std.ArrayListUnmanaged(std.http.Header) = .empty;
+        appendCustomHeaders(allocator, cb_obj, &headers);
+
+        // Optional callback signing for receiver-side replay protection.
+        const hmac_secret = getJsonString(cb_obj, "hmac_secret");
+        if (hmac_secret) |secret| {
+            const ts = std.fmt.allocPrint(allocator, "{d}", .{now_ms}) catch "";
+            const nonce_buf = ids.generateId();
+            const nonce = allocator.dupe(u8, &nonce_buf) catch "";
+            const signature = buildSignatureHeader(allocator, secret, ts, nonce, payload) catch "";
+
+            headers.append(allocator, .{ .name = "X-NullBoiler-Timestamp", .value = ts }) catch {};
+            headers.append(allocator, .{ .name = "X-NullBoiler-Nonce", .value = nonce }) catch {};
+            headers.append(allocator, .{ .name = "X-NullBoiler-Signature", .value = signature }) catch {};
+        }
 
         // POST to callback URL
-        postCallback(allocator, url, payload, custom_headers);
+        const ok = postCallback(allocator, url, payload, headers.items);
+        if (metrics) |m| {
+            if (ok) {
+                metrics_mod.Metrics.incr(&m.callback_sent_total);
+            } else {
+                metrics_mod.Metrics.incr(&m.callback_failed_total);
+            }
+        }
     }
 }
 
-/// Internal: extract custom headers from a callback object's "headers" field.
-fn extractHeaders(allocator: std.mem.Allocator, cb_obj: std.json.ObjectMap) []std.http.Header {
-    const headers_val = cb_obj.get("headers") orelse return &.{};
-    if (headers_val != .object) return &.{};
+fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const val = obj.get(key) orelse return null;
+    if (val == .string) return val.string;
+    return null;
+}
 
-    var list: std.ArrayListUnmanaged(std.http.Header) = .empty;
+/// Internal: extract custom headers from a callback object's "headers" field.
+fn appendCustomHeaders(allocator: std.mem.Allocator, cb_obj: std.json.ObjectMap, list: *std.ArrayListUnmanaged(std.http.Header)) void {
+    const headers_val = cb_obj.get("headers") orelse return;
+    if (headers_val != .object) return;
+
     var it = headers_val.object.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.* == .string) {
@@ -107,11 +133,10 @@ fn extractHeaders(allocator: std.mem.Allocator, cb_obj: std.json.ObjectMap) []st
             }) catch continue;
         }
     }
-    return list.toOwnedSlice(allocator) catch &.{};
 }
 
 /// Internal: POST payload to a URL with custom headers. Fire-and-forget.
-fn postCallback(allocator: std.mem.Allocator, url: []const u8, payload: []const u8, custom_headers: []const std.http.Header) void {
+fn postCallback(allocator: std.mem.Allocator, url: []const u8, payload: []const u8, custom_headers: []const std.http.Header) bool {
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
 
@@ -125,8 +150,20 @@ fn postCallback(allocator: std.mem.Allocator, url: []const u8, payload: []const 
         },
     }) catch |err| {
         log.warn("callback POST to {s} failed: {}", .{ url, err });
-        return;
+        return false;
     };
 
     log.debug("callback fired to {s}", .{url});
+    return true;
+}
+
+fn buildSignatureHeader(allocator: std.mem.Allocator, secret: []const u8, ts: []const u8, nonce: []const u8, payload: []const u8) ![]const u8 {
+    const to_sign = try std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ ts, nonce, payload });
+
+    var digest: [32]u8 = undefined;
+    const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+    HmacSha256.create(&digest, to_sign, secret);
+
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return try std.fmt.allocPrint(allocator, "v1={s}", .{&hex});
 }

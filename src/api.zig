@@ -4,6 +4,7 @@ const ids = @import("ids.zig");
 const types = @import("types.zig");
 const workflow_validation = @import("workflow_validation.zig");
 const worker_protocol = @import("worker_protocol.zig");
+const metrics_mod = @import("metrics.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -12,17 +13,27 @@ pub const Context = struct {
     allocator: std.mem.Allocator,
     required_api_token: ?[]const u8 = null,
     request_bearer_token: ?[]const u8 = null,
+    request_idempotency_key: ?[]const u8 = null,
+    request_id: []const u8 = "",
+    traceparent: ?[]const u8 = null,
+    metrics: ?*metrics_mod.Metrics = null,
+    drain_mode: ?*std.atomic.Value(bool) = null,
 };
 
 pub const HttpResponse = struct {
     status: []const u8,
     body: []const u8,
     status_code: u16,
+    content_type: []const u8 = "application/json",
 };
 
 // ── Router ───────────────────────────────────────────────────────────
 
 pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body: []const u8) HttpResponse {
+    if (ctx.metrics) |m| {
+        metrics_mod.Metrics.incr(&m.http_requests_total);
+    }
+
     const path = parsePath(target);
     const seg0 = getPathSegment(path, 0);
     const seg1 = getPathSegment(path, 1);
@@ -44,6 +55,11 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
         return handleHealth(ctx);
     }
 
+    // GET /metrics
+    if (is_get and eql(seg0, "metrics") and seg1 == null) {
+        return handleMetrics(ctx);
+    }
+
     // POST /runs
     if (is_post and eql(seg0, "runs") and seg1 == null) {
         return handleCreateRun(ctx, body);
@@ -51,7 +67,7 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
 
     // GET /runs
     if (is_get and eql(seg0, "runs") and seg1 == null) {
-        return handleListRuns(ctx);
+        return handleListRuns(ctx, target);
     }
 
     // GET /runs/{id}
@@ -119,6 +135,11 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
         return handleDeleteWorker(ctx, seg1.?);
     }
 
+    // POST /admin/drain
+    if (is_post and eql(seg0, "admin") and eql(seg1, "drain") and seg2 == null) {
+        return handleEnableDrain(ctx);
+    }
+
     return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"endpoint not found\"}}");
 }
 
@@ -146,6 +167,20 @@ fn handleHealth(ctx: *Context) HttpResponse {
     return jsonResponse(200, resp);
 }
 
+fn handleMetrics(ctx: *Context) HttpResponse {
+    const m = ctx.metrics orelse return plainResponse(200, "nullboiler_metrics_disabled 1\n");
+    const body = m.renderPrometheus(ctx.allocator) catch return plainResponse(500, "nullboiler_metrics_render_error 1\n");
+    return plainResponse(200, body);
+}
+
+fn handleEnableDrain(ctx: *Context) HttpResponse {
+    const drain = ctx.drain_mode orelse {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"drain mode is not configured\"}}");
+    };
+    drain.store(true, .release);
+    return jsonResponse(200, "{\"status\":\"draining\"}");
+}
+
 // ── Worker Handlers ──────────────────────────────────────────────────
 
 fn handleListWorkers(ctx: *Context) HttpResponse {
@@ -170,8 +205,16 @@ fn handleListWorkers(ctx: *Context) HttpResponse {
             "null";
         const source_json = jsonQuoted(ctx.allocator, w.source) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         const status_json = jsonQuoted(ctx.allocator, w.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const circuit_until_field = if (w.circuit_open_until_ms) |ts|
+            std.fmt.allocPrint(ctx.allocator, ",\"circuit_open_until_ms\":{d}", .{ts}) catch ""
+        else
+            "";
+        const last_error_field = if (w.last_error_text) |err_text| blk: {
+            const err_json = jsonQuoted(ctx.allocator, err_text) catch "";
+            break :blk std.fmt.allocPrint(ctx.allocator, ",\"last_error_text\":{s}", .{err_json}) catch "";
+        } else "";
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":{s},"url":{s},"protocol":{s},"model":{s},"tags":{s},"max_concurrent":{d},"source":{s},"status":{s},"created_at_ms":{d}}}
+            \\{{"id":{s},"url":{s},"protocol":{s},"model":{s},"tags":{s},"max_concurrent":{d},"source":{s},"status":{s},"consecutive_failures":{d}{s}{s},"created_at_ms":{d}}}
         , .{
             id_json,
             url_json,
@@ -181,6 +224,9 @@ fn handleListWorkers(ctx: *Context) HttpResponse {
             w.max_concurrent,
             source_json,
             status_json,
+            w.consecutive_failures,
+            circuit_until_field,
+            last_error_field,
             w.created_at_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -282,6 +328,12 @@ fn handleDeleteWorker(ctx: *Context, id: []const u8) HttpResponse {
 // ── Run Handlers ─────────────────────────────────────────────────────
 
 fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
+    if (ctx.drain_mode) |drain| {
+        if (drain.load(.acquire)) {
+            return jsonResponse(503, "{\"error\":{\"code\":\"draining\",\"message\":\"orchestrator is draining and does not accept new runs\"}}");
+        }
+    }
+
     // Parse body JSON
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
@@ -294,6 +346,27 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
     }
 
     const obj = root.object;
+    const body_idempotency_key = getJsonString(obj, "idempotency_key");
+    const idempotency_key = ctx.request_idempotency_key orelse body_idempotency_key;
+    if (idempotency_key) |ik| {
+        if (ik.len == 0) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"idempotency key must not be empty\"}}");
+        }
+        const existing_run = ctx.store.getRunByIdempotencyKey(ctx.allocator, ik) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to check idempotency key\"}}");
+        };
+        if (existing_run) |run| {
+            if (ctx.metrics) |m| {
+                metrics_mod.Metrics.incr(&m.runs_idempotent_replays_total);
+            }
+            const run_id_json = jsonQuoted(ctx.allocator, run.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            const status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            const replay_resp = std.fmt.allocPrint(ctx.allocator,
+                \\{{"id":{s},"status":{s},"idempotent_replay":true}}
+            , .{ run_id_json, status_json }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            return jsonResponse(200, replay_resp);
+        }
+    }
 
     // Extract steps array
     const steps_val = obj.get("steps") orelse {
@@ -335,7 +408,21 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
     const run_id = ctx.allocator.dupe(u8, &run_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
 
     // Insert run — workflow_json = the original body (frozen snapshot)
-    ctx.store.insertRun(run_id, "running", body, input_json, callbacks_json) catch {
+    ctx.store.insertRun(run_id, idempotency_key, "running", body, input_json, callbacks_json) catch {
+        if (idempotency_key) |ik| {
+            const existing = ctx.store.getRunByIdempotencyKey(ctx.allocator, ik) catch null;
+            if (existing) |run| {
+                if (ctx.metrics) |m| {
+                    metrics_mod.Metrics.incr(&m.runs_idempotent_replays_total);
+                }
+                const run_id_json = jsonQuoted(ctx.allocator, run.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+                const status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+                const replay_resp = std.fmt.allocPrint(ctx.allocator,
+                    \\{{"id":{s},"status":{s},"idempotent_replay":true}}
+                , .{ run_id_json, status_json }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+                return jsonResponse(200, replay_resp);
+            }
+        }
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to insert run\"}}");
     };
 
@@ -430,8 +517,11 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to commit transaction\"}}");
     };
     tx_committed = true;
+    if (ctx.metrics) |m| {
+        metrics_mod.Metrics.incr(&m.runs_created_total);
+    }
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"id":{s},"status":"running"}}
+        \\{{"id":{s},"status":"running","idempotent_replay":false}}
     , .{run_id_json}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(201, resp);
 }
@@ -467,13 +557,19 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
     else
         "";
 
+    const idempotency_field = if (run.idempotency_key) |ik| blk: {
+        const ik_json = jsonQuoted(ctx.allocator, ik) catch "";
+        break :blk std.fmt.allocPrint(ctx.allocator, ",\"idempotency_key\":{s}", .{ik_json}) catch "";
+    } else "";
+
     const run_id_json = jsonQuoted(ctx.allocator, run.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const run_status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"id":{s},"status":{s},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s},"steps":{s}}}
+        \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s},"steps":{s}}}
     , .{
         run_id_json,
         run_status_json,
+        idempotency_field,
         run.created_at_ms,
         run.updated_at_ms,
         error_field,
@@ -484,35 +580,58 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
     return jsonResponse(200, resp);
 }
 
-fn handleListRuns(ctx: *Context) HttpResponse {
-    // For MVP: return all runs, no filtering
-    const runs = ctx.store.listRuns(ctx.allocator, null, 100) catch {
+fn handleListRuns(ctx: *Context, target: []const u8) HttpResponse {
+    const status_filter = getQueryParam(target, "status");
+    const limit = parseQueryInt(target, "limit", 100, 1, 1000);
+    const offset = parseQueryInt(target, "offset", 0, 0, 1_000_000_000);
+
+    // Fetch one extra row to compute has_more.
+    const runs = ctx.store.listRuns(ctx.allocator, status_filter, limit + 1, offset) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to list runs\"}}");
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const has_more = @as(i64, @intCast(runs.len)) > limit;
+    const items_len: usize = if (has_more) @intCast(limit) else runs.len;
 
-    for (runs, 0..) |r, i| {
+    var items_buf: std.ArrayListUnmanaged(u8) = .empty;
+    items_buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    for (runs[0..items_len], 0..) |r, i| {
         if (i > 0) {
-            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            items_buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         }
         const run_id_json = jsonQuoted(ctx.allocator, r.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         const run_status_json = jsonQuoted(ctx.allocator, r.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const idempotency_field = if (r.idempotency_key) |ik| blk: {
+            const ik_json = jsonQuoted(ctx.allocator, ik) catch "";
+            break :blk std.fmt.allocPrint(ctx.allocator, ",\"idempotency_key\":{s}", .{ik_json}) catch "";
+        } else "";
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":{s},"status":{s},"created_at_ms":{d},"updated_at_ms":{d}}}
+            \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}}}
         , .{
             run_id_json,
             run_status_json,
+            idempotency_field,
             r.created_at_ms,
             r.updated_at_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        items_buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     }
 
-    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    return jsonResponse(200, json_body);
+    items_buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const items_json = items_buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    const next_offset = if (has_more) offset + limit else offset + @as(i64, @intCast(items_len));
+    const response = std.fmt.allocPrint(ctx.allocator,
+        \\{{"items":{s},"limit":{d},"offset":{d},"next_offset":{d},"has_more":{s}}}
+    , .{
+        items_json,
+        limit,
+        offset,
+        next_offset,
+        if (has_more) "true" else "false",
+    }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, response);
 }
 
 // ── Step Handlers ────────────────────────────────────────────────────
@@ -965,6 +1084,11 @@ fn buildSingleStepJson(allocator: std.mem.Allocator, s: @import("types.zig").Ste
     else
         "";
 
+    const next_attempt_field = if (s.next_attempt_at_ms) |nxt|
+        try std.fmt.allocPrint(allocator, ",\"next_attempt_at_ms\":{d}", .{nxt})
+    else
+        "";
+
     const parent_field = if (s.parent_step_id) |pid| blk: {
         const pid_json = try jsonQuoted(allocator, pid);
         break :blk try std.fmt.allocPrint(allocator, ",\"parent_step_id\":{s}", .{pid_json});
@@ -991,7 +1115,7 @@ fn buildSingleStepJson(allocator: std.mem.Allocator, s: @import("types.zig").Ste
     } else "";
 
     return try std.fmt.allocPrint(allocator,
-        \\{{"id":{s},"run_id":{s},"def_step_id":{s},"type":{s},"status":{s},"attempt":{d},"max_attempts":{d},"iteration_index":{d},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s}{s}{s}{s}}}
+        \\{{"id":{s},"run_id":{s},"def_step_id":{s},"type":{s},"status":{s},"attempt":{d},"max_attempts":{d},"iteration_index":{d},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}}}
     , .{
         id_json,
         run_id_json,
@@ -1007,6 +1131,7 @@ fn buildSingleStepJson(allocator: std.mem.Allocator, s: @import("types.zig").Ste
         output_field,
         error_field,
         timeout_field,
+        next_attempt_field,
         parent_field,
         item_field,
         started_field,
@@ -1034,6 +1159,31 @@ fn parsePath(target: []const u8) [max_segments]?[]const u8 {
     return segments;
 }
 
+fn getQueryParam(target: []const u8, key: []const u8) ?[]const u8 {
+    const qi = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    const query = target[qi + 1 ..];
+    var it = std.mem.splitScalar(u8, query, '&');
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, part, '=') orelse {
+            if (std.mem.eql(u8, part, key)) return "";
+            continue;
+        };
+        const qk = part[0..eq];
+        if (!std.mem.eql(u8, qk, key)) continue;
+        return part[eq + 1 ..];
+    }
+    return null;
+}
+
+fn parseQueryInt(target: []const u8, key: []const u8, default_val: i64, min: i64, max: i64) i64 {
+    const raw = getQueryParam(target, key) orelse return default_val;
+    const parsed = std.fmt.parseInt(i64, raw, 10) catch return default_val;
+    if (parsed < min) return min;
+    if (parsed > max) return max;
+    return parsed;
+}
+
 fn getPathSegment(segments: [max_segments]?[]const u8, index: usize) ?[]const u8 {
     if (index >= max_segments) return null;
     return segments[index];
@@ -1047,8 +1197,9 @@ fn eql(a: ?[]const u8, b: []const u8) bool {
 fn isAuthorized(ctx: *Context, seg0: ?[]const u8, seg1: ?[]const u8) bool {
     const required = ctx.required_api_token orelse return true;
 
-    // Keep health endpoint unauthenticated for probes.
+    // Keep health and metrics endpoints unauthenticated for probes/scrapers.
     if (eql(seg0, "health") and seg1 == null) return true;
+    if (eql(seg0, "metrics") and seg1 == null) return true;
 
     const provided = ctx.request_bearer_token orelse return false;
     return std.mem.eql(u8, provided, required);
@@ -1064,6 +1215,7 @@ fn jsonResponse(status_code: u16, body: []const u8) HttpResponse {
         404 => "404 Not Found",
         405 => "405 Method Not Allowed",
         409 => "409 Conflict",
+        503 => "503 Service Unavailable",
         500 => "500 Internal Server Error",
         501 => "501 Not Implemented",
         else => "500 Internal Server Error",
@@ -1072,6 +1224,21 @@ fn jsonResponse(status_code: u16, body: []const u8) HttpResponse {
         .status = status,
         .body = body,
         .status_code = status_code,
+        .content_type = "application/json",
+    };
+}
+
+fn plainResponse(status_code: u16, body: []const u8) HttpResponse {
+    const status = switch (status_code) {
+        200 => "200 OK",
+        500 => "500 Internal Server Error",
+        else => "500 Internal Server Error",
+    };
+    return HttpResponse{
+        .status = status,
+        .body = body,
+        .status_code = status_code,
+        .content_type = "text/plain; charset=utf-8",
     };
 }
 
@@ -1293,8 +1460,8 @@ test "API: get step enforces run ownership" {
     var store = try Store.init(allocator, ":memory:");
     defer store.deinit();
 
-    try store.insertRun("run-a", "running", "{\"steps\":[]}", "{}", "[]");
-    try store.insertRun("run-b", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertRun("run-a", null, "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertRun("run-b", null, "running", "{\"steps\":[]}", "{}", "[]");
     try store.insertStep("step-b-1", "run-b", "s1", "task", "ready", "{}", 1, null, null, null);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -1314,7 +1481,7 @@ test "API: chat transcript escapes message content" {
     var store = try Store.init(allocator, ":memory:");
     defer store.deinit();
 
-    try store.insertRun("run-chat", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertRun("run-chat", null, "running", "{\"steps\":[]}", "{}", "[]");
     try store.insertStep("step-chat-1", "run-chat", "chat", "group_chat", "completed", "{}", 1, null, null, null);
     try store.insertChatMessage("run-chat", "step-chat-1", 1, "agent", null, "He said \"go\"\\nline");
 
@@ -1422,7 +1589,7 @@ test "API: approve route does not match extra path segment" {
     var store = try Store.init(allocator, ":memory:");
     defer store.deinit();
 
-    try store.insertRun("r1", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertRun("r1", null, "running", "{\"steps\":[]}", "{}", "[]");
     try store.insertStep("s1", "r1", "approve-1", "approval", "waiting_approval", "{}", 1, null, null, null);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -1490,4 +1657,72 @@ test "API: register worker rejects duplicate id with conflict" {
     ;
     const resp = handleRequest(&ctx, "POST", "/workers", body);
     try std.testing.expectEqual(@as(u16, 409), resp.status_code);
+}
+
+test "API: create run idempotency key replays existing run" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .request_idempotency_key = "idem-1",
+    };
+
+    const body =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work"}]}
+    ;
+    const first = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 201), first.status_code);
+
+    const second = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 200), second.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, second.body, "\"idempotent_replay\":true") != null);
+}
+
+test "API: create run returns 503 in drain mode" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var drain_mode = std.atomic.Value(bool).init(true);
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .drain_mode = &drain_mode,
+    };
+
+    const body =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work"}]}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 503), resp.status_code);
+}
+
+test "API: metrics endpoint returns text format" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var metrics = metrics_mod.Metrics{};
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .metrics = &metrics,
+    };
+
+    const resp = handleRequest(&ctx, "GET", "/metrics", "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    try std.testing.expect(std.mem.startsWith(u8, resp.content_type, "text/plain"));
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "nullboiler_http_requests_total") != null);
 }

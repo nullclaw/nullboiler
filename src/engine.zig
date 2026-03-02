@@ -8,7 +8,6 @@
 ///   2. For each run, promote pending steps to ready
 ///   3. Process ready steps by type (task, fan_out, map, reduce, condition, approval)
 ///   4. Check run completion
-
 const std = @import("std");
 const log = std.log.scoped(.engine);
 
@@ -18,14 +17,28 @@ const ids = @import("ids.zig");
 const templates = @import("templates.zig");
 const dispatch = @import("dispatch.zig");
 const callbacks = @import("callbacks.zig");
+const metrics_mod = @import("metrics.zig");
 
 // ── Engine ───────────────────────────────────────────────────────────
+
+pub const RuntimeConfig = struct {
+    health_check_interval_ms: i64 = 30_000,
+    worker_failure_threshold: i64 = 3,
+    worker_circuit_breaker_ms: i64 = 60_000,
+    retry_base_delay_ms: i64 = 1_000,
+    retry_max_delay_ms: i64 = 30_000,
+    retry_jitter_ms: i64 = 250,
+    retry_max_elapsed_ms: i64 = 900_000,
+};
 
 pub const Engine = struct {
     store: *Store,
     allocator: std.mem.Allocator,
     poll_interval_ns: u64,
     running: std.atomic.Value(bool),
+    runtime_cfg: RuntimeConfig,
+    next_health_check_at_ms: i64,
+    metrics: ?*metrics_mod.Metrics,
 
     const TaskPromptSource = union(enum) {
         rendered: []const u8,
@@ -38,7 +51,15 @@ pub const Engine = struct {
             .allocator = allocator,
             .poll_interval_ns = poll_interval_ms * std.time.ns_per_ms,
             .running = std.atomic.Value(bool).init(true),
+            .runtime_cfg = .{},
+            .next_health_check_at_ms = 0,
+            .metrics = null,
         };
+    }
+
+    pub fn configure(self: *Engine, runtime_cfg: RuntimeConfig, metrics: ?*metrics_mod.Metrics) void {
+        self.runtime_cfg = runtime_cfg;
+        self.metrics = metrics;
     }
 
     pub fn stop(self: *Engine) void {
@@ -63,11 +84,53 @@ pub const Engine = struct {
         defer arena.deinit();
         const alloc = arena.allocator();
 
+        const now_ms = ids.nowMs();
+        if (now_ms >= self.next_health_check_at_ms) {
+            self.runWorkerHealthChecks(alloc, now_ms) catch |err| {
+                log.warn("worker health check failed: {}", .{err});
+            };
+            self.next_health_check_at_ms = now_ms + self.runtime_cfg.health_check_interval_ms;
+        }
+
         const active_runs = try self.store.getActiveRuns(alloc);
         for (active_runs) |run_row| {
             self.processRun(alloc, run_row) catch |err| {
                 log.err("error processing run {s}: {}", .{ run_row.id, err });
             };
+        }
+    }
+
+    fn runWorkerHealthChecks(self: *Engine, alloc: std.mem.Allocator, now_ms: i64) !void {
+        const workers = try self.store.listWorkers(alloc);
+        for (workers) |worker| {
+            if (self.metrics) |m| {
+                metrics_mod.Metrics.incr(&m.worker_health_checks_total);
+            }
+
+            if (std.mem.eql(u8, worker.status, "draining")) continue;
+            if (std.mem.eql(u8, worker.status, "dead")) {
+                if (worker.circuit_open_until_ms) |until| {
+                    if (until > now_ms) continue;
+                }
+            }
+
+            const healthy = dispatch.probeWorker(alloc, worker.url, worker.protocol);
+            if (healthy) {
+                self.store.markWorkerSuccess(worker.id, now_ms) catch {};
+                continue;
+            }
+
+            if (self.metrics) |m| {
+                metrics_mod.Metrics.incr(&m.worker_health_failures_total);
+            }
+            const circuit_until = now_ms + self.runtime_cfg.worker_circuit_breaker_ms;
+            self.store.markWorkerFailure(
+                worker.id,
+                "health check failed",
+                now_ms,
+                self.runtime_cfg.worker_failure_threshold,
+                circuit_until,
+            ) catch {};
         }
     }
 
@@ -118,54 +181,80 @@ pub const Engine = struct {
                     log.err("error executing task step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "fan_out")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeFanOutStep(alloc, run_row, step) catch |err| {
                     log.err("error executing fan_out step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "map")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeMapStep(alloc, run_row, step) catch |err| {
                     log.err("error executing map step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "reduce")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeReduceStep(alloc, run_row, step, updated_steps) catch |err| {
                     log.err("error executing reduce step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "condition")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeConditionStep(alloc, run_row, step, updated_steps) catch |err| {
                     log.err("error executing condition step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "approval")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeApprovalStep(alloc, run_row, step) catch |err| {
                     log.err("error executing approval step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "transform")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeTransformStep(alloc, run_row, step) catch |err| {
                     log.err("error executing transform step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "wait")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeWaitStep(alloc, run_row, step) catch |err| {
                     log.err("error executing wait step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "router")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeRouterStep(alloc, run_row, step, updated_steps) catch |err| {
                     log.err("error executing router step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "loop")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeLoopStep(alloc, run_row, step) catch |err| {
                     log.err("error executing loop step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "sub_workflow")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeSubWorkflowStep(alloc, run_row, step) catch |err| {
                     log.err("error executing sub_workflow step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "debate")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeDebateStep(alloc, run_row, step) catch |err| {
                     log.err("error executing debate step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "group_chat")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeGroupChatStep(alloc, run_row, step) catch |err| {
                     log.err("error executing group_chat step {s}: {}", .{ step.id, err });
                 };
             } else if (std.mem.eql(u8, step.type, "saga")) {
+                const claimed = self.store.claimReadyStep(step.id, null, ids.nowMs()) catch false;
+                if (!claimed) continue;
                 self.executeSagaStep(alloc, run_row, step) catch |err| {
                     log.err("error executing saga step {s}: {}", .{ step.id, err });
                 };
@@ -211,6 +300,10 @@ pub const Engine = struct {
     // ── executeTaskStep ──────────────────────────────────────────────
 
     fn executeTaskStep(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, step: types.StepRow) !void {
+        if (step.next_attempt_at_ms) |next_attempt| {
+            if (ids.nowMs() < next_attempt) return;
+        }
+
         // 1. Resolve prompt source for this task step.
         const prompt_source = try self.resolveTaskPromptSource(alloc, run_row, step) orelse {
             log.warn("no prompt_template for step {s}", .{step.def_step_id});
@@ -261,8 +354,15 @@ pub const Engine = struct {
         }
         const worker = selected_worker.?;
 
-        // 7. Mark step as "running"
-        try self.store.updateStepStatus(step.id, "running", worker.id, null, null, step.attempt);
+        // 7. Atomically claim the step to avoid duplicate dispatch across instances.
+        const claim_ts = ids.nowMs();
+        const claimed = try self.store.claimReadyStep(step.id, worker.id, claim_ts);
+        if (!claimed) {
+            return;
+        }
+        if (self.metrics) |m| {
+            metrics_mod.Metrics.incr(&m.steps_claimed_total);
+        }
         try self.store.insertEvent(run_row.id, step.id, "step.running", "{}");
 
         // 8. Dispatch to worker with handoff support
@@ -331,20 +431,52 @@ pub const Engine = struct {
             const output_json = try wrapOutput(alloc, final_result.output);
             try self.store.updateStepStatus(step.id, "completed", current_worker.id, output_json, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", "{}");
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output_json);
+            try self.store.markWorkerSuccess(current_worker.id, ids.nowMs());
+            if (self.metrics) |m| {
+                metrics_mod.Metrics.incr(&m.worker_dispatch_success_total);
+            }
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output_json, self.metrics);
             log.info("step {s} completed", .{step.id});
         } else {
             // On failure: retry or fail
             const err_text = final_result.error_text orelse "dispatch failed";
+            const now_ms = ids.nowMs();
+            const circuit_until = now_ms + self.runtime_cfg.worker_circuit_breaker_ms;
+            try self.store.markWorkerFailure(
+                current_worker.id,
+                err_text,
+                now_ms,
+                self.runtime_cfg.worker_failure_threshold,
+                circuit_until,
+            );
+            if (self.metrics) |m| {
+                metrics_mod.Metrics.incr(&m.worker_dispatch_failure_total);
+            }
+
             if (step.attempt < step.max_attempts) {
-                // Increment attempt and set back to "ready"
-                try self.store.updateStepStatus(step.id, "ready", null, null, err_text, step.attempt + 1);
-                try self.store.insertEvent(run_row.id, step.id, "step.retry", "{}");
-                log.info("step {s} will retry (attempt {d}/{d})", .{ step.id, step.attempt + 1, step.max_attempts });
+                const elapsed_ms = now_ms - step.created_at_ms;
+                if (elapsed_ms > self.runtime_cfg.retry_max_elapsed_ms) {
+                    const elapsed_err = try std.fmt.allocPrint(alloc, "retry max elapsed exceeded ({d}ms)", .{self.runtime_cfg.retry_max_elapsed_ms});
+                    try self.store.updateStepStatus(step.id, "failed", current_worker.id, null, elapsed_err, step.attempt);
+                    try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
+                    callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
+                    log.err("step {s} failed: {s}", .{ step.id, elapsed_err });
+                    return;
+                }
+
+                const delay_ms = computeRetryDelayMs(self.runtime_cfg, step, now_ms);
+                const next_attempt_ms = now_ms + delay_ms;
+                try self.store.scheduleStepRetry(step.id, next_attempt_ms, step.attempt + 1, err_text);
+                const retry_event = try std.fmt.allocPrint(alloc, "{{\"next_attempt_at_ms\":{d},\"delay_ms\":{d}}}", .{ next_attempt_ms, delay_ms });
+                try self.store.insertEvent(run_row.id, step.id, "step.retry", retry_event);
+                if (self.metrics) |m| {
+                    metrics_mod.Metrics.incr(&m.steps_retry_scheduled_total);
+                }
+                log.info("step {s} will retry (attempt {d}/{d}, delay={d}ms)", .{ step.id, step.attempt + 1, step.max_attempts, delay_ms });
             } else {
                 try self.store.updateStepStatus(step.id, "failed", current_worker.id, null, err_text, step.attempt);
                 try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
                 log.err("step {s} failed: {s}", .{ step.id, err_text });
             }
         }
@@ -596,7 +728,7 @@ pub const Engine = struct {
             const output_json = try wrapOutput(alloc, result.output);
             try self.store.updateStepStatus(step.id, "completed", worker.id, output_json, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", "{}");
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output_json);
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output_json, self.metrics);
             log.info("reduce step {s} completed", .{step.id});
         } else {
             const err_text = result.error_text orelse "dispatch failed";
@@ -606,7 +738,7 @@ pub const Engine = struct {
             } else {
                 try self.store.updateStepStatus(step.id, "failed", worker.id, null, err_text, step.attempt);
                 try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
             }
         }
     }
@@ -709,7 +841,7 @@ pub const Engine = struct {
         try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
 
         // 5. Fire callback + event
-        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
         try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
         log.info("transform step {s} completed", .{step.id});
     }
@@ -724,7 +856,7 @@ pub const Engine = struct {
             // Signal mode: set to waiting_approval and wait for external POST /signal
             try self.store.updateStepStatus(step.id, "waiting_approval", null, null, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.waiting_signal", "{}");
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.waiting_signal", run_row.id, step.id, "{}");
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.waiting_signal", run_row.id, step.id, "{}", self.metrics);
             log.info("wait step {s} waiting for signal", .{step.id});
             return;
         }
@@ -746,7 +878,6 @@ pub const Engine = struct {
             break :blk null;
         };
         if (duration_opt) |duration| {
-
             if (step.started_at_ms) |started| {
                 // Already running -- check if duration elapsed
                 if (now - started >= duration) {
@@ -754,7 +885,7 @@ pub const Engine = struct {
                     const output = try std.fmt.allocPrint(alloc, "{{\"output\":\"waited\",\"waited_ms\":{d}}}", .{waited});
                     try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
                     try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-                    callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+                    callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
                     log.info("wait step {s} completed after {d}ms", .{ step.id, waited });
                     return;
                 }
@@ -867,7 +998,7 @@ pub const Engine = struct {
         const output = try std.fmt.allocPrint(alloc, "{{\"output\":\"routed\",\"routed_to\":\"{s}\"}}", .{matched_target.?});
         try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
         try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
         log.info("router step {s} routed to {s}", .{ step.id, matched_target.? });
     }
 
@@ -961,7 +1092,7 @@ pub const Engine = struct {
             // Loop fails if any child fails
             try self.store.updateStepStatus(step.id, "failed", null, null, "loop child step failed", step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
             log.info("loop step {s} failed (child failed)", .{step.id});
             return;
         }
@@ -987,7 +1118,7 @@ pub const Engine = struct {
             const output = last_child_output orelse try wrapOutput(alloc, "loop completed");
             try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
             log.info("loop step {s} completed (exit condition met at iteration {d})", .{ step.id, max_iter });
             return;
         }
@@ -998,7 +1129,7 @@ pub const Engine = struct {
             const output = last_child_output orelse try wrapOutput(alloc, "loop completed (max iterations)");
             try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
             log.info("loop step {s} completed (max iterations {d} reached)", .{ step.id, max_iterations });
             return;
         }
@@ -1153,7 +1284,7 @@ pub const Engine = struct {
 
         // Build the child workflow_json: wrap the nested workflow with its steps
         // The child run's workflow_json should be the workflow_raw itself
-        try self.store.insertRun(child_run_id, "running", workflow_raw, child_input_json, run_row.callbacks_json);
+        try self.store.insertRun(child_run_id, null, "running", workflow_raw, child_input_json, run_row.callbacks_json);
 
         // 5. Create child run's steps from the nested workflow definition
         const nested_steps = nested_steps_val.array.items;
@@ -1266,13 +1397,13 @@ pub const Engine = struct {
             const output = last_output orelse try wrapOutput(alloc, "sub_workflow completed");
             try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
             log.info("sub_workflow step {s} completed (child run {s})", .{ step.id, child_run_id });
         } else if (std.mem.eql(u8, child_run.status, "failed")) {
             const err_text = child_run.error_text orelse "child run failed";
             try self.store.updateStepStatus(step.id, "failed", null, null, err_text, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
             log.info("sub_workflow step {s} failed (child run {s})", .{ step.id, child_run_id });
         }
         // Otherwise: child run still in progress, wait
@@ -1364,14 +1495,14 @@ pub const Engine = struct {
                 const output = judge.output_json orelse try wrapOutput(alloc, "debate completed");
                 try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
                 try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
                 log.info("debate step {s} completed (judge decided)", .{step.id});
                 return;
             } else if (std.mem.eql(u8, judge.status, "failed")) {
                 const err_text = judge.error_text orelse "judge failed";
                 try self.store.updateStepStatus(step.id, "failed", null, null, err_text, step.attempt);
                 try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
                 log.info("debate step {s} failed (judge failed)", .{step.id});
                 return;
             }
@@ -1397,7 +1528,7 @@ pub const Engine = struct {
         if (any_failed) {
             try self.store.updateStepStatus(step.id, "failed", null, null, "debate participant failed", step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
             return;
         }
 
@@ -1421,7 +1552,7 @@ pub const Engine = struct {
             const output = try wrapOutput(alloc, debate_responses);
             try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
             log.info("debate step {s} completed (no judge template, returning responses)", .{step.id});
             return;
         };
@@ -1613,7 +1744,7 @@ pub const Engine = struct {
                         const output = try wrapOutput(alloc, transcript);
                         try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
                         try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-                        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+                        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
                         log.info("group_chat step {s} completed (exit condition met at round {d})", .{ step.id, current_round });
                         return;
                     }
@@ -1627,7 +1758,7 @@ pub const Engine = struct {
             const output = try wrapOutput(alloc, transcript);
             try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
             log.info("group_chat step {s} completed (max rounds {d} reached)", .{ step.id, max_rounds });
             return;
         }
@@ -1934,7 +2065,7 @@ pub const Engine = struct {
             const output = last_output orelse try wrapOutput(alloc, "saga completed");
             try self.store.updateStepStatus(step.id, "completed", null, output, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", output);
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output);
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output, self.metrics);
             log.info("saga step {s} completed successfully", .{step.id});
             return;
         }
@@ -1979,7 +2110,7 @@ pub const Engine = struct {
                 const output = try std.fmt.allocPrint(alloc, "{{\"failed_at\":\"{s}\",\"compensated\":[]}}", .{failed_def});
                 try self.store.updateStepStatus(step.id, "failed", null, output, null, step.attempt);
                 try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
                 log.info("saga step {s} failed at {s}, no compensations needed", .{ step.id, failed_def });
                 return;
             }
@@ -2118,7 +2249,7 @@ pub const Engine = struct {
             const err_msg = try std.fmt.allocPrint(alloc, "compensation step {s} failed", .{comp_def_id.?});
             try self.store.updateStepStatus(step.id, "failed", null, null, err_msg, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
             log.info("saga step {s} failed during compensation", .{step.id});
         }
         // Otherwise compensation child still running/ready — wait
@@ -2154,7 +2285,7 @@ pub const Engine = struct {
 
         try self.store.updateStepStatus(step.id, "failed", null, output, null, step.attempt);
         try self.store.insertEvent(run_row.id, step.id, "step.failed", output);
-        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, output);
+        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, output, self.metrics);
         log.info("saga step {s} failed at {s}, compensated {d} steps", .{ step.id, failed_at, compensated.items.len });
     }
 
@@ -2365,7 +2496,7 @@ pub const Engine = struct {
             try self.store.insertEvent(run_id, null, "run.completed", "{}");
             // Fire run.completed callbacks
             if (try self.store.getRun(alloc, run_id)) |run_row| {
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.completed", run_id, null, "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.completed", run_id, null, "{}", self.metrics);
             }
             log.info("run {s} completed", .{run_id});
         } else if (all_terminal and any_failed) {
@@ -2373,7 +2504,7 @@ pub const Engine = struct {
             try self.store.insertEvent(run_id, null, "run.failed", "{}");
             // Fire run.failed callbacks
             if (try self.store.getRun(alloc, run_id)) |run_row| {
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_id, null, "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_id, null, "{}", self.metrics);
             }
             log.info("run {s} failed", .{run_id});
         }
@@ -2396,9 +2527,28 @@ pub const Engine = struct {
     fn failStepWithError(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, step: types.StepRow, err_text: []const u8) !void {
         try self.store.updateStepStatus(step.id, "failed", null, null, err_text, step.attempt);
         try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
-        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}");
+        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
     }
 };
+
+fn computeRetryDelayMs(cfg: RuntimeConfig, step: types.StepRow, now_ms: i64) i64 {
+    var delay = cfg.retry_base_delay_ms;
+    var remaining_exp = step.attempt - 1;
+    while (remaining_exp > 0) : (remaining_exp -= 1) {
+        if (delay >= cfg.retry_max_delay_ms) break;
+        const doubled = delay * 2;
+        delay = if (doubled > cfg.retry_max_delay_ms) cfg.retry_max_delay_ms else doubled;
+    }
+
+    const jitter_cap = if (cfg.retry_jitter_ms > 0) cfg.retry_jitter_ms else 0;
+    var jitter: i64 = 0;
+    if (jitter_cap > 0) {
+        const seed = std.hash.Wyhash.hash(0, step.id);
+        const mixed = seed ^ @as(u64, @intCast(now_ms));
+        jitter = @as(i64, @intCast(mixed % @as(u64, @intCast(jitter_cap + 1))));
+    }
+    return delay + jitter;
+}
 
 // ── Free functions (workflow JSON helpers) ────────────────────────────
 
@@ -2844,7 +2994,7 @@ test "Engine: checkRunCompletion marks run completed" {
     defer store.deinit();
 
     // Insert a run
-    try store.insertRun("r1", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertRun("r1", null, "running", "{\"steps\":[]}", "{}", "[]");
 
     // Insert a completed step
     try store.insertStep("s1", "r1", "step1", "task", "completed", "{}", 1, null, null, null);
@@ -2865,7 +3015,7 @@ test "Engine: checkRunCompletion marks run failed" {
     var store = try Store.init(allocator, ":memory:");
     defer store.deinit();
 
-    try store.insertRun("r1", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertRun("r1", null, "running", "{\"steps\":[]}", "{}", "[]");
     try store.insertStep("s1", "r1", "step1", "task", "completed", "{}", 1, null, null, null);
     try store.insertStep("s2", "r1", "step2", "task", "failed", "{}", 1, null, null, null);
 
@@ -2884,7 +3034,7 @@ test "Engine: checkRunCompletion does not complete with pending steps" {
     var store = try Store.init(allocator, ":memory:");
     defer store.deinit();
 
-    try store.insertRun("r1", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertRun("r1", null, "running", "{\"steps\":[]}", "{}", "[]");
     try store.insertStep("s1", "r1", "step1", "task", "completed", "{}", 1, null, null, null);
     try store.insertStep("s2", "r1", "step2", "task", "pending", "{}", 1, null, null, null);
 
@@ -2907,7 +3057,7 @@ test "Engine: pending to ready promotion" {
     const wf =
         \\{"steps":[{"id":"s1","type":"task","prompt_template":"hello"},{"id":"s2","type":"task","prompt_template":"world","depends_on":["s1"]}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
 
     // s1 is completed, s2 is pending and depends on s1
     try store.insertStep("step1", "r1", "s1", "task", "completed", "{}", 1, null, null, null);
@@ -2941,7 +3091,7 @@ test "Engine: approval step sets waiting_approval" {
     const wf =
         \\{"steps":[{"id":"approve1","type":"approval"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step1", "r1", "approve1", "approval", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -2964,7 +3114,7 @@ test "Engine: fan_out creates child steps" {
     const wf =
         \\{"steps":[{"id":"fan1","type":"fan_out","count":3}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step1", "r1", "fan1", "fan_out", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3001,7 +3151,7 @@ test "Engine: map creates child steps from input array" {
     const input =
         \\{"topics":["AI","ML","DL"]}
     ;
-    try store.insertRun("r1", "running", wf, input, "[]");
+    try store.insertRun("r1", null, "running", wf, input, "[]");
     try store.insertStep("step1", "r1", "map1", "map", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3109,7 +3259,7 @@ test "Engine: task step fallback uses input_json.rendered_prompt" {
     var store = try Store.init(allocator, ":memory:");
     defer store.deinit();
 
-    try store.insertRun("r-rendered", "running", "{\"steps\":[]}", "{}", "[]");
+    try store.insertRun("r-rendered", null, "running", "{\"steps\":[]}", "{}", "[]");
     try store.insertWorker("w-rendered", "http://127.0.0.1:1", "", "webhook", null, "[]", 1, "registered");
     try store.insertStep("parent-step", "r-rendered", "missing-parent-def", "task", "completed", "{}", 1, null, null, null);
 
@@ -3146,7 +3296,7 @@ test "Engine: rendered_prompt has priority over parent prompt_template" {
     const wf =
         \\{"steps":[{"id":"parent","type":"debate","prompt_template":"parent template"},{"id":"child","type":"task","prompt_template":"child template"}]}
     ;
-    try store.insertRun("r-priority", "running", wf, "{}", "[]");
+    try store.insertRun("r-priority", null, "running", wf, "{}", "[]");
     try store.insertStep("parent-step", "r-priority", "parent", "debate", "running", "{}", 1, null, null, null);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -3209,6 +3359,7 @@ fn makeTestStepRow(id: []const u8, status: []const u8) types.StepRow {
         .attempt = 1,
         .max_attempts = 1,
         .timeout_ms = null,
+        .next_attempt_at_ms = null,
         .parent_step_id = null,
         .item_index = null,
         .created_at_ms = 0,
@@ -3230,7 +3381,7 @@ test "Engine: transform step renders output_template" {
     const wf =
         \\{"steps":[{"id":"t1","type":"task","prompt_template":"hello"},{"id":"tr1","type":"transform","output_template":"result: {{steps.t1.output}}"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
 
     // Insert task1 as completed with output
     try store.insertStep("step_t1", "r1", "t1", "task", "completed", "{}", 1, null, null, null);
@@ -3265,7 +3416,7 @@ test "Engine: transform step fails without output_template" {
     const wf =
         \\{"steps":[{"id":"tr1","type":"transform"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_tr1", "r1", "tr1", "transform", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3291,7 +3442,7 @@ test "Engine: wait step with duration_ms=0 completes after two ticks" {
     const wf =
         \\{"steps":[{"id":"w1","type":"wait","duration_ms":0}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_w1", "r1", "w1", "wait", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3324,7 +3475,7 @@ test "Engine: wait step with signal enters waiting_approval" {
     const wf =
         \\{"steps":[{"id":"w1","type":"wait","signal":"deploy"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_w1", "r1", "w1", "wait", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3347,7 +3498,7 @@ test "Engine: wait step without config fails" {
     const wf =
         \\{"steps":[{"id":"w1","type":"wait"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_w1", "r1", "w1", "wait", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3370,7 +3521,7 @@ test "Engine: wait step with invalid duration string fails" {
     const wf =
         \\{"steps":[{"id":"w1","type":"wait","duration_ms":"abc"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_w1", "r1", "w1", "wait", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3397,7 +3548,7 @@ test "Engine: router step routes to matching target" {
     const wf =
         \\{"steps":[{"id":"classify","type":"task","prompt_template":"classify"},{"id":"router1","type":"router","routes":{"bug":"fix_bug","feature":"add_feature"}},{"id":"fix_bug","type":"task","prompt_template":"fix"},{"id":"add_feature","type":"task","prompt_template":"add"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
 
     // classify step completed with "bug" in output
     try store.insertStep("step_classify", "r1", "classify", "task", "completed", "{}", 1, null, null, null);
@@ -3444,7 +3595,7 @@ test "Engine: router step uses default when no match" {
     const wf =
         \\{"steps":[{"id":"classify","type":"task","prompt_template":"classify"},{"id":"router1","type":"router","routes":{"bug":"fix_bug"},"default":"fix_bug"},{"id":"fix_bug","type":"task","prompt_template":"fix"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
 
     // classify step completed with something that doesn't match any route
     try store.insertStep("step_classify", "r1", "classify", "task", "completed", "{}", 1, null, null, null);
@@ -3481,7 +3632,7 @@ test "Engine: router step fails without routes" {
     const wf =
         \\{"steps":[{"id":"classify","type":"task","prompt_template":"classify"},{"id":"router1","type":"router"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
 
     try store.insertStep("step_classify", "r1", "classify", "task", "completed", "{}", 1, null, null, null);
     try store.updateStepStatus("step_classify", "completed", null, "{\"output\":\"test\"}", null, 1);
@@ -3542,7 +3693,7 @@ test "Engine: loop step creates first iteration children" {
     const wf =
         \\{"steps":[{"id":"loop1","type":"loop","max_iterations":3,"exit_condition":"done","body":["t1"]},{"id":"t1","type":"task","prompt_template":"do work"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_loop", "r1", "loop1", "loop", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3573,7 +3724,7 @@ test "Engine: loop step iterates until exit condition" {
     const wf =
         \\{"steps":[{"id":"loop1","type":"loop","max_iterations":5,"exit_condition":"done","body":["t1"]},{"id":"t1","type":"task","prompt_template":"do work"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_loop", "r1", "loop1", "loop", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3660,7 +3811,7 @@ test "Engine: loop step stops at max_iterations" {
     const wf =
         \\{"steps":[{"id":"loop1","type":"loop","max_iterations":2,"exit_condition":"never_match","body":["t1"]},{"id":"t1","type":"task","prompt_template":"do work"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_loop", "r1", "loop1", "loop", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3726,7 +3877,7 @@ test "Engine: loop step fails when child fails" {
     const wf =
         \\{"steps":[{"id":"loop1","type":"loop","max_iterations":3,"exit_condition":"done","body":["t1"]},{"id":"t1","type":"task","prompt_template":"do work"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_loop", "r1", "loop1", "loop", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3771,7 +3922,7 @@ test "Engine: loop step with multiple body steps chains them" {
     const wf =
         \\{"steps":[{"id":"loop1","type":"loop","max_iterations":1,"exit_condition":"done","body":["s1","s2"]},{"id":"s1","type":"task","prompt_template":"step1"},{"id":"s2","type":"task","prompt_template":"step2"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_loop", "r1", "loop1", "loop", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3814,7 +3965,7 @@ test "Engine: sub_workflow step creates child run" {
     const wf =
         \\{"steps":[{"id":"sub1","type":"sub_workflow","workflow":{"steps":[{"id":"inner1","type":"task","prompt_template":"inner work"}]}}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_sub", "r1", "sub1", "sub_workflow", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3861,7 +4012,7 @@ test "Engine: sub_workflow step completes when child run completes" {
     const wf =
         \\{"steps":[{"id":"sub1","type":"sub_workflow","workflow":{"steps":[{"id":"inner1","type":"task","prompt_template":"inner work"}]}}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_sub", "r1", "sub1", "sub_workflow", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3922,7 +4073,7 @@ test "Engine: sub_workflow step fails when child run fails" {
     const wf =
         \\{"steps":[{"id":"sub1","type":"sub_workflow","workflow":{"steps":[{"id":"inner1","type":"task","prompt_template":"inner work"}]}}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_sub", "r1", "sub1", "sub_workflow", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -3974,7 +4125,7 @@ test "Engine: sub_workflow step fails without workflow" {
     const wf =
         \\{"steps":[{"id":"sub1","type":"sub_workflow"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_sub", "r1", "sub1", "sub_workflow", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4002,7 +4153,7 @@ test "Engine: loop step fails without body" {
     const wf =
         \\{"steps":[{"id":"loop1","type":"loop","max_iterations":3,"exit_condition":"done"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_loop", "r1", "loop1", "loop", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4032,7 +4183,7 @@ test "Engine: debate step creates participant children" {
     const wf =
         \\{"steps":[{"id":"review","type":"debate","count":2,"worker_tags":["reviewer"],"judge_tags":["senior"],"prompt_template":"Review this code","judge_template":"Pick the best:\n{{debate_responses}}"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_debate", "r1", "review", "debate", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4065,7 +4216,7 @@ test "Engine: debate step fails without count" {
     const wf =
         \\{"steps":[{"id":"review","type":"debate","prompt_template":"Review this"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_debate", "r1", "review", "debate", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4088,7 +4239,7 @@ test "Engine: debate step fails without prompt_template" {
     const wf =
         \\{"steps":[{"id":"review","type":"debate","count":2}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_debate", "r1", "review", "debate", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4111,7 +4262,7 @@ test "Engine: debate step creates judge after participants complete" {
     const wf =
         \\{"steps":[{"id":"review","type":"debate","count":2,"worker_tags":["reviewer"],"judge_tags":["senior"],"prompt_template":"Review this code","judge_template":"Pick the best:\n{{debate_responses}}"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_debate", "r1", "review", "debate", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4170,7 +4321,7 @@ test "Engine: debate step completes when judge completes" {
     const wf =
         \\{"steps":[{"id":"review","type":"debate","count":2,"prompt_template":"Review this","judge_template":"Pick best: {{debate_responses}}"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_debate", "r1", "review", "debate", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4239,7 +4390,7 @@ test "Engine: debate step completes without judge_template" {
     const wf =
         \\{"steps":[{"id":"review","type":"debate","count":2,"prompt_template":"Review this"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_debate", "r1", "review", "debate", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4286,7 +4437,7 @@ test "Engine: debate step fails when participant fails" {
     const wf =
         \\{"steps":[{"id":"review","type":"debate","count":2,"prompt_template":"Review this","judge_template":"Pick: {{debate_responses}}"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_debate", "r1", "review", "debate", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4334,7 +4485,7 @@ test "Engine: group_chat step parses participants and starts" {
     const wf =
         \\{"steps":[{"id":"discuss","type":"group_chat","participants":[{"tags":["architect"],"role":"Architect"},{"tags":["security"],"role":"Security"}],"max_rounds":3,"exit_condition":"CONSENSUS","prompt_template":"Discuss: topic","round_template":"Previous:\n{{chat_history}}\nYour role: {{role}}. Respond."}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_gc", "r1", "discuss", "group_chat", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4358,7 +4509,7 @@ test "Engine: group_chat step fails without participants" {
     const wf =
         \\{"steps":[{"id":"discuss","type":"group_chat","prompt_template":"Discuss"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_gc", "r1", "discuss", "group_chat", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4381,7 +4532,7 @@ test "Engine: group_chat step fails without prompt_template" {
     const wf =
         \\{"steps":[{"id":"discuss","type":"group_chat","participants":[{"tags":["a"],"role":"A"}]}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_gc", "r1", "discuss", "group_chat", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4405,7 +4556,7 @@ test "Engine: group_chat builds chat history across rounds" {
     const wf =
         \\{"steps":[{"id":"discuss","type":"group_chat","participants":[{"tags":["a"],"role":"Architect"},{"tags":["b"],"role":"Security"}],"max_rounds":2,"exit_condition":"CONSENSUS","prompt_template":"Discuss topic","round_template":"Previous:\n{{chat_history}}\nYour role: {{role}}. Respond."}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_gc", "r1", "discuss", "group_chat", "running", "{}", 1, null, null, null);
 
     // Insert round 1 messages (simulating what dispatch would produce)
@@ -4460,7 +4611,7 @@ test "Engine: group_chat completes at max_rounds" {
     const wf =
         \\{"steps":[{"id":"discuss","type":"group_chat","participants":[{"tags":["a"],"role":"A"},{"tags":["b"],"role":"B"}],"max_rounds":1,"exit_condition":"NEVER_MATCH","prompt_template":"Discuss","round_template":"{{chat_history}} {{role}}"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_gc", "r1", "discuss", "group_chat", "running", "{}", 1, null, null, null);
 
     // Insert round 1 messages (no exit condition match)
@@ -4512,7 +4663,7 @@ test "Engine: saga step creates first body child and initializes state" {
     const wf =
         \\{"steps":[{"id":"deploy_saga","type":"saga","body":["provision","deploy","verify"],"compensations":{"provision":"deprovision","deploy":"rollback_deploy"}},{"id":"provision","type":"task","prompt_template":"provision"},{"id":"deploy","type":"task","prompt_template":"deploy"},{"id":"verify","type":"task","prompt_template":"verify"},{"id":"deprovision","type":"task","prompt_template":"deprovision"},{"id":"rollback_deploy","type":"task","prompt_template":"rollback"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_saga", "r1", "deploy_saga", "saga", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4549,7 +4700,7 @@ test "Engine: saga step executes body sequentially and completes" {
     const wf =
         \\{"steps":[{"id":"saga1","type":"saga","body":["s1","s2"],"compensations":{"s1":"c1"}},{"id":"s1","type":"task","prompt_template":"step1"},{"id":"s2","type":"task","prompt_template":"step2"},{"id":"c1","type":"task","prompt_template":"comp1"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_saga", "r1", "saga1", "saga", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4633,7 +4784,7 @@ test "Engine: saga step runs compensation in reverse on failure" {
     const wf =
         \\{"steps":[{"id":"saga1","type":"saga","body":["s1","s2"],"compensations":{"s1":"c1","s2":"c2"}},{"id":"s1","type":"task","prompt_template":"step1"},{"id":"s2","type":"task","prompt_template":"step2"},{"id":"c1","type":"task","prompt_template":"comp1"},{"id":"c2","type":"task","prompt_template":"comp2"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_saga", "r1", "saga1", "saga", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4753,7 +4904,7 @@ test "Engine: saga step fails immediately with no completed steps to compensate"
     const wf =
         \\{"steps":[{"id":"saga1","type":"saga","body":["s1"],"compensations":{"s1":"c1"}},{"id":"s1","type":"task","prompt_template":"step1"},{"id":"c1","type":"task","prompt_template":"comp1"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_saga", "r1", "saga1", "saga", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4800,7 +4951,7 @@ test "Engine: saga step fails without body" {
     const wf =
         \\{"steps":[{"id":"saga1","type":"saga"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_saga", "r1", "saga1", "saga", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);
@@ -4826,7 +4977,7 @@ test "Engine: condition routes back to earlier step creates new instances" {
     const wf =
         \\{"steps":[{"id":"compute","type":"task","prompt_template":"compute","depends_on":[]},{"id":"check","type":"condition","expression":"retry","true_target":"compute","false_target":"done","depends_on":["compute"]},{"id":"done","type":"task","prompt_template":"done","depends_on":["check"]}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
 
     // Step "compute" completed
     try store.insertStep("step_compute", "r1", "compute", "task", "completed", "{}", 1, null, null, null);
@@ -4898,7 +5049,7 @@ test "Engine: graph cycle respects max_cycle_iterations" {
     const wf =
         \\{"steps":[{"id":"compute","type":"task","prompt_template":"compute"},{"id":"check","type":"condition","expression":"retry","true_target":"compute","false_target":"done","max_cycle_iterations":1,"depends_on":["compute"]},{"id":"done","type":"task","prompt_template":"done","depends_on":["check"]}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
 
     // Pre-set cycle state to max
     try store.upsertCycleState("r1", "cycle_check", 1, 1);
@@ -5006,7 +5157,7 @@ test "Engine: task step stays ready when no workers available (handoff path)" {
     const wf =
         \\{"steps":[{"id":"t1","type":"task","prompt_template":"do work"}]}
     ;
-    try store.insertRun("r1", "running", wf, "{}", "[]");
+    try store.insertRun("r1", null, "running", wf, "{}", "[]");
     try store.insertStep("step_t1", "r1", "t1", "task", "ready", "{}", 1, null, null, null);
 
     var engine = Engine.init(&store, allocator, 500);

@@ -15,6 +15,13 @@ pub const EngineConfig = struct {
     default_timeout_ms: u32 = 300000,
     default_max_attempts: u32 = 1,
     health_check_interval_ms: u32 = 30000,
+    worker_failure_threshold: u32 = 3,
+    worker_circuit_breaker_ms: u32 = 60000,
+    retry_base_delay_ms: u32 = 1000,
+    retry_max_delay_ms: u32 = 30000,
+    retry_jitter_ms: u32 = 250,
+    retry_max_elapsed_ms: u32 = 900000,
+    shutdown_grace_ms: u32 = 30000,
 };
 
 pub const Config = struct {
