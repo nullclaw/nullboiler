@@ -5,6 +5,9 @@ NullBoiler is an orchestration engine for AI agents.
 It is intentionally narrow: it decides what should run, when it should run, and which worker should execute it.  
 It does not replace the task tracker and it does not replace the agent runtime.
 
+You do not need all components together.  
+Choose only the pieces required for your workflow.
+
 ## Design Principle
 
 `tracker = source of truth`  
@@ -30,13 +33,16 @@ Use nullboiler to apply orchestration policy:
 
 NullBoiler should not become a task tracker or artifact database.
 
-### 3) Agent Runtime: [nullclaw](https://github.com/nullclaw/nullclaw)
+### 3) Agent Runtime: [nullclaw](https://github.com/nullclaw/nullclaw) or another compatible worker
 
-Use nullclaw as the execution engine:
+Use an agent runtime as the execution engine:
 
 - Receives a concrete task/job to run.
 - Executes tools, code, and model interactions.
 - Returns execution outputs/events back to the orchestrator/tracker flow.
+
+`nullclaw` is the reference runtime, but `nullboiler` can also orchestrate other compatible workers
+(for example OpenClaw/OpenAI-compatible, ZeroClaw, or PicoClaw via bridge).
 
 Agents should execute work, not own global orchestration policy.
 
@@ -55,6 +61,7 @@ This keeps the architecture modular, simpler to reason about, and easier to evol
 
 - `nullclaw` only: single-agent direct execution.
 - `nullboiler + nullclaw`: orchestrated execution without dedicated tracker.
+- `nullboiler + other compatible agents`: orchestrated execution without `nullclaw` dependency.
 - `nulltickets + nullclaw`: tracker-driven execution loop.
 - `nulltickets + nullboiler + nullclaw`: full multi-agent orchestration with durable task source.
 
