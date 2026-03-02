@@ -29,35 +29,62 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // skip program name
 
+    // Collect all args into a slice for manifest protocol checks
+    var arg_list: std.ArrayListUnmanaged([:0]const u8) = .empty;
+    defer arg_list.deinit(allocator);
+    while (args.next()) |a| {
+        try arg_list.append(allocator, a);
+    }
+    const all_args = arg_list.items;
+
+    // Check for manifest protocol flags first (early exit, no config needed)
+    if (all_args.len >= 1) {
+        if (std.mem.eql(u8, all_args[0], "--export-manifest")) {
+            try @import("export_manifest.zig").run();
+            return;
+        }
+        if (std.mem.eql(u8, all_args[0], "--from-json")) {
+            try @import("from_json.zig").run(allocator, all_args[1..]);
+            return;
+        }
+    }
+
     var host_override: ?[]const u8 = null;
     var port_override: ?u16 = null;
     var db_override: ?[:0]const u8 = null;
     var token_override: ?[]const u8 = null;
     var config_path: []const u8 = "config.json";
 
-    while (args.next()) |arg| {
+    var i: usize = 0;
+    while (i < all_args.len) : (i += 1) {
+        const arg = all_args[i];
         if (std.mem.eql(u8, arg, "--host")) {
-            if (args.next()) |val| {
-                host_override = val;
+            i += 1;
+            if (i < all_args.len) {
+                host_override = all_args[i];
             }
         } else if (std.mem.eql(u8, arg, "--port")) {
-            if (args.next()) |val| {
-                port_override = std.fmt.parseInt(u16, val, 10) catch {
-                    std.debug.print("invalid port: {s}\n", .{val});
+            i += 1;
+            if (i < all_args.len) {
+                port_override = std.fmt.parseInt(u16, all_args[i], 10) catch {
+                    std.debug.print("invalid port: {s}\n", .{all_args[i]});
                     return;
                 };
             }
         } else if (std.mem.eql(u8, arg, "--db")) {
-            if (args.next()) |val| {
-                db_override = val;
+            i += 1;
+            if (i < all_args.len) {
+                db_override = all_args[i];
             }
         } else if (std.mem.eql(u8, arg, "--token")) {
-            if (args.next()) |val| {
-                token_override = val;
+            i += 1;
+            if (i < all_args.len) {
+                token_override = all_args[i];
             }
         } else if (std.mem.eql(u8, arg, "--config")) {
-            if (args.next()) |val| {
-                config_path = val;
+            i += 1;
+            if (i < all_args.len) {
+                config_path = all_args[i];
             }
         } else if (std.mem.eql(u8, arg, "--version")) {
             std.debug.print("nullboiler v{s}\n", .{version});
@@ -434,4 +461,6 @@ comptime {
     _ = @import("worker_protocol.zig");
     _ = @import("worker_response.zig");
     _ = @import("metrics.zig");
+    _ = @import("export_manifest.zig");
+    _ = @import("from_json.zig");
 }
