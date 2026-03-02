@@ -21,24 +21,18 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer parsed.deinit();
 
-    // Build config JSON
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-
-    try w.writeAll("{\n");
-    try w.print("  \"port\": {d},\n", .{parsed.value.port});
-    try w.print("  \"db\": \"{s}\"", .{parsed.value.db_path});
-    if (parsed.value.api_token) |token| {
-        try w.writeAll(",\n");
-        try w.print("  \"api_token\": \"{s}\"", .{token});
-    }
-    try w.writeAll("\n}\n");
+    const config_json = try std.json.Stringify.valueAlloc(allocator, .{
+        .port = parsed.value.port,
+        .db = parsed.value.db_path,
+        .api_token = parsed.value.api_token,
+    }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
+    defer allocator.free(config_json);
 
     // Write config.json
     const file = try std.fs.cwd().createFile("config.json", .{});
     defer file.close();
-    try file.writeAll(buf.items);
+    try file.writeAll(config_json);
+    try file.writeAll("\n");
 
     // Output success to stdout
     const stdout: std.fs.File = .{ .handle = std.posix.STDOUT_FILENO };
