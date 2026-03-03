@@ -148,22 +148,22 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
 fn handleHealth(ctx: *Context) HttpResponse {
     // Count active runs
     const active_runs = ctx.store.getActiveRuns(ctx.allocator) catch {
-        return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"0.1.0\",\"active_runs\":0,\"total_workers\":0}");
+        return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"2026.3.2\",\"active_runs\":0,\"total_workers\":0}");
     };
     const active_count = active_runs.len;
 
     // Count total workers
     const workers = ctx.store.listWorkers(ctx.allocator) catch {
         const resp = std.fmt.allocPrint(ctx.allocator,
-            \\{{"status":"ok","version":"0.1.0","active_runs":{d},"total_workers":0}}
-        , .{active_count}) catch return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"0.1.0\"}");
+            \\{{"status":"ok","version":"2026.3.2","active_runs":{d},"total_workers":0}}
+        , .{active_count}) catch return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"2026.3.2\"}");
         return jsonResponse(200, resp);
     };
     const worker_count = workers.len;
 
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"status":"ok","version":"0.1.0","active_runs":{d},"total_workers":{d}}}
-    , .{ active_count, worker_count }) catch return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"0.1.0\"}");
+        \\{{"status":"ok","version":"2026.3.2","active_runs":{d},"total_workers":{d}}}
+    , .{ active_count, worker_count }) catch return jsonResponse(200, "{\"status\":\"ok\",\"version\":\"2026.3.2\"}");
     return jsonResponse(200, resp);
 }
 

@@ -10,7 +10,7 @@ const c = @cImport({
     @cInclude("signal.h");
 });
 
-const version = "0.1.0";
+const version = "2026.3.2";
 const max_request_size: usize = 8 * 1024 * 1024;
 const request_read_chunk: usize = 4096;
 var shutdown_requested = std.atomic.Value(bool).init(false);
