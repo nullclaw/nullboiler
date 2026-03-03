@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # -- Stage 1: Build ----------------------------------------------------------
-FROM alpine:3.23 AS builder
+# Build on the native builder architecture and cross-compile with Zig.
+FROM --platform=$BUILDPLATFORM alpine:3.23 AS builder
 
 RUN apk add --no-cache zig musl-dev
 
