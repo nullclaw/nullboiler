@@ -35,6 +35,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     try file.writeAll("\n");
 
     // Output success to stdout
-    const stdout: std.fs.File = .{ .handle = std.posix.STDOUT_FILENO };
+    const stdout = std.fs.File.stdout();
     try stdout.writeAll("{\"status\":\"ok\"}\n");
 }

@@ -8,12 +8,15 @@ pub fn run() !void {
         \\  "display_name": "NullBoiler",
         \\  "description": "DAG-based workflow orchestrator",
         \\  "icon": "orchestrator",
-        \\  "repo": "nullclaw/NullBoiler",
+        \\  "repo": "nullclaw/nullboiler",
         \\  "platforms": {
         \\    "aarch64-macos": { "asset": "nullboiler-macos-aarch64", "binary": "nullboiler" },
         \\    "x86_64-macos": { "asset": "nullboiler-macos-x86_64", "binary": "nullboiler" },
         \\    "x86_64-linux": { "asset": "nullboiler-linux-x86_64", "binary": "nullboiler" },
-        \\    "aarch64-linux": { "asset": "nullboiler-linux-aarch64", "binary": "nullboiler" }
+        \\    "aarch64-linux": { "asset": "nullboiler-linux-aarch64", "binary": "nullboiler" },
+        \\    "riscv64-linux": { "asset": "nullboiler-linux-riscv64", "binary": "nullboiler" },
+        \\    "x86_64-windows": { "asset": "nullboiler-windows-x86_64.exe", "binary": "nullboiler.exe" },
+        \\    "aarch64-windows": { "asset": "nullboiler-windows-aarch64.exe", "binary": "nullboiler.exe" }
         \\  },
         \\  "build_from_source": {
         \\    "zig_version": "0.15.2",
@@ -32,7 +35,7 @@ pub fn run() !void {
         \\  "connects_to": []
         \\}
     ;
-    const stdout: std.fs.File = .{ .handle = std.posix.STDOUT_FILENO };
+    const stdout = std.fs.File.stdout();
     try stdout.writeAll(manifest);
     try stdout.writeAll("\n");
 }
