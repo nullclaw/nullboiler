@@ -8,6 +8,7 @@ RUN apk add --no-cache zig musl-dev
 WORKDIR /app
 COPY build.zig build.zig.zon ./
 COPY src/ src/
+COPY deps/ deps/
 
 ARG TARGETARCH
 RUN set -eu; \
