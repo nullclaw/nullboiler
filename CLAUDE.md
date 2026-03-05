@@ -7,6 +7,8 @@ DAG-based workflow orchestrator for NullClaw AI bot agents. Part of the Null eco
 - **Language**: Zig 0.15.2
 - **Database**: SQLite (vendored in `deps/sqlite/`), WAL mode
 - **Protocol**: HTTP/1.1 REST API with JSON payloads
+- **Dispatch**: HTTP (webhook/api_chat/openai_chat), MQTT, Redis Streams
+- **Vendored C libs**: SQLite (`deps/sqlite/`), hiredis (`deps/hiredis/`), libmosquitto (`deps/mosquitto/`)
 
 ## Module Map
 
@@ -16,7 +18,10 @@ DAG-based workflow orchestrator for NullClaw AI bot agents. Part of the Null eco
 | `api.zig` | REST API routing and 16 endpoint handlers (incl. signal, chat) |
 | `store.zig` | SQLite layer, 30+ CRUD methods, schema migrations |
 | `engine.zig` | DAG scheduler: tick loop, 14 step type handlers, graph cycles, worker handoff |
-| `dispatch.zig` | Worker selection (tags, capacity), protocol-aware HTTP dispatch (`webhook`, `api_chat`, `openai_chat`) |
+| `dispatch.zig` | Worker selection (tags, capacity), protocol-aware dispatch (`webhook`, `api_chat`, `openai_chat`, `mqtt`, `redis_stream`) |
+| `async_dispatch.zig` | Thread-safe response queue for async MQTT/Redis dispatch (keyed by correlation_id) |
+| `redis_client.zig` | Hiredis wrapper: connect, XADD, listener thread for response streams |
+| `mqtt_client.zig` | Libmosquitto wrapper: connect, publish, subscribe, listener thread for response topics |
 | `templates.zig` | Prompt template rendering: `{{input.X}}`, `{{steps.ID.output}}`, `{{item}}`, `{{debate_responses}}`, `{{chat_history}}`, `{{role}}` |
 | `callbacks.zig` | Fire-and-forget webhook callbacks on step/run events |
 | `config.zig` | JSON config loader (`Config`, `WorkerConfig`, `EngineConfig`) |
@@ -66,17 +71,19 @@ zig build && bash tests/test_e2e.sh   # e2e tests (requires Python 3 for mock wo
 - Error handling: return errors up, log with `std.log`
 - Tests: use `:memory:` SQLite, `std.testing.allocator` for leak detection
 - Naming: `snake_case` everywhere
-- No external dependencies beyond vendored SQLite
+- No external dependencies beyond vendored C libs (SQLite, hiredis, libmosquitto)
 
 ## Architecture
 
 - Single-threaded HTTP accept loop on main thread
-- Background engine thread polls DB for active runs
+- Background engine thread polls DB for active runs (+ polls async response queue for MQTT/Redis steps)
 - `std.atomic.Value(bool)` for coordinated shutdown
 - Config workers seeded into DB on startup (source = "config")
 - Schema in `migrations/001_init.sql` + `002_advanced_steps.sql`, applied on `Store.init`
 - Graph cycles: condition/router can route back to completed steps, engine creates new step instances per iteration
 - Worker handoff: dispatch result can include `handoff_to` for chained delegation (max 5)
+- Async dispatch: MQTT/Redis workers use two-phase dispatch (publish → engine polls response queue)
+- Background listener threads (MQTT/Redis) started conditionally when async workers are configured
 
 ## Database
 

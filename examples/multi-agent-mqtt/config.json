@@ -1,0 +1,26 @@
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "db": "nullboiler.db",
+  "workers": [
+    {
+      "id": "planner",
+      "url": "mqtt://broker:1883/nullclaw/planner/requests",
+      "token": "planner-secret",
+      "protocol": "mqtt",
+      "tags": ["planner"],
+      "max_concurrent": 1
+    },
+    {
+      "id": "builder",
+      "url": "redis://redis:6379/nullclaw:builder:requests",
+      "token": "builder-secret",
+      "protocol": "redis_stream",
+      "tags": ["builder"],
+      "max_concurrent": 2
+    }
+  ],
+  "engine": {
+    "poll_interval_ms": 500
+  }
+}
