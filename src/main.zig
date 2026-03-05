@@ -469,4 +469,5 @@ comptime {
     _ = @import("from_json.zig");
     _ = @import("strategy.zig");
     _ = @import("async_dispatch.zig");
+    _ = @import("redis_client.zig");
 }
