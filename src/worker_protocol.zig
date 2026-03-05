@@ -61,9 +61,9 @@ pub fn hasExplicitPath(url: []const u8) bool {
 }
 
 pub const MqttUrlParts = struct {
-    host: []const u8,
+    host: []const u8, // borrows from input url
     port: u16,
-    topic: []const u8,
+    topic: []const u8, // borrows from input url
     response_topic: []const u8, // allocator-owned: topic ++ "/responses"
 };
 
@@ -99,9 +99,9 @@ pub fn parseMqttUrl(allocator: std.mem.Allocator, url: []const u8) !MqttUrlParts
 }
 
 pub const RedisUrlParts = struct {
-    host: []const u8,
+    host: []const u8, // borrows from input url
     port: u16,
-    stream_key: []const u8,
+    stream_key: []const u8, // borrows from input url
     response_stream: []const u8, // allocator-owned: key ++ ":responses"
 };
 

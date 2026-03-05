@@ -102,6 +102,15 @@ pub fn dispatchStep(
         };
     };
 
+    // Async protocols are wired in Task 9; guard until then
+    if (protocol == .mqtt or protocol == .redis_stream) {
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "async dispatch not yet implemented for mqtt/redis_stream",
+        };
+    }
+
     const url = worker_protocol.buildRequestUrl(allocator, worker_url, protocol) catch |err| switch (err) {
         error.WebhookUrlPathRequired => {
             return DispatchResult{
@@ -194,6 +203,10 @@ pub fn probeWorker(
     worker_protocol_raw: []const u8,
 ) bool {
     const protocol = worker_protocol.parse(worker_protocol_raw) orelse return false;
+
+    // Async protocols can't be probed via HTTP; skip until Task 9
+    if (protocol == .mqtt or protocol == .redis_stream) return true;
+
     const url = worker_protocol.buildRequestUrl(allocator, worker_url, protocol) catch return false;
     defer allocator.free(url);
 
