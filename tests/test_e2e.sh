@@ -1266,6 +1266,123 @@ else
 fi  # python3 guard
 
 # =============================================================================
+# Strategy Expansion
+# =============================================================================
+
+echo ""
+printf '%b--- Strategy Expansion ---%b\n' "$BOLD" "$RESET"
+
+# Sequential strategy — steps should get chained depends_on
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"strategy":"sequential","steps":[{"id":"s1","type":"task","worker_tags":["tester"],"prompt_template":"first"},{"id":"s2","type":"task","worker_tags":["tester"],"prompt_template":"second"},{"id":"s3","type":"task","worker_tags":["tester"],"prompt_template":"third"}],"input":{}}')
+parse_resp "$RESP"
+
+if [ "$HTTP_CODE" = "201" ]; then
+    SEQ_RUN_ID=$(json_field "$BODY" "id")
+    if [ -n "$SEQ_RUN_ID" ]; then
+        pass "POST /runs with sequential strategy creates run (201)"
+
+        # Verify steps: first should be ready, rest pending
+        RESP=$(safe_curl "$BASE_URL/runs/$SEQ_RUN_ID/steps")
+        parse_resp "$RESP"
+
+        if [ "$HTTP_CODE" = "200" ] && json_is_array "$BODY"; then
+            STEP_COUNT=$(printf '%s' "$BODY" | jq 'length' 2>/dev/null)
+            if [ "$STEP_COUNT" = "3" ]; then
+                pass "Sequential strategy created 3 steps"
+            else
+                fail "Sequential strategy step count" "expected 3, got $STEP_COUNT"
+            fi
+
+            # First step should be ready (no deps), rest pending
+            S1_STATUS=$(printf '%s' "$BODY" | jq -r '.[0].status' 2>/dev/null)
+            S2_STATUS=$(printf '%s' "$BODY" | jq -r '.[1].status' 2>/dev/null)
+            if [ "$S1_STATUS" = "ready" ] || [ "$S1_STATUS" = "running" ]; then
+                pass "Sequential strategy: first step is ready/running ($S1_STATUS)"
+            else
+                fail "Sequential strategy: first step status" "expected ready or running, got $S1_STATUS"
+            fi
+            if [ "$S2_STATUS" = "pending" ]; then
+                pass "Sequential strategy: second step is pending (has dependency)"
+            else
+                fail "Sequential strategy: second step status" "expected pending, got $S2_STATUS"
+            fi
+        else
+            fail "GET steps for sequential run" "got HTTP $HTTP_CODE"
+        fi
+    else
+        fail "POST /runs sequential strategy" "no run id returned"
+    fi
+else
+    fail "POST /runs with sequential strategy" "expected 201, got HTTP $HTTP_CODE; body: $BODY"
+fi
+
+# Parallel strategy — all steps should be ready (no deps)
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"strategy":"parallel","steps":[{"id":"p1","type":"task","worker_tags":["tester"],"prompt_template":"alpha"},{"id":"p2","type":"task","worker_tags":["tester"],"prompt_template":"beta"}],"input":{}}')
+parse_resp "$RESP"
+
+if [ "$HTTP_CODE" = "201" ]; then
+    PAR_RUN_ID=$(json_field "$BODY" "id")
+    if [ -n "$PAR_RUN_ID" ]; then
+        pass "POST /runs with parallel strategy creates run (201)"
+
+        RESP=$(safe_curl "$BASE_URL/runs/$PAR_RUN_ID/steps")
+        parse_resp "$RESP"
+
+        if [ "$HTTP_CODE" = "200" ] && json_is_array "$BODY"; then
+            STEP_COUNT=$(printf '%s' "$BODY" | jq 'length' 2>/dev/null)
+            if [ "$STEP_COUNT" = "2" ]; then
+                pass "Parallel strategy created 2 steps"
+            else
+                fail "Parallel strategy step count" "expected 2, got $STEP_COUNT"
+            fi
+
+            P1_STATUS=$(printf '%s' "$BODY" | jq -r '.[0].status' 2>/dev/null)
+            P2_STATUS=$(printf '%s' "$BODY" | jq -r '.[1].status' 2>/dev/null)
+            if ([ "$P1_STATUS" = "ready" ] || [ "$P1_STATUS" = "running" ]) && \
+               ([ "$P2_STATUS" = "ready" ] || [ "$P2_STATUS" = "running" ]); then
+                pass "Parallel strategy: all steps are ready/running"
+            else
+                fail "Parallel strategy: step statuses" "p1=$P1_STATUS, p2=$P2_STATUS (expected ready/running)"
+            fi
+        else
+            fail "GET steps for parallel run" "got HTTP $HTTP_CODE"
+        fi
+    else
+        fail "POST /runs parallel strategy" "no run id returned"
+    fi
+else
+    fail "POST /runs with parallel strategy" "expected 201, got HTTP $HTTP_CODE; body: $BODY"
+fi
+
+# Unknown strategy — should return 400
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"strategy":"nonexistent","steps":[{"id":"x","type":"task"}],"input":{}}')
+parse_resp "$RESP"
+
+if [ "$HTTP_CODE" = "400" ]; then
+    pass "POST /runs with unknown strategy returns 400"
+else
+    fail "POST /runs with unknown strategy" "expected 400, got HTTP $HTTP_CODE; body: $BODY"
+fi
+
+# Strategy + depends_on conflict — should return 400
+RESP=$(safe_curl -X POST "$BASE_URL/runs" \
+    -H "Content-Type: application/json" \
+    -d '{"strategy":"sequential","steps":[{"id":"a","type":"task","depends_on":["b"]},{"id":"b","type":"task"}],"input":{}}')
+parse_resp "$RESP"
+
+if [ "$HTTP_CODE" = "400" ]; then
+    pass "POST /runs with strategy + depends_on returns 400"
+else
+    fail "POST /runs with strategy + depends_on" "expected 400, got HTTP $HTTP_CODE; body: $BODY"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 
