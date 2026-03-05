@@ -2,6 +2,7 @@
 /// Provides worker selection (filtering by status, capacity, and tags) and
 /// request/response adapters for webhook/api_chat/openai_chat protocols.
 const std = @import("std");
+const ids = @import("ids.zig");
 const worker_protocol = @import("worker_protocol.zig");
 const worker_response = @import("worker_response.zig");
 
@@ -276,6 +277,26 @@ fn buildRequestBody(
     }
 }
 
+/// Build the wire-format JSON body for async (MQTT/Redis) dispatch.
+/// Includes correlation_id, reply_to topic/stream, timestamp, auth token,
+/// the rendered prompt, and a session_key matching the correlation_id.
+pub fn buildAsyncRequestBody(
+    allocator: std.mem.Allocator,
+    worker_token: []const u8,
+    correlation_id: []const u8,
+    reply_to: []const u8,
+    rendered_prompt: []const u8,
+) ![]const u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .correlation_id = correlation_id,
+        .reply_to = reply_to,
+        .timestamp_ms = ids.nowMs(),
+        .token = worker_token,
+        .message = rendered_prompt,
+        .session_key = correlation_id,
+    }, .{});
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 test "selectWorker: finds matching worker" {
@@ -475,4 +496,35 @@ test "buildRequestBody: openai_chat requires model" {
         error.MissingWorkerModel,
         buildRequestBody(allocator, .openai_chat, null, "run-1", "step-1", "hello"),
     );
+}
+
+test "buildAsyncRequestBody: produces valid wire-format JSON with all fields" {
+    const allocator = std.testing.allocator;
+    const before_ms = ids.nowMs();
+    const body = try buildAsyncRequestBody(
+        allocator,
+        "worker-secret",
+        "run_xxx_step_yyy",
+        "nullclaw/planner/requests/responses",
+        "rendered prompt text",
+    );
+    defer allocator.free(body);
+    const after_ms = ids.nowMs();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+
+    // Verify all 6 fields are present and correct
+    try std.testing.expectEqualStrings("run_xxx_step_yyy", obj.get("correlation_id").?.string);
+    try std.testing.expectEqualStrings("nullclaw/planner/requests/responses", obj.get("reply_to").?.string);
+    try std.testing.expectEqualStrings("worker-secret", obj.get("token").?.string);
+    try std.testing.expectEqualStrings("rendered prompt text", obj.get("message").?.string);
+    try std.testing.expectEqualStrings("run_xxx_step_yyy", obj.get("session_key").?.string);
+
+    // timestamp_ms must be a positive integer within the test window
+    const ts = obj.get("timestamp_ms").?.integer;
+    try std.testing.expect(ts >= before_ms);
+    try std.testing.expect(ts <= after_ms);
 }

@@ -4,6 +4,8 @@ pub const ParseResult = struct {
     output: []const u8,
     success: bool,
     error_text: ?[]const u8,
+    async_pending: bool = false,
+    correlation_id: ?[]const u8 = null,
 };
 
 pub const invalid_json_error = "worker response must be a JSON object";
