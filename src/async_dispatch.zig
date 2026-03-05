@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.async_dispatch);
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -31,10 +32,15 @@ pub const ResponseQueue = struct {
     }
 
     /// Insert or overwrite a response keyed by its correlation_id.
+    /// Caller must ensure all slices in `response` remain valid until
+    /// the entry is consumed via `take()` or the queue is deinitialized.
     pub fn put(self: *ResponseQueue, response: AsyncResponse) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.map.put(self.allocator, response.correlation_id, response) catch return;
+        self.map.put(self.allocator, response.correlation_id, response) catch |err| {
+            log.err("failed to enqueue response for {s}: {}", .{ response.correlation_id, err });
+            return;
+        };
     }
 
     /// Remove and return the response for the given correlation_id, or null
