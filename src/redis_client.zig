@@ -10,7 +10,8 @@ pub const RedisConn = struct {
     ctx: *c.redisContext,
 
     pub fn connect(host: [*:0]const u8, port: u16) !RedisConn {
-        const ctx = c.redisConnect(host, @as(c_int, @intCast(port))) orelse return error.RedisConnectionFailed;
+        const ctx_raw = c.redisConnect(host, @as(c_int, @intCast(port))) orelse return error.RedisConnectionFailed;
+        const ctx: *c.redisContext = ctx_raw;
         if (ctx.err != 0) {
             c.redisFree(ctx);
             return error.RedisConnectionFailed;

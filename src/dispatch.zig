@@ -5,6 +5,8 @@ const std = @import("std");
 const ids = @import("ids.zig");
 const worker_protocol = @import("worker_protocol.zig");
 const worker_response = @import("worker_response.zig");
+const redis_client = @import("redis_client.zig");
+const mqtt_client = @import("mqtt_client.zig");
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -103,13 +105,11 @@ pub fn dispatchStep(
         };
     };
 
-    // Async protocols are wired in Task 9; guard until then
-    if (protocol == .mqtt or protocol == .redis_stream) {
-        return DispatchResult{
-            .output = "",
-            .success = false,
-            .error_text = "async dispatch not yet implemented for mqtt/redis_stream",
-        };
+    if (protocol == .mqtt) {
+        return dispatchMqtt(allocator, worker_url, worker_token, run_id, step_id, rendered_prompt);
+    }
+    if (protocol == .redis_stream) {
+        return dispatchRedis(allocator, worker_url, worker_token, run_id, step_id, rendered_prompt);
     }
 
     const url = worker_protocol.buildRequestUrl(allocator, worker_url, protocol) catch |err| switch (err) {
@@ -205,7 +205,7 @@ pub fn probeWorker(
 ) bool {
     const protocol = worker_protocol.parse(worker_protocol_raw) orelse return false;
 
-    // Async protocols can't be probed via HTTP; skip until Task 9
+    // Async protocols (mqtt/redis_stream) can't be probed via HTTP
     if (protocol == .mqtt or protocol == .redis_stream) return true;
 
     const url = worker_protocol.buildRequestUrl(allocator, worker_url, protocol) catch return false;
@@ -295,6 +295,135 @@ pub fn buildAsyncRequestBody(
         .message = rendered_prompt,
         .session_key = correlation_id,
     }, .{});
+}
+
+// ── Async Protocol Dispatch ───────────────────────────────────────────
+
+fn dispatchMqtt(
+    allocator: std.mem.Allocator,
+    worker_url: []const u8,
+    worker_token: []const u8,
+    run_id: []const u8,
+    step_id: []const u8,
+    rendered_prompt: []const u8,
+) !DispatchResult {
+    const url_parts = worker_protocol.parseMqttUrl(allocator, worker_url) catch {
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "invalid mqtt:// URL",
+        };
+    };
+    defer allocator.free(url_parts.response_topic);
+
+    const correlation_id = try std.fmt.allocPrint(allocator, "run_{s}_step_{s}", .{ run_id, step_id });
+
+    const body = try buildAsyncRequestBody(
+        allocator,
+        worker_token,
+        correlation_id,
+        url_parts.response_topic,
+        rendered_prompt,
+    );
+    defer allocator.free(body);
+
+    // Null-terminate strings for C interop
+    const host_z = try allocator.dupeZ(u8, url_parts.host);
+    defer allocator.free(host_z);
+    const topic_z = try allocator.dupeZ(u8, url_parts.topic);
+    defer allocator.free(topic_z);
+
+    var conn = mqtt_client.MqttConn.connect(host_z, url_parts.port) catch {
+        allocator.free(correlation_id);
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "mqtt: failed to connect to broker",
+        };
+    };
+    defer conn.disconnect();
+
+    conn.publish(topic_z, body) catch {
+        allocator.free(correlation_id);
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "mqtt: failed to publish message",
+        };
+    };
+
+    return DispatchResult{
+        .output = "",
+        .success = true,
+        .error_text = null,
+        .async_pending = true,
+        .correlation_id = correlation_id,
+    };
+}
+
+fn dispatchRedis(
+    allocator: std.mem.Allocator,
+    worker_url: []const u8,
+    worker_token: []const u8,
+    run_id: []const u8,
+    step_id: []const u8,
+    rendered_prompt: []const u8,
+) !DispatchResult {
+    const url_parts = worker_protocol.parseRedisUrl(allocator, worker_url) catch {
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "invalid redis:// URL",
+        };
+    };
+    defer allocator.free(url_parts.response_stream);
+
+    const correlation_id = try std.fmt.allocPrint(allocator, "run_{s}_step_{s}", .{ run_id, step_id });
+
+    const body = try buildAsyncRequestBody(
+        allocator,
+        worker_token,
+        correlation_id,
+        url_parts.response_stream,
+        rendered_prompt,
+    );
+    defer allocator.free(body);
+
+    // Null-terminate strings for C interop
+    const host_z = try allocator.dupeZ(u8, url_parts.host);
+    defer allocator.free(host_z);
+    const stream_z = try allocator.dupeZ(u8, url_parts.stream_key);
+    defer allocator.free(stream_z);
+
+    const body_z = try allocator.dupeZ(u8, body);
+    defer allocator.free(body_z);
+
+    var conn = redis_client.RedisConn.connect(host_z, url_parts.port) catch {
+        allocator.free(correlation_id);
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "redis: failed to connect",
+        };
+    };
+    defer conn.disconnect();
+
+    conn.xadd(stream_z, body_z) catch {
+        allocator.free(correlation_id);
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "redis: failed to XADD message",
+        };
+    };
+
+    return DispatchResult{
+        .output = "",
+        .success = true,
+        .error_text = null,
+        .async_pending = true,
+        .correlation_id = correlation_id,
+    };
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -527,4 +656,50 @@ test "buildAsyncRequestBody: produces valid wire-format JSON with all fields" {
     const ts = obj.get("timestamp_ms").?.integer;
     try std.testing.expect(ts >= before_ms);
     try std.testing.expect(ts <= after_ms);
+}
+
+test "dispatchMqtt: returns async_pending with correlation_id" {
+    const allocator = std.testing.allocator;
+    const result = try dispatchMqtt(
+        allocator,
+        "mqtt://broker:1883/nullclaw/planner/requests",
+        "secret-token",
+        "run-123",
+        "step-456",
+        "hello world",
+    );
+    defer allocator.free(result.correlation_id.?);
+    try std.testing.expect(result.async_pending);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("run_run-123_step_step-456", result.correlation_id.?);
+}
+
+test "dispatchRedis: returns async_pending with correlation_id" {
+    const allocator = std.testing.allocator;
+    const result = try dispatchRedis(
+        allocator,
+        "redis://redis:6379/nullclaw:builder:requests",
+        "secret-token",
+        "run-abc",
+        "step-def",
+        "build this",
+    );
+    defer allocator.free(result.correlation_id.?);
+    try std.testing.expect(result.async_pending);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("run_run-abc_step_step-def", result.correlation_id.?);
+}
+
+test "dispatchMqtt: invalid URL returns error" {
+    const allocator = std.testing.allocator;
+    const result = try dispatchMqtt(allocator, "http://wrong", "token", "r", "s", "prompt");
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("invalid mqtt:// URL", result.error_text.?);
+}
+
+test "dispatchRedis: invalid URL returns error" {
+    const allocator = std.testing.allocator;
+    const result = try dispatchRedis(allocator, "http://wrong", "token", "r", "s", "prompt");
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("invalid redis:// URL", result.error_text.?);
 }

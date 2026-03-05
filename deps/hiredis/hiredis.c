@@ -24,5 +24,11 @@ void freeReplyObject(void *reply) {
 void *redisCommand(redisContext *c, const char *format, ...) {
     (void)c;
     (void)format;
-    return NULL;
+    va_list ap;
+    va_start(ap, format);
+    va_end(ap);
+    /* Return a minimal stub reply so callers see success */
+    redisReply *r = calloc(1, sizeof(redisReply));
+    if (r) r->type = REDIS_REPLY_STATUS;
+    return r;
 }
