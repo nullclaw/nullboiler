@@ -468,4 +468,5 @@ comptime {
     _ = @import("export_manifest.zig");
     _ = @import("from_json.zig");
     _ = @import("strategy.zig");
+    _ = @import("async_dispatch.zig");
 }
