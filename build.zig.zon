@@ -10,6 +10,9 @@
         .hiredis = .{
             .path = "deps/hiredis",
         },
+        .mosquitto = .{
+            .path = "deps/mosquitto",
+        },
     },
     .paths = .{
         "build.zig",
