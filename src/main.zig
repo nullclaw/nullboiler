@@ -7,6 +7,9 @@ const strategy_mod = @import("strategy.zig");
 const ids = @import("ids.zig");
 const metrics_mod = @import("metrics.zig");
 const worker_protocol = @import("worker_protocol.zig");
+const async_dispatch = @import("async_dispatch.zig");
+const redis_client = @import("redis_client.zig");
+const mqtt_client = @import("mqtt_client.zig");
 const c = @cImport({
     @cInclude("signal.h");
 });
@@ -130,6 +133,9 @@ pub fn main() !void {
     var metrics = metrics_mod.Metrics{};
     var drain_mode = std.atomic.Value(bool).init(false);
 
+    var response_queue = async_dispatch.ResponseQueue.init(allocator);
+    defer response_queue.deinit();
+
     // Seed workers from config
     store.deleteWorkersBySource("config") catch |err| {
         std.debug.print("warning: failed to clean config workers: {}\n", .{err});
@@ -162,6 +168,35 @@ pub fn main() !void {
         std.debug.print("registered config worker: {s}\n", .{w.id});
     }
 
+    // Build listener configs for async protocols
+    var mqtt_configs: std.ArrayListUnmanaged(mqtt_client.ListenerConfig) = .empty;
+    var redis_configs: std.ArrayListUnmanaged(redis_client.ListenerConfig) = .empty;
+
+    for (cfg.workers) |w| {
+        const protocol = worker_protocol.parse(w.protocol) orelse continue;
+        if (protocol == .mqtt) {
+            const parts = worker_protocol.parseMqttUrl(cfg_arena.allocator(), w.url) catch continue;
+            const host_z = cfg_arena.allocator().dupeZ(u8, parts.host) catch continue;
+            const resp_z = cfg_arena.allocator().dupeZ(u8, parts.response_topic) catch continue;
+            mqtt_configs.append(cfg_arena.allocator(), .{
+                .host = host_z,
+                .port = parts.port,
+                .response_topic = resp_z,
+            }) catch continue;
+        } else if (protocol == .redis_stream) {
+            const parts = worker_protocol.parseRedisUrl(cfg_arena.allocator(), w.url) catch continue;
+            const host_z = cfg_arena.allocator().dupeZ(u8, parts.host) catch continue;
+            const resp_z = cfg_arena.allocator().dupeZ(u8, parts.response_stream) catch continue;
+            const group_z = cfg_arena.allocator().dupeZ(u8, "nullboiler") catch continue;
+            redis_configs.append(cfg_arena.allocator(), .{
+                .host = host_z,
+                .port = parts.port,
+                .response_stream = resp_z,
+                .consumer_group = group_z,
+            }) catch continue;
+        }
+    }
+
     const addr = std.net.Address.resolveIp(bind_host, port) catch |err| {
         std.debug.print("failed to resolve bind address {s}:{d}: {}\n", .{ bind_host, port, err });
         return;
@@ -188,7 +223,40 @@ pub fn main() !void {
         .retry_jitter_ms = @as(i64, @intCast(cfg.engine.retry_jitter_ms)),
         .retry_max_elapsed_ms = @as(i64, @intCast(cfg.engine.retry_max_elapsed_ms)),
     }, &metrics);
+    engine.response_queue = &response_queue;
     const engine_thread = try std.Thread.spawn(.{}, engine_mod.Engine.run, .{&engine});
+
+    // Spawn listener threads for async protocols
+    var mqtt_listener_thread: ?std.Thread = null;
+    var redis_listener_thread: ?std.Thread = null;
+
+    if (mqtt_configs.items.len > 0) {
+        mqtt_listener_thread = std.Thread.spawn(.{}, mqtt_client.runListener, .{
+            &response_queue,
+            &shutdown_requested,
+            mqtt_configs.items,
+        }) catch |err| blk: {
+            std.debug.print("warning: failed to start MQTT listener: {}\n", .{err});
+            break :blk null;
+        };
+        if (mqtt_listener_thread != null) {
+            std.debug.print("mqtt listener started ({d} response topics)\n", .{mqtt_configs.items.len});
+        }
+    }
+
+    if (redis_configs.items.len > 0) {
+        redis_listener_thread = std.Thread.spawn(.{}, redis_client.runListener, .{
+            &response_queue,
+            &shutdown_requested,
+            redis_configs.items,
+        }) catch |err| blk: {
+            std.debug.print("warning: failed to start Redis listener: {}\n", .{err});
+            break :blk null;
+        };
+        if (redis_listener_thread != null) {
+            std.debug.print("redis listener started ({d} response streams)\n", .{redis_configs.items.len});
+        }
+    }
 
     std.debug.print("listening on http://{s}:{d}\n", .{ bind_host, port });
     std.debug.print("engine started (poll_interval={d}ms)\n", .{poll_ms});
@@ -197,6 +265,14 @@ pub fn main() !void {
         engine.stop();
         engine_thread.join();
         std.debug.print("engine stopped\n", .{});
+        if (mqtt_listener_thread) |t| {
+            t.join();
+            std.debug.print("mqtt listener stopped\n", .{});
+        }
+        if (redis_listener_thread) |t| {
+            t.join();
+            std.debug.print("redis listener stopped\n", .{});
+        }
     }
 
     while (true) {
