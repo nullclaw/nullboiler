@@ -29,6 +29,7 @@ pub const Config = struct {
     port: u16 = 8080,
     db: []const u8 = "nullboiler.db",
     api_token: ?[]const u8 = null,
+    strategies_dir: []const u8 = "strategies",
     workers: []const WorkerConfig = &.{},
     engine: EngineConfig = .{},
 };

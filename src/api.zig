@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const workflow_validation = @import("workflow_validation.zig");
 const worker_protocol = @import("worker_protocol.zig");
 const metrics_mod = @import("metrics.zig");
+const strategy_mod = @import("strategy.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -18,6 +19,7 @@ pub const Context = struct {
     traceparent: ?[]const u8 = null,
     metrics: ?*metrics_mod.Metrics = null,
     drain_mode: ?*std.atomic.Value(bool) = null,
+    strategies: ?*const strategy_mod.StrategyMap = null,
 };
 
 pub const HttpResponse = struct {
@@ -378,7 +380,24 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
     if (steps_val != .array) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"steps must be an array\"}}");
     }
-    const steps_array = steps_val.array.items;
+    // Expand strategy if present
+    const effective_steps = if (obj.get("strategy") != null and ctx.strategies != null) blk: {
+        const expanded = strategy_mod.expandStrategy(ctx.allocator, ctx.strategies.?.*, obj) catch |err| {
+            return switch (err) {
+                error.UnknownStrategy => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"unknown strategy\"}}"),
+                error.DependsOnConflict => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"cannot use depends_on with strategy\"}}"),
+                error.StepsMissing => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: steps\"}}"),
+                error.StepMustBeObject => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"steps items must be objects\"}}"),
+                error.OutOfMemory => jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"strategy expansion failed\"}}"),
+            };
+        };
+        if (expanded != .array) {
+            break :blk steps_val.array.items;
+        }
+        break :blk expanded.array.items;
+    } else steps_val.array.items;
+
+    const steps_array = effective_steps;
 
     if (steps_array.len == 0) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"steps array must not be empty\"}}");

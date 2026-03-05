@@ -1,0 +1,5 @@
+{
+  "name": "sequential",
+  "description": "Execute steps as a linear pipeline, each depending on the previous",
+  "build": "chain"
+}

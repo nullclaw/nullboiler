@@ -1,0 +1,5 @@
+{
+  "name": "parallel",
+  "description": "Execute all steps concurrently, with optional reduce at the end",
+  "build": "independent"
+}
