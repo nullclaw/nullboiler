@@ -7,6 +7,9 @@
         .sqlite3 = .{
             .path = "deps/sqlite",
         },
+        .hiredis = .{
+            .path = "deps/hiredis",
+        },
     },
     .paths = .{
         "build.zig",

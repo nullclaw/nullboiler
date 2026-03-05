@@ -10,6 +10,12 @@ pub fn build(b: *std.Build) void {
     });
     const sqlite3_lib = sqlite3_dep.artifact("sqlite3");
 
+    const hiredis_dep = b.dependency("hiredis", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const hiredis_lib = hiredis_dep.artifact("hiredis");
+
     const exe = b.addExecutable(.{
         .name = "nullboiler",
         .root_module = b.createModule(.{
@@ -19,6 +25,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.linkLibrary(sqlite3_lib);
+    exe.linkLibrary(hiredis_lib);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -37,6 +44,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe_unit_tests.linkLibrary(sqlite3_lib);
+    exe_unit_tests.linkLibrary(hiredis_lib);
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);

@@ -1,0 +1,11 @@
+.{
+    .name = .hiredis,
+    .version = "1.2.0",
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "hiredis.c",
+        "hiredis.h",
+    },
+}
