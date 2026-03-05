@@ -1,0 +1,30 @@
+{
+  "host": "127.0.0.1",
+  "port": 8080,
+  "db": "multi-agent.db",
+  "strategies_dir": "../../strategies",
+  "workers": [
+    {
+      "id": "planner",
+      "url": "http://localhost:3001/webhook",
+      "token": "planner-secret",
+      "protocol": "webhook",
+      "tags": ["planner", "researcher"],
+      "max_concurrent": 1
+    },
+    {
+      "id": "builder",
+      "url": "http://localhost:3002/webhook",
+      "token": "builder-secret",
+      "protocol": "webhook",
+      "tags": ["builder", "coder"],
+      "max_concurrent": 1
+    }
+  ],
+  "engine": {
+    "poll_interval_ms": 500,
+    "default_timeout_ms": 600000,
+    "default_max_attempts": 2,
+    "retry_base_delay_ms": 2000
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "default_temperature": 0.7,
+  "models": {
+    "providers": {
+      "openrouter": {
+        "api_key": "${OPENROUTER_API_KEY}"
+      }
+    }
+  },
+  "agents": {
+    "list": [
+      {
+        "id": "planner",
+        "provider": "openrouter",
+        "model": "openrouter/anthropic/claude-sonnet-4",
+        "system_prompt": "You are a planner agent. You break down high-level goals into concrete, actionable implementation steps. Be specific about files, functions, data structures, and interfaces. Output structured plans that a builder agent can execute without ambiguity."
+      }
+    ]
+  },
+  "gateway": {
+    "port": 3001,
+    "host": "127.0.0.1",
+    "webhook_token": "planner-secret"
+  }
+}

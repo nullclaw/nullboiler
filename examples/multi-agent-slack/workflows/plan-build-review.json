@@ -1,0 +1,36 @@
+{
+  "steps": [
+    {
+      "id": "plan",
+      "type": "task",
+      "worker_tags": ["planner"],
+      "prompt_template": "Create a detailed implementation plan for: {{input.goal}}\n\nInclude: file structure, key functions, data models, error handling approach, and test plan.",
+      "timeout_ms": 300000
+    },
+    {
+      "id": "build",
+      "type": "task",
+      "worker_tags": ["builder"],
+      "depends_on": ["plan"],
+      "prompt_template": "Implement this plan:\n\n{{steps.plan.output}}\n\nWrite all code, tests, and documentation. Report what was built and any deviations from the plan.",
+      "timeout_ms": 600000
+    },
+    {
+      "id": "review",
+      "type": "task",
+      "worker_tags": ["planner"],
+      "depends_on": ["build"],
+      "prompt_template": "Review this implementation against the original plan.\n\nOriginal plan:\n{{steps.plan.output}}\n\nImplementation report:\n{{steps.build.output}}\n\nCheck for:\n- Missing requirements\n- Deviations from plan\n- Code quality concerns\n- Test coverage gaps\n\nVerdict: APPROVED or CHANGES_NEEDED with specific issues.",
+      "timeout_ms": 300000
+    }
+  ],
+  "input": {
+    "goal": "Build a CLI tool for managing Docker containers"
+  },
+  "callbacks": [
+    {
+      "url": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+      "events": ["run.completed", "run.failed"]
+    }
+  ]
+}

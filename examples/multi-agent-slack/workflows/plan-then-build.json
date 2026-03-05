@@ -1,0 +1,22 @@
+{
+  "strategy": "sequential",
+  "steps": [
+    {
+      "id": "plan",
+      "type": "task",
+      "worker_tags": ["planner"],
+      "prompt_template": "Break down this goal into concrete implementation steps. For each step, specify the files to create/modify, the functions/types involved, and acceptance criteria.\n\nGoal: {{input.goal}}",
+      "timeout_ms": 300000
+    },
+    {
+      "id": "build",
+      "type": "task",
+      "worker_tags": ["builder"],
+      "prompt_template": "Execute the following implementation plan step by step. Write the code, create the files, and run any tests.\n\nPlan:\n{{steps.plan.output}}",
+      "timeout_ms": 600000
+    }
+  ],
+  "input": {
+    "goal": "Build a REST API for a todo app in Go with CRUD endpoints and SQLite storage"
+  }
+}

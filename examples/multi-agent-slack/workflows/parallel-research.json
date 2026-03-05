@@ -1,0 +1,27 @@
+{
+  "strategy": "parallel",
+  "steps": [
+    {
+      "id": "arch_research",
+      "type": "task",
+      "worker_tags": ["planner"],
+      "prompt_template": "Research and propose architecture patterns suitable for: {{input.goal}}\n\nConsider scalability, maintainability, and team size. Propose 2-3 options with trade-offs.",
+      "timeout_ms": 300000
+    },
+    {
+      "id": "impl_research",
+      "type": "task",
+      "worker_tags": ["builder"],
+      "prompt_template": "Research implementation approaches, libraries, and tools for: {{input.goal}}\n\nFocus on practical choices: language, frameworks, deployment, testing strategies.",
+      "timeout_ms": 300000
+    }
+  ],
+  "reduce": {
+    "id": "synthesize",
+    "worker_tags": ["planner"],
+    "prompt_template": "Synthesize these independent research findings into a unified implementation plan.\n\nArchitecture research:\n{{steps.arch_research.output}}\n\nImplementation research:\n{{steps.impl_research.output}}\n\nProduce a single, coherent plan that combines the best architectural patterns with the most practical implementation choices."
+  },
+  "input": {
+    "goal": "Real-time collaborative document editor"
+  }
+}

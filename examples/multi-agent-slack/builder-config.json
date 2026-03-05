@@ -1,0 +1,34 @@
+{
+  "default_temperature": 0.3,
+  "models": {
+    "providers": {
+      "openrouter": {
+        "api_key": "${OPENROUTER_API_KEY}"
+      }
+    }
+  },
+  "agents": {
+    "list": [
+      {
+        "id": "builder",
+        "provider": "openrouter",
+        "model": "openrouter/anthropic/claude-sonnet-4",
+        "system_prompt": "You are a builder agent. You execute implementation plans precisely. Write clean, tested code. Follow the plan step by step. Report what you built, any issues encountered, and what remains."
+      }
+    ]
+  },
+  "gateway": {
+    "port": 3002,
+    "host": "127.0.0.1",
+    "webhook_token": "builder-secret"
+  },
+  "autonomy": {
+    "level": "full",
+    "workspace_only": true,
+    "allowed_commands": [
+      "git", "npm", "cargo", "ls", "cat", "grep", "find",
+      "echo", "pwd", "mkdir", "touch", "mv", "cp",
+      "python", "python3", "node", "make", "go"
+    ]
+  }
+}
