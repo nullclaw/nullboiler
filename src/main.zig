@@ -155,6 +155,18 @@ pub fn main() !void {
             std.debug.print("warning: skipped config worker {s}: webhook protocol requires explicit URL path (for example /webhook)\n", .{w.id});
             continue;
         }
+        if (protocol == .mqtt) {
+            _ = worker_protocol.parseMqttUrl(cfg_arena.allocator(), w.url) catch {
+                std.debug.print("warning: skipped config worker {s}: invalid mqtt:// URL (expected mqtt://host:port/topic)\n", .{w.id});
+                continue;
+            };
+        }
+        if (protocol == .redis_stream) {
+            _ = worker_protocol.parseRedisUrl(cfg_arena.allocator(), w.url) catch {
+                std.debug.print("warning: skipped config worker {s}: invalid redis:// URL (expected redis://host:port/stream)\n", .{w.id});
+                continue;
+            };
+        }
 
         // Serialize tags to JSON array string
         const tags_json = serializeTagsJson(cfg_arena.allocator(), w.tags) catch |err| {
