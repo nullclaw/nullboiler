@@ -3,6 +3,7 @@ const Store = @import("store.zig").Store;
 const api = @import("api.zig");
 const config = @import("config.zig");
 const engine_mod = @import("engine.zig");
+const strategy_mod = @import("strategy.zig");
 const ids = @import("ids.zig");
 const metrics_mod = @import("metrics.zig");
 const worker_protocol = @import("worker_protocol.zig");
@@ -99,6 +100,8 @@ pub fn main() !void {
         std.debug.print("failed to load config from {s}: {}\n", .{ config_path, err });
         return;
     };
+
+    var strategy_map = strategy_mod.loadStrategies(cfg_arena.allocator(), cfg.strategies_dir);
 
     // Determine bind host, port, and db path (CLI overrides config)
     const bind_host = host_override orelse cfg.host;
@@ -241,6 +244,7 @@ pub fn main() !void {
             .traceparent = request.traceparent,
             .metrics = &metrics,
             .drain_mode = &drain_mode,
+            .strategies = &strategy_map,
         };
         const response = api.handleRequest(&ctx, request.method, request.target, request.body);
 
