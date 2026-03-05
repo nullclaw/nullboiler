@@ -434,7 +434,7 @@ pub const Engine = struct {
 
         // 8.5. If async dispatch, save state and leave step running
         if (final_result.async_pending) {
-            const async_state = try std.fmt.allocPrint(alloc, "{{\"async_pending\":true,\"correlation_id\":\"{s}\"}}", .{final_result.correlation_id orelse ""});
+            const async_state = try mergeAsyncState(alloc, step.input_json, final_result.correlation_id orelse "");
             try self.store.updateStepInputJson(step.id, async_state);
             log.info("step {s} dispatched async, correlation_id={s}", .{ step.id, final_result.correlation_id orelse "?" });
             return;
@@ -497,7 +497,32 @@ pub const Engine = struct {
         }
     }
 
-    // ── pollAsyncTaskStep ───────────────────────────────────────────
+    // ── async helpers ──────────────────────────────────────────────
+
+    /// Merge async_pending + correlation_id into existing input_json,
+    /// preserving any existing fields (e.g. rendered_prompt for retries).
+    fn mergeAsyncState(alloc: std.mem.Allocator, existing_input: []const u8, correlation_id: []const u8) ![]const u8 {
+        var obj = std.json.ObjectMap.init(alloc);
+
+        // Parse and copy existing fields
+        if (existing_input.len > 0) {
+            const parsed = std.json.parseFromSlice(std.json.Value, alloc, existing_input, .{}) catch null;
+            if (parsed) |p| {
+                if (p.value == .object) {
+                    var it = p.value.object.iterator();
+                    while (it.next()) |entry| {
+                        try obj.put(entry.key_ptr.*, entry.value_ptr.*);
+                    }
+                }
+            }
+        }
+
+        // Add async fields
+        try obj.put("async_pending", .{ .bool = true });
+        try obj.put("correlation_id", .{ .string = correlation_id });
+
+        return std.json.Stringify.valueAlloc(alloc, std.json.Value{ .object = obj }, .{});
+    }
 
     fn pollAsyncTaskStep(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, step: types.StepRow) !void {
         // Only handle steps that are async (have async_pending in input_json)
@@ -527,6 +552,10 @@ pub const Engine = struct {
                         const err_text = try std.fmt.allocPrint(alloc, "async step timed out after {d}ms", .{timeout_ms});
                         try self.store.updateStepStatus(step.id, "failed", step.worker_id, null, err_text, step.attempt);
                         try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
+                        if (self.metrics) |m| {
+                            metrics_mod.Metrics.incr(&m.worker_dispatch_failure_total);
+                        }
+                        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
                         log.err("async step {s} timed out", .{step.id});
                     }
                 }
@@ -539,6 +568,9 @@ pub const Engine = struct {
             const output_json = try wrapOutput(alloc, response.output);
             try self.store.updateStepStatus(step.id, "completed", step.worker_id, output_json, null, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.completed", "{}");
+            if (step.worker_id) |wid| {
+                try self.store.markWorkerSuccess(wid, ids.nowMs());
+            }
             if (self.metrics) |m| {
                 metrics_mod.Metrics.incr(&m.worker_dispatch_success_total);
             }
@@ -548,6 +580,15 @@ pub const Engine = struct {
             const err_text = response.error_text orelse "async dispatch failed";
             try self.store.updateStepStatus(step.id, "failed", step.worker_id, null, err_text, step.attempt);
             try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
+            if (step.worker_id) |wid| {
+                const now_ms = ids.nowMs();
+                const circuit_until = now_ms + self.runtime_cfg.worker_circuit_breaker_ms;
+                try self.store.markWorkerFailure(wid, err_text, now_ms, self.runtime_cfg.worker_failure_threshold, circuit_until);
+            }
+            if (self.metrics) |m| {
+                metrics_mod.Metrics.incr(&m.worker_dispatch_failure_total);
+            }
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
             log.err("async step {s} failed: {s}", .{ step.id, err_text });
         }
     }
