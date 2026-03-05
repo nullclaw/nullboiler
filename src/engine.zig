@@ -18,6 +18,7 @@ const templates = @import("templates.zig");
 const dispatch = @import("dispatch.zig");
 const callbacks = @import("callbacks.zig");
 const metrics_mod = @import("metrics.zig");
+const async_dispatch = @import("async_dispatch.zig");
 
 // ── Engine ───────────────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ pub const Engine = struct {
     runtime_cfg: RuntimeConfig,
     next_health_check_at_ms: i64,
     metrics: ?*metrics_mod.Metrics,
+    response_queue: ?*async_dispatch.ResponseQueue,
 
     const TaskPromptSource = union(enum) {
         rendered: []const u8,
@@ -54,6 +56,7 @@ pub const Engine = struct {
             .runtime_cfg = .{},
             .next_health_check_at_ms = 0,
             .metrics = null,
+            .response_queue = null,
         };
     }
 
@@ -290,6 +293,10 @@ pub const Engine = struct {
                 self.pollRunningSagaStep(alloc, run_row, step) catch |err| {
                     log.err("error polling saga step {s}: {}", .{ step.id, err });
                 };
+            } else if (std.mem.eql(u8, step.type, "task")) {
+                self.pollAsyncTaskStep(alloc, run_row, step) catch |err| {
+                    log.err("error polling async task step {s}: {}", .{ step.id, err });
+                };
             }
         }
 
@@ -425,6 +432,14 @@ pub const Engine = struct {
             // Otherwise reuse current_prompt
         }
 
+        // 8.5. If async dispatch, save state and leave step running
+        if (final_result.async_pending) {
+            const async_state = try std.fmt.allocPrint(alloc, "{{\"async_pending\":true,\"correlation_id\":\"{s}\"}}", .{final_result.correlation_id orelse ""});
+            try self.store.updateStepInputJson(step.id, async_state);
+            log.info("step {s} dispatched async, correlation_id={s}", .{ step.id, final_result.correlation_id orelse "?" });
+            return;
+        }
+
         // 9. Handle result
         if (final_result.success) {
             // Mark step as completed, save output_json
@@ -479,6 +494,61 @@ pub const Engine = struct {
                 callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.failed", run_row.id, step.id, "{}", self.metrics);
                 log.err("step {s} failed: {s}", .{ step.id, err_text });
             }
+        }
+    }
+
+    // ── pollAsyncTaskStep ───────────────────────────────────────────
+
+    fn pollAsyncTaskStep(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, step: types.StepRow) !void {
+        // Only handle steps that are async (have async_pending in input_json)
+        const input_json = step.input_json;
+        if (input_json.len == 0) return;
+
+        // Parse input_json to check for async_pending flag
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, input_json, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+
+        const async_flag = parsed.value.object.get("async_pending") orelse return;
+        if (async_flag != .bool or !async_flag.bool) return;
+
+        const corr_val = parsed.value.object.get("correlation_id") orelse return;
+        if (corr_val != .string) return;
+        const correlation_id = corr_val.string;
+
+        // Check response queue
+        const queue = self.response_queue orelse return;
+        const response = queue.take(correlation_id) orelse {
+            // Check timeout
+            if (step.timeout_ms) |timeout_ms| {
+                if (step.started_at_ms) |started_at| {
+                    const elapsed = ids.nowMs() - started_at;
+                    if (elapsed > timeout_ms) {
+                        const err_text = try std.fmt.allocPrint(alloc, "async step timed out after {d}ms", .{timeout_ms});
+                        try self.store.updateStepStatus(step.id, "failed", step.worker_id, null, err_text, step.attempt);
+                        try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
+                        log.err("async step {s} timed out", .{step.id});
+                    }
+                }
+            }
+            return;
+        };
+
+        // Got a response — complete or fail the step
+        if (response.success) {
+            const output_json = try wrapOutput(alloc, response.output);
+            try self.store.updateStepStatus(step.id, "completed", step.worker_id, output_json, null, step.attempt);
+            try self.store.insertEvent(run_row.id, step.id, "step.completed", "{}");
+            if (self.metrics) |m| {
+                metrics_mod.Metrics.incr(&m.worker_dispatch_success_total);
+            }
+            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step.id, output_json, self.metrics);
+            log.info("async step {s} completed", .{step.id});
+        } else {
+            const err_text = response.error_text orelse "async dispatch failed";
+            try self.store.updateStepStatus(step.id, "failed", step.worker_id, null, err_text, step.attempt);
+            try self.store.insertEvent(run_row.id, step.id, "step.failed", "{}");
+            log.err("async step {s} failed: {s}", .{ step.id, err_text });
         }
     }
 

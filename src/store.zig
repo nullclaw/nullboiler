@@ -1058,6 +1058,22 @@ pub const Store = struct {
 
     // ── Sub-workflow Helper ──────────────────────────────────────────
 
+    pub fn updateStepInputJson(self: *Self, step_id: []const u8, input_json: []const u8) !void {
+        const sql = "UPDATE steps SET input_json = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, input_json.ptr, @intCast(input_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
     pub fn updateStepChildRunId(self: *Self, step_id: []const u8, child_run_id: []const u8) !void {
         const sql = "UPDATE steps SET child_run_id = ? WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
