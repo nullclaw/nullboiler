@@ -253,6 +253,13 @@ fn buildRequestBody(
                 .messages = messages[0..],
             }, .{});
         },
+        .mqtt, .redis_stream => {
+            // MQTT and Redis Stream use async dispatch; body built by their respective clients
+            return std.json.Stringify.valueAlloc(allocator, .{
+                .message = rendered_prompt,
+                .session_id = session_key,
+            }, .{});
+        },
     }
 }
 
