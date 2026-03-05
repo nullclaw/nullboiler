@@ -463,4 +463,5 @@ comptime {
     _ = @import("metrics.zig");
     _ = @import("export_manifest.zig");
     _ = @import("from_json.zig");
+    _ = @import("strategy.zig");
 }
