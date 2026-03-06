@@ -162,6 +162,7 @@ pub const Tracker = struct {
     workflows: workflow_loader.WorkflowMap,
     shutdown: *std.atomic.Value(bool),
     last_heartbeat_ms: i64,
+    used_ports: std.AutoArrayHashMapUnmanaged(u16, void),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -176,11 +177,13 @@ pub const Tracker = struct {
             .workflows = workflows,
             .shutdown = shutdown,
             .last_heartbeat_ms = 0,
+            .used_ports = .{},
         };
     }
 
     pub fn deinit(self: *Tracker) void {
         self.shutdownSubprocesses();
+        self.used_ports.deinit(self.allocator);
         self.state.deinit(self.allocator);
     }
 
@@ -195,6 +198,24 @@ pub const Tracker = struct {
         self.allocator.free(task.lease_token);
         self.allocator.free(task.run_id);
         self.allocator.free(task.workspace_path);
+    }
+
+    /// Allocate a free port starting from base_port. Returns null if no port found within 1000 range.
+    pub fn allocatePort(self: *Tracker) ?u16 {
+        const base = self.cfg.subprocess.base_port;
+        var port: u16 = base;
+        while (port < base +| 1000) : (port += 1) {
+            if (!self.used_ports.contains(port)) {
+                self.used_ports.put(self.allocator, port, {}) catch return null;
+                return port;
+            }
+        }
+        return null;
+    }
+
+    /// Release a previously allocated port.
+    pub fn releasePort(self: *Tracker, port: u16) void {
+        _ = self.used_ports.swapRemove(port);
     }
 
     /// Thread entry point — run the poll loop until shutdown is requested.
@@ -670,4 +691,24 @@ test "TrackerState mutex can be locked and unlocked" {
     state.mutex.lock();
     try std.testing.expectEqual(@as(u32, 0), state.runningCount());
     state.mutex.unlock();
+}
+
+test "Tracker allocatePort returns unique ports" {
+    const allocator = std.testing.allocator;
+    var shutdown = std.atomic.Value(bool).init(false);
+    const workflows = workflow_loader.WorkflowMap{};
+
+    var tracker_inst = Tracker.init(allocator, config.TrackerConfig{}, workflows, &shutdown);
+    defer tracker_inst.deinit();
+
+    const port1 = tracker_inst.allocatePort();
+    try std.testing.expectEqual(@as(u16, 9200), port1.?);
+
+    const port2 = tracker_inst.allocatePort();
+    try std.testing.expectEqual(@as(u16, 9201), port2.?);
+
+    tracker_inst.releasePort(9200);
+
+    const port3 = tracker_inst.allocatePort();
+    try std.testing.expectEqual(@as(u16, 9200), port3.?);
 }
