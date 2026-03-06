@@ -288,7 +288,7 @@ pub const Tracker = struct {
 
                     // Report failure to NullTickets
                     var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
-                    _ = client.failRun(task.run_id, "subprocess stalled", task.lease_token) catch {};
+                    _ = client.failRun(task.run_id, "subprocess stalled", task.lease_token, null) catch {};
 
                     // Kill subprocess
                     if (sub.child) |*child| {

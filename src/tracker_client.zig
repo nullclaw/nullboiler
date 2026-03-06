@@ -106,15 +106,23 @@ pub const TrackerClient = struct {
 
     /// POST /runs/{id}/transition — move a run to the next stage.
     /// Uses lease_token as Bearer override. Returns true on 2xx.
-    pub fn transition(self: *TrackerClient, run_id: []const u8, next_stage: []const u8, lease_token: []const u8) !bool {
+    pub fn transition(self: *TrackerClient, run_id: []const u8, trigger: []const u8, lease_token: []const u8, usage_json: ?[]const u8) !bool {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/runs/{s}/transition", .{ self.base_url, run_id });
         defer self.allocator.free(url);
 
-        const body = try std.json.Stringify.valueAlloc(self.allocator, .{
-            .next_stage = next_stage,
-        }, .{});
-        defer self.allocator.free(body);
+        var body_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer body_buf.deinit(self.allocator);
 
+        try body_buf.appendSlice(self.allocator, "{\"trigger\":\"");
+        try body_buf.appendSlice(self.allocator, trigger);
+        try body_buf.appendSlice(self.allocator, "\"");
+        if (usage_json) |usage| {
+            try body_buf.appendSlice(self.allocator, ",\"usage\":");
+            try body_buf.appendSlice(self.allocator, usage);
+        }
+        try body_buf.appendSlice(self.allocator, "}");
+
+        const body = body_buf.items;
         const result = try self.httpRequest(url, .POST, body, lease_token);
         defer self.allocator.free(result.body);
 
@@ -123,15 +131,45 @@ pub const TrackerClient = struct {
 
     /// POST /runs/{id}/fail — report a run failure with reason.
     /// Uses lease_token as Bearer override. Returns true on 2xx.
-    pub fn failRun(self: *TrackerClient, run_id: []const u8, reason: []const u8, lease_token: []const u8) !bool {
+    pub fn failRun(self: *TrackerClient, run_id: []const u8, reason: []const u8, lease_token: []const u8, usage_json: ?[]const u8) !bool {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/runs/{s}/fail", .{ self.base_url, run_id });
         defer self.allocator.free(url);
 
-        const body = try std.json.Stringify.valueAlloc(self.allocator, .{
-            .reason = reason,
-        }, .{});
-        defer self.allocator.free(body);
+        var body_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer body_buf.deinit(self.allocator);
 
+        try body_buf.appendSlice(self.allocator, "{\"reason\":\"");
+        try body_buf.appendSlice(self.allocator, reason);
+        try body_buf.appendSlice(self.allocator, "\"");
+        if (usage_json) |usage| {
+            try body_buf.appendSlice(self.allocator, ",\"usage\":");
+            try body_buf.appendSlice(self.allocator, usage);
+        }
+        try body_buf.appendSlice(self.allocator, "}");
+
+        const body = body_buf.items;
+        const result = try self.httpRequest(url, .POST, body, lease_token);
+        defer self.allocator.free(result.body);
+
+        return result.status_code >= 200 and result.status_code < 300;
+    }
+
+    /// POST /runs/{id}/events — post a progress event.
+    /// Returns true on 2xx.
+    pub fn postEvent(self: *TrackerClient, run_id: []const u8, kind: []const u8, data_json: []const u8, lease_token: []const u8) !bool {
+        const url = try std.fmt.allocPrint(self.allocator, "{s}/runs/{s}/events", .{ self.base_url, run_id });
+        defer self.allocator.free(url);
+
+        var body_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer body_buf.deinit(self.allocator);
+
+        try body_buf.appendSlice(self.allocator, "{\"kind\":\"");
+        try body_buf.appendSlice(self.allocator, kind);
+        try body_buf.appendSlice(self.allocator, "\",\"data\":");
+        try body_buf.appendSlice(self.allocator, data_json);
+        try body_buf.appendSlice(self.allocator, "}");
+
+        const body = body_buf.items;
         const result = try self.httpRequest(url, .POST, body, lease_token);
         defer self.allocator.free(result.body);
 
@@ -293,4 +331,9 @@ test "ClaimResponse defaults" {
     try std.testing.expectEqual(@as(i64, 0), resp.task.priority);
     try std.testing.expectEqualStrings("", resp.run.id);
     try std.testing.expectEqual(@as(i64, 1), resp.run.attempt);
+}
+
+test "TrackerClient has postEvent method" {
+    const has_method = @hasDecl(TrackerClient, "postEvent");
+    try std.testing.expect(has_method);
 }
