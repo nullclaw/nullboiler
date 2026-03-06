@@ -562,4 +562,5 @@ comptime {
     _ = @import("workflow_loader.zig");
     _ = @import("workspace.zig");
     _ = @import("subprocess.zig");
+    _ = @import("tracker_client.zig");
 }
