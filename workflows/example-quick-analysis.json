@@ -1,0 +1,17 @@
+{
+  "id": "quick-analysis",
+  "pipeline_id": "pipeline-triage",
+  "claim_roles": ["analyst"],
+  "execution": "dispatch",
+  "dispatch": {
+    "worker_tags": ["analysis"],
+    "protocol": "webhook"
+  },
+  "prompt_template": "Analyze this task:\n\nTitle: {{task.title}}\nDescription: {{task.description}}",
+  "on_success": {
+    "transition_to": "analyzed"
+  },
+  "on_failure": {
+    "transition_to": "analysis-failed"
+  }
+}

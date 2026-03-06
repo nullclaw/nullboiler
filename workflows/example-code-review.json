@@ -1,0 +1,19 @@
+{
+  "id": "code-review",
+  "pipeline_id": "pipeline-code-review",
+  "claim_roles": ["reviewer"],
+  "execution": "subprocess",
+  "subprocess": {
+    "command": "nullclaw",
+    "args": ["--single-task"],
+    "max_turns": 20,
+    "turn_timeout_ms": 600000
+  },
+  "prompt_template": "Review the code in this workspace.\n\nTask: {{task.title}}\nDescription: {{task.description}}",
+  "on_success": {
+    "transition_to": "reviewed"
+  },
+  "on_failure": {
+    "transition_to": "review-failed"
+  }
+}
