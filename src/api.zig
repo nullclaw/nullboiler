@@ -22,7 +22,7 @@ pub const Context = struct {
     metrics: ?*metrics_mod.Metrics = null,
     drain_mode: ?*std.atomic.Value(bool) = null,
     strategies: ?*const strategy_mod.StrategyMap = null,
-    tracker_state: ?*const tracker_mod.TrackerState = null,
+    tracker_state: ?*tracker_mod.TrackerState = null,
     tracker_cfg: ?*const config_mod.TrackerConfig = null,
 };
 
@@ -1052,6 +1052,9 @@ fn handleTrackerStatus(ctx: *Context) HttpResponse {
         return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
     };
 
+    state.mutex.lock();
+    defer state.mutex.unlock();
+
     // Build running tasks array
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -1086,6 +1089,9 @@ fn handleTrackerTasks(ctx: *Context) HttpResponse {
         return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
     };
 
+    state.mutex.lock();
+    defer state.mutex.unlock();
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
 
@@ -1106,6 +1112,9 @@ fn handleTrackerTaskDetail(ctx: *Context, task_id: []const u8) HttpResponse {
     const state = ctx.tracker_state orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
     };
+
+    state.mutex.lock();
+    defer state.mutex.unlock();
 
     const task = state.running.get(task_id) orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"task not found\"}}");
