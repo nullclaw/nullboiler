@@ -16,6 +16,7 @@ const subprocess_mod = @import("subprocess.zig");
 const workspace_mod = @import("workspace.zig");
 const workflow_loader = @import("workflow_loader.zig");
 const tracker_client = @import("tracker_client.zig");
+const templates = @import("templates.zig");
 
 // ── RunningTask ─────────────────────────────────────────────────────
 
@@ -250,6 +251,7 @@ pub const Tracker = struct {
 
         self.heartbeatAll(tick_alloc);
         self.detectStalls(tick_alloc);
+        self.driveRunningTasks(tick_alloc);
         self.pollAndClaim(tick_alloc);
         self.cleanCooldowns();
     }
@@ -492,6 +494,314 @@ pub const Tracker = struct {
                 self.allocator.free(entry.key);
             }
         }
+    }
+
+    /// Drive each running task through its state machine.
+    fn driveRunningTasks(self: *Tracker, tick_alloc: std.mem.Allocator) void {
+        var task_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer task_ids.deinit(tick_alloc);
+
+        for (self.state.running.keys()) |key| {
+            task_ids.append(tick_alloc, key) catch continue;
+        }
+
+        for (task_ids.items) |task_id| {
+            const task = self.state.running.getPtr(task_id) orelse continue;
+            switch (task.state) {
+                .workspace_setup => self.driveSpawning(tick_alloc, task),
+                .spawning => {},
+                .running => self.driveRunning(tick_alloc, task),
+                .completing => self.driveCompleting(tick_alloc, task),
+                .completed => self.driveCompleted(tick_alloc, task),
+                .failed => self.driveFailed(tick_alloc, task),
+                else => {},
+            }
+        }
+
+        // Remove tasks marked for removal (state == cooldown)
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer to_remove.deinit(tick_alloc);
+
+        for (self.state.running.keys(), self.state.running.values()) |key, task| {
+            if (task.state == .cooldown) {
+                to_remove.append(tick_alloc, key) catch continue;
+            }
+        }
+
+        for (to_remove.items) |key| {
+            if (self.state.running.fetchSwapRemove(key)) |entry| {
+                self.freeRunningTaskStrings(entry.value);
+                self.allocator.free(entry.key);
+            }
+        }
+    }
+
+    /// workspace_setup → running (or failed). Subprocess: spawn NullClaw. Dispatch: skip to running.
+    fn driveSpawning(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) void {
+        if (std.mem.eql(u8, task.execution_mode, "dispatch")) {
+            task.state = .running;
+            self.driveRunning(tick_alloc, task);
+            return;
+        }
+
+        const port = self.allocatePort() orelse {
+            log.err("no free port for task {s}", .{task.task_id});
+            task.state = .failed;
+            return;
+        };
+
+        const child = subprocess_mod.spawnNullClaw(
+            tick_alloc,
+            self.cfg.subprocess.command,
+            self.cfg.subprocess.args,
+            port,
+            task.workspace_path,
+        ) catch |err| {
+            log.err("failed to spawn NullClaw for task {s}: {}", .{ task.task_id, err });
+            self.releasePort(port);
+            task.state = .failed;
+            return;
+        };
+
+        task.subprocess = subprocess_mod.SubprocessInfo{
+            .task_id = task.task_id,
+            .lease_id = task.lease_id,
+            .lease_token = task.lease_token,
+            .workspace_path = task.workspace_path,
+            .pipeline_id = task.pipeline_id,
+            .agent_role = task.agent_role,
+            .port = port,
+            .child = child,
+            .current_turn = 0,
+            .max_turns = task.max_turns,
+            .started_at_ms = task.started_at_ms,
+            .last_activity_ms = ids.nowMs(),
+            .state = .starting,
+            .last_output = null,
+            .run_id = task.run_id,
+            .task_title = task.task_title,
+            .task_identifier = task.task_identifier,
+            .execution_mode = task.execution_mode,
+        };
+
+        // Post agent_started event
+        var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
+        const event_data = std.fmt.allocPrint(tick_alloc, "{{\"port\":{d}}}", .{port}) catch "{}";
+        _ = client.postEvent(task.run_id, "agent_started", event_data, task.lease_token) catch {};
+
+        // Wait for health check
+        const healthy = subprocess_mod.waitForHealth(
+            tick_alloc,
+            port,
+            self.cfg.subprocess.health_check_retries,
+        );
+
+        if (!healthy) {
+            log.err("NullClaw health check failed for task {s} on port {d}", .{ task.task_id, port });
+            if (task.subprocess) |*sub| {
+                if (sub.child) |*ch| {
+                    subprocess_mod.killSubprocess(ch);
+                }
+            }
+            self.releasePort(port);
+            task.subprocess = null;
+            task.state = .failed;
+            return;
+        }
+
+        log.info("NullClaw healthy for task {s} on port {d}", .{ task.task_id, port });
+        task.state = .running;
+        task.last_activity_ms = ids.nowMs();
+    }
+
+    /// running: send prompt, check NullTickets state after response
+    fn driveRunning(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) void {
+        if (std.mem.eql(u8, task.execution_mode, "dispatch")) {
+            self.driveDispatch(tick_alloc, task);
+            return;
+        }
+
+        const sub = &(task.subprocess orelse {
+            task.state = .failed;
+            return;
+        });
+
+        // Render prompt
+        const prompt: ?[]const u8 = if (task.current_turn == 0) blk: {
+            const workflow = self.workflows.get(task.pipeline_id) orelse {
+                log.err("no workflow for pipeline {s}", .{task.pipeline_id});
+                task.state = .failed;
+                break :blk null;
+            };
+            const tmpl = workflow.prompt_template orelse {
+                log.err("no prompt_template for pipeline {s}", .{task.pipeline_id});
+                task.state = .failed;
+                break :blk null;
+            };
+            const ctx = templates.Context{
+                .input_json = "{}",
+                .step_outputs = &.{},
+                .item = null,
+                .task_json = task.task_identifier,
+            };
+            break :blk templates.render(tick_alloc, tmpl, ctx) catch |err| {
+                log.err("template render failed for task {s}: {s}", .{ task.task_id, @errorName(err) });
+                task.state = .failed;
+                break :blk null;
+            };
+        } else blk: {
+            break :blk self.cfg.subprocess.continuation_prompt;
+        };
+
+        if (prompt == null) return;
+
+        // Send prompt via POST /webhook
+        const response = subprocess_mod.sendPrompt(tick_alloc, sub.port, prompt.?) catch |err| {
+            log.err("sendPrompt failed for task {s}: {s}", .{ task.task_id, @errorName(err) });
+            task.state = .failed;
+            return;
+        };
+
+        task.current_turn += 1;
+        task.last_activity_ms = ids.nowMs();
+        sub.last_activity_ms = ids.nowMs();
+        sub.current_turn = task.current_turn;
+
+        // Post turn_completed event
+        var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
+        const turn_data = std.fmt.allocPrint(tick_alloc, "{{\"turn\":{d}}}", .{task.current_turn}) catch "{}";
+        _ = client.postEvent(task.run_id, "turn_completed", turn_data, task.lease_token) catch {};
+
+        // Check NullTickets for task state change
+        const task_info = client.getTask(task.task_id) catch null;
+        if (task_info) |info| {
+            defer {
+                tick_alloc.free(info.id);
+                tick_alloc.free(info.title);
+                tick_alloc.free(info.description);
+                tick_alloc.free(info.stage);
+                tick_alloc.free(info.pipeline_id);
+                tick_alloc.free(info.metadata_json);
+            }
+            if (!std.mem.eql(u8, info.stage, task.task_identifier)) {
+                log.info("task {s} stage changed from {s} to {s}, completing", .{ task.task_id, task.task_identifier, info.stage });
+                task.state = .completing;
+                return;
+            }
+        }
+
+        if (response) |resp| {
+            sub.last_output = resp;
+        }
+
+        if (task.current_turn >= task.max_turns) {
+            log.warn("task {s} reached max_turns ({d}), failing", .{ task.task_id, task.max_turns });
+            task.state = .failed;
+            return;
+        }
+    }
+
+    /// Dispatch execution path
+    fn driveDispatch(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) void {
+        const workflow = self.workflows.get(task.pipeline_id) orelse {
+            log.err("no workflow for pipeline {s}", .{task.pipeline_id});
+            task.state = .failed;
+            return;
+        };
+
+        const tmpl = workflow.prompt_template orelse {
+            log.err("no prompt_template for dispatch pipeline {s}", .{task.pipeline_id});
+            task.state = .failed;
+            return;
+        };
+
+        const ctx = templates.Context{
+            .input_json = "{}",
+            .step_outputs = &.{},
+            .item = null,
+            .task_json = task.task_identifier,
+        };
+
+        const rendered = templates.render(tick_alloc, tmpl, ctx) catch |err| {
+            log.err("template render failed for dispatch task {s}: {s}", .{ task.task_id, @errorName(err) });
+            task.state = .failed;
+            return;
+        };
+
+        log.info("dispatch task {s}: rendered prompt ({d} bytes)", .{ task.task_id, rendered.len });
+        task.state = .completing;
+    }
+
+    /// completing: run after_run hook, call transition, kill subprocess
+    fn driveCompleting(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) void {
+        if (self.cfg.workspace.hooks.after_run) |hook| {
+            _ = workspace_mod.runHook(self.allocator, hook, task.workspace_path, @as(u64, self.cfg.workspace.hook_timeout_ms)) catch false;
+        }
+
+        const workflow = self.workflows.get(task.pipeline_id);
+        const trigger = if (workflow) |w| w.on_success.transition_to else "done";
+
+        var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
+        _ = client.transition(task.run_id, trigger, task.lease_token, null) catch |err| {
+            log.warn("transition failed for task {s}: {s}", .{ task.task_id, @errorName(err) });
+        };
+
+        if (task.subprocess) |*sub| {
+            if (sub.child) |*child| {
+                subprocess_mod.killSubprocess(child);
+            }
+            self.releasePort(sub.port);
+        }
+
+        task.state = .completed;
+    }
+
+    /// completed: run before_remove hook, remove workspace, increment counter, mark for removal
+    fn driveCompleted(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) void {
+        _ = tick_alloc;
+
+        if (self.cfg.workspace.hooks.before_remove) |hook| {
+            _ = workspace_mod.runHook(self.allocator, hook, task.workspace_path, @as(u64, self.cfg.workspace.hook_timeout_ms)) catch false;
+        }
+
+        const ws = workspace_mod.Workspace{
+            .root = self.cfg.workspace.root,
+            .task_id = task.task_id,
+            .path = task.workspace_path,
+            .created = true,
+        };
+        ws.remove();
+
+        self.state.completed_count += 1;
+        task.state = .cooldown;
+    }
+
+    /// failed: call failRun, run after_run hook, kill subprocess, remove workspace, mark for removal
+    fn driveFailed(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) void {
+        var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
+        _ = client.failRun(task.run_id, "execution failed", task.lease_token, null) catch {};
+
+        if (self.cfg.workspace.hooks.after_run) |hook| {
+            _ = workspace_mod.runHook(self.allocator, hook, task.workspace_path, @as(u64, self.cfg.workspace.hook_timeout_ms)) catch false;
+        }
+
+        if (task.subprocess) |*sub| {
+            if (sub.child) |*child| {
+                subprocess_mod.killSubprocess(child);
+            }
+            self.releasePort(sub.port);
+        }
+
+        const ws = workspace_mod.Workspace{
+            .root = self.cfg.workspace.root,
+            .task_id = task.task_id,
+            .path = task.workspace_path,
+            .created = true,
+        };
+        ws.remove();
+
+        self.state.failed_count += 1;
+        task.state = .cooldown;
     }
 
     /// Kill all running subprocesses (called during shutdown).
