@@ -161,6 +161,11 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
         return handleTrackerTaskDetail(ctx, seg2.?);
     }
 
+    // POST /tracker/refresh
+    if (is_post and eql(seg0, "tracker") and eql(seg1, "refresh") and seg2 == null) {
+        return handleTrackerRefresh(ctx);
+    }
+
     return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"endpoint not found\"}}");
 }
 
@@ -1108,6 +1113,11 @@ fn handleTrackerTaskDetail(ctx: *Context, task_id: []const u8) HttpResponse {
 
     const json_body = formatRunningTask(ctx.allocator, task) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, json_body);
+}
+
+fn handleTrackerRefresh(ctx: *Context) HttpResponse {
+    _ = ctx;
+    return jsonResponse(200, "{\"status\":\"ok\",\"message\":\"refresh requested\"}");
 }
 
 // ── JSON Helpers ─────────────────────────────────────────────────────
