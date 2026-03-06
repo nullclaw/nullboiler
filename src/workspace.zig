@@ -90,9 +90,14 @@ pub fn runHook(allocator: std.mem.Allocator, command: []const u8, cwd: []const u
 
     try child.spawn();
 
-    // Spawn a watchdog thread that kills the child after the timeout
-    const killer = std.Thread.spawn(.{}, killAfterTimeout, .{ &child, timeout_ms }) catch null;
-    defer if (killer) |t| t.join();
+    // Spawn a watchdog thread that kills the child after the timeout.
+    // The atomic flag lets the watchdog exit early once the child finishes.
+    var child_done = std.atomic.Value(bool).init(false);
+    const killer = std.Thread.spawn(.{}, killAfterTimeout, .{ &child, timeout_ms, &child_done }) catch null;
+    defer {
+        child_done.store(true, .release);
+        if (killer) |t| t.join();
+    }
 
     const term = child.wait() catch |err| {
         log.warn("hook wait failed: {s}: {}", .{ command, err });
@@ -106,10 +111,22 @@ pub fn runHook(allocator: std.mem.Allocator, command: []const u8, cwd: []const u
     return success;
 }
 
-fn killAfterTimeout(child: *std.process.Child, timeout_ms: u64) void {
-    std.Thread.sleep(timeout_ms * std.time.ns_per_ms);
-    // If the child is still alive at this point, kill it
-    _ = child.kill() catch {};
+fn killAfterTimeout(child: *std.process.Child, timeout_ms: u64, done: *std.atomic.Value(bool)) void {
+    // Poll in 100ms increments so we exit promptly once the child finishes
+    const poll_ns: u64 = 100 * std.time.ns_per_ms;
+    var elapsed_ns: u64 = 0;
+    const deadline_ns: u64 = timeout_ms * std.time.ns_per_ms;
+
+    while (elapsed_ns < deadline_ns) {
+        if (done.load(.acquire)) return;
+        std.Thread.sleep(poll_ns);
+        elapsed_ns += poll_ns;
+    }
+
+    // Timeout reached — kill the child if still running
+    if (!done.load(.acquire)) {
+        _ = child.kill() catch {};
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────

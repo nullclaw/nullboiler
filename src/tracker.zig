@@ -39,6 +39,8 @@ pub const RunningTask = struct {
 };
 
 // ── TrackerState ────────────────────────────────────────────────────
+// TODO: TrackerState is read by the HTTP thread (API handlers) and written by the
+// Tracker thread without synchronization. Add a Mutex or RwLock before production use.
 
 pub const TrackerState = struct {
     running: std.StringArrayHashMapUnmanaged(RunningTask),
@@ -56,8 +58,16 @@ pub const TrackerState = struct {
     }
 
     pub fn deinit(self: *TrackerState, allocator: std.mem.Allocator) void {
-        // Free all duped keys in running map
-        for (self.running.keys()) |key| {
+        // Free all duped keys and owned strings in running map
+        for (self.running.keys(), self.running.values()) |key, task| {
+            allocator.free(task.task_id);
+            allocator.free(task.task_title);
+            allocator.free(task.task_identifier);
+            allocator.free(task.pipeline_id);
+            allocator.free(task.lease_id);
+            allocator.free(task.lease_token);
+            allocator.free(task.run_id);
+            allocator.free(task.workspace_path);
             allocator.free(key);
         }
         self.running.deinit(allocator);
@@ -174,6 +184,19 @@ pub const Tracker = struct {
         self.state.deinit(self.allocator);
     }
 
+    /// Free owned string fields of a RunningTask (duped in startTask).
+    /// Does NOT free agent_role (cfg_arena) or execution_mode (string literal).
+    fn freeRunningTaskStrings(self: *Tracker, task: RunningTask) void {
+        self.allocator.free(task.task_id);
+        self.allocator.free(task.task_title);
+        self.allocator.free(task.task_identifier);
+        self.allocator.free(task.pipeline_id);
+        self.allocator.free(task.lease_id);
+        self.allocator.free(task.lease_token);
+        self.allocator.free(task.run_id);
+        self.allocator.free(task.workspace_path);
+    }
+
     /// Thread entry point — run the poll loop until shutdown is requested.
     pub fn run(self: *Tracker) void {
         log.info("tracker started (poll_interval={d}ms, agent_id={s})", .{
@@ -240,9 +263,10 @@ pub const Tracker = struct {
             }
         }
 
-        // Remove failed heartbeat tasks
+        // Remove failed heartbeat tasks and free owned strings
         for (to_remove.items) |key| {
             if (self.state.running.fetchSwapRemove(key)) |entry| {
+                self.freeRunningTaskStrings(entry.value);
                 self.allocator.free(entry.key);
             }
         }
@@ -279,6 +303,7 @@ pub const Tracker = struct {
 
         for (to_remove.items) |key| {
             if (self.state.running.fetchSwapRemove(key)) |entry| {
+                self.freeRunningTaskStrings(entry.value);
                 self.allocator.free(entry.key);
             }
         }
@@ -326,6 +351,7 @@ pub const Tracker = struct {
     }
 
     /// Set up workspace and create a RunningTask entry for a claimed task.
+    /// Claim fields are duped with self.allocator since the tick arena is freed after tick().
     fn startTask(
         self: *Tracker,
         claim: tracker_client.ClaimResponse,
@@ -343,6 +369,7 @@ pub const Tracker = struct {
             log.warn("workspace creation failed for task {s}: {}", .{ claim.task.id, err });
             return err;
         };
+        errdefer self.allocator.free(ws.path);
 
         // Run after_create hook if workspace was freshly created
         if (ws.created) {
@@ -377,21 +404,37 @@ pub const Tracker = struct {
             .dispatch => "dispatch",
         };
 
+        // Dupe claim fields with long-lived allocator (tick arena freed after tick())
+        const owned_task_id = try self.allocator.dupe(u8, claim.task.id);
+        errdefer self.allocator.free(owned_task_id);
+        const owned_title = try self.allocator.dupe(u8, claim.task.title);
+        errdefer self.allocator.free(owned_title);
+        const owned_identifier = try self.allocator.dupe(u8, claim.task.stage);
+        errdefer self.allocator.free(owned_identifier);
+        const owned_pipeline = try self.allocator.dupe(u8, claim.task.pipeline_id);
+        errdefer self.allocator.free(owned_pipeline);
+        const owned_lease_id = try self.allocator.dupe(u8, claim.lease_id);
+        errdefer self.allocator.free(owned_lease_id);
+        const owned_lease_token = try self.allocator.dupe(u8, claim.lease_token);
+        errdefer self.allocator.free(owned_lease_token);
+        const owned_run_id = try self.allocator.dupe(u8, claim.run.id);
+        errdefer self.allocator.free(owned_run_id);
+
         // Dupe the task_id for use as the map key
         const key = try self.allocator.dupe(u8, claim.task.id);
         errdefer self.allocator.free(key);
 
         const running_task = RunningTask{
-            .task_id = claim.task.id,
-            .task_title = claim.task.title,
-            .task_identifier = claim.task.stage,
-            .pipeline_id = claim.task.pipeline_id,
-            .agent_role = role,
-            .lease_id = claim.lease_id,
-            .lease_token = claim.lease_token,
-            .run_id = claim.run.id,
-            .workspace_path = ws.path,
-            .execution_mode = execution_mode_str,
+            .task_id = owned_task_id,
+            .task_title = owned_title,
+            .task_identifier = owned_identifier,
+            .pipeline_id = owned_pipeline,
+            .agent_role = role, // from workflow, lives in cfg_arena
+            .lease_id = owned_lease_id,
+            .lease_token = owned_lease_token,
+            .run_id = owned_run_id,
+            .workspace_path = ws.path, // allocated with self.allocator via Workspace.create
+            .execution_mode = execution_mode_str, // string literal
             .subprocess = null,
             .started_at_ms = now,
             .last_activity_ms = now,
@@ -403,8 +446,8 @@ pub const Tracker = struct {
         try self.state.running.put(self.allocator, key, running_task);
 
         log.info("started task {s} (pipeline={s}, role={s}, mode={s})", .{
-            claim.task.id,
-            claim.task.pipeline_id,
+            owned_task_id,
+            owned_pipeline,
             role,
             execution_mode_str,
         });
@@ -493,17 +536,18 @@ test "TrackerState countByPipeline and countByRole" {
     const now = ids.nowMs();
 
     // Insert two tasks with different pipelines/roles
+    // Owned fields must be duped since deinit frees them
     const key1 = try allocator.dupe(u8, "task-001");
     try state.running.put(allocator, key1, RunningTask{
-        .task_id = "task-001",
-        .task_title = "Task 1",
-        .task_identifier = "T-1",
-        .pipeline_id = "pipeline-a",
+        .task_id = try allocator.dupe(u8, "task-001"),
+        .task_title = try allocator.dupe(u8, "Task 1"),
+        .task_identifier = try allocator.dupe(u8, "T-1"),
+        .pipeline_id = try allocator.dupe(u8, "pipeline-a"),
         .agent_role = "coder",
-        .lease_id = "lease-1",
-        .lease_token = "token-1",
-        .run_id = "run-1",
-        .workspace_path = "/tmp/ws1",
+        .lease_id = try allocator.dupe(u8, "lease-1"),
+        .lease_token = try allocator.dupe(u8, "token-1"),
+        .run_id = try allocator.dupe(u8, "run-1"),
+        .workspace_path = try allocator.dupe(u8, "/tmp/ws1"),
         .execution_mode = "subprocess",
         .subprocess = null,
         .started_at_ms = now,
@@ -515,15 +559,15 @@ test "TrackerState countByPipeline and countByRole" {
 
     const key2 = try allocator.dupe(u8, "task-002");
     try state.running.put(allocator, key2, RunningTask{
-        .task_id = "task-002",
-        .task_title = "Task 2",
-        .task_identifier = "T-2",
-        .pipeline_id = "pipeline-a",
+        .task_id = try allocator.dupe(u8, "task-002"),
+        .task_title = try allocator.dupe(u8, "Task 2"),
+        .task_identifier = try allocator.dupe(u8, "T-2"),
+        .pipeline_id = try allocator.dupe(u8, "pipeline-a"),
         .agent_role = "reviewer",
-        .lease_id = "lease-2",
-        .lease_token = "token-2",
-        .run_id = "run-2",
-        .workspace_path = "/tmp/ws2",
+        .lease_id = try allocator.dupe(u8, "lease-2"),
+        .lease_token = try allocator.dupe(u8, "token-2"),
+        .run_id = try allocator.dupe(u8, "run-2"),
+        .workspace_path = try allocator.dupe(u8, "/tmp/ws2"),
         .execution_mode = "subprocess",
         .subprocess = null,
         .started_at_ms = now,
@@ -535,15 +579,15 @@ test "TrackerState countByPipeline and countByRole" {
 
     const key3 = try allocator.dupe(u8, "task-003");
     try state.running.put(allocator, key3, RunningTask{
-        .task_id = "task-003",
-        .task_title = "Task 3",
-        .task_identifier = "T-3",
-        .pipeline_id = "pipeline-b",
+        .task_id = try allocator.dupe(u8, "task-003"),
+        .task_title = try allocator.dupe(u8, "Task 3"),
+        .task_identifier = try allocator.dupe(u8, "T-3"),
+        .pipeline_id = try allocator.dupe(u8, "pipeline-b"),
         .agent_role = "coder",
-        .lease_id = "lease-3",
-        .lease_token = "token-3",
-        .run_id = "run-3",
-        .workspace_path = "/tmp/ws3",
+        .lease_id = try allocator.dupe(u8, "lease-3"),
+        .lease_token = try allocator.dupe(u8, "token-3"),
+        .run_id = try allocator.dupe(u8, "run-3"),
+        .workspace_path = try allocator.dupe(u8, "/tmp/ws3"),
         .execution_mode = "dispatch",
         .subprocess = null,
         .started_at_ms = now,
@@ -591,15 +635,15 @@ test "canClaimMore at global limit returns false" {
     // Fill up to global max of 1
     const key = try allocator.dupe(u8, "task-fill");
     try state.running.put(allocator, key, RunningTask{
-        .task_id = "task-fill",
-        .task_title = "Fill",
-        .task_identifier = "F-1",
-        .pipeline_id = "pipe",
+        .task_id = try allocator.dupe(u8, "task-fill"),
+        .task_title = try allocator.dupe(u8, "Fill"),
+        .task_identifier = try allocator.dupe(u8, "F-1"),
+        .pipeline_id = try allocator.dupe(u8, "pipe"),
         .agent_role = "coder",
-        .lease_id = "l",
-        .lease_token = "t",
-        .run_id = "r",
-        .workspace_path = "/tmp",
+        .lease_id = try allocator.dupe(u8, "l"),
+        .lease_token = try allocator.dupe(u8, "t"),
+        .run_id = try allocator.dupe(u8, "r"),
+        .workspace_path = try allocator.dupe(u8, "/tmp"),
         .execution_mode = "subprocess",
         .subprocess = null,
         .started_at_ms = now,
