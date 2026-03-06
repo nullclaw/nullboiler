@@ -39,10 +39,9 @@ pub const RunningTask = struct {
 };
 
 // ── TrackerState ────────────────────────────────────────────────────
-// TODO: TrackerState is read by the HTTP thread (API handlers) and written by the
-// Tracker thread without synchronization. Add a Mutex or RwLock before production use.
 
 pub const TrackerState = struct {
+    mutex: std.Thread.Mutex,
     running: std.StringArrayHashMapUnmanaged(RunningTask),
     completed_count: u64,
     failed_count: u64,
@@ -50,6 +49,7 @@ pub const TrackerState = struct {
 
     pub fn init() TrackerState {
         return .{
+            .mutex = .{},
             .running = .{},
             .completed_count = 0,
             .failed_count = 0,
@@ -660,4 +660,14 @@ test "canClaimMore at global limit returns false" {
     };
 
     try std.testing.expect(!canClaimMore(&state, concurrency, "pipe", "coder"));
+}
+
+test "TrackerState mutex can be locked and unlocked" {
+    const allocator = std.testing.allocator;
+    var state = TrackerState.init();
+    defer state.deinit(allocator);
+
+    state.mutex.lock();
+    try std.testing.expectEqual(@as(u32, 0), state.runningCount());
+    state.mutex.unlock();
 }
