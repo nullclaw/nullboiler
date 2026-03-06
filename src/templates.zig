@@ -6,6 +6,7 @@
 ///   - `{{steps.ID.output}}`  -- output of a single completed step
 ///   - `{{steps.ID.outputs}}` -- JSON array of outputs from map/fan_out child steps
 ///   - `{{item}}`             -- current item string for map iterations
+///   - `{{task.X}}`           -- look up field X in the NullTickets task JSON (supports nested paths like `task.metadata.repo_url`)
 
 const std = @import("std");
 
@@ -18,6 +19,7 @@ pub const Context = struct {
     debate_responses: ?[]const u8 = null, // JSON array string for debate judge template
     chat_history: ?[]const u8 = null, // formatted chat transcript for group_chat round_template
     role: ?[]const u8 = null, // participant role for group_chat round_template
+    task_json: ?[]const u8 = null, // raw JSON string of NullTickets task data
 
     pub const StepOutput = struct {
         step_id: []const u8,
@@ -116,6 +118,14 @@ fn resolveExpression(allocator: std.mem.Allocator, expr: []const u8, ctx: Contex
         return resolveStepRef(allocator, expr["steps.".len..], ctx.step_outputs);
     }
 
+    if (std.mem.startsWith(u8, expr, "task.")) {
+        const field = expr["task.".len..];
+        if (ctx.task_json) |tj| {
+            return resolveTaskField(allocator, tj, field);
+        }
+        return error.UnknownExpression;
+    }
+
     return error.UnknownExpression;
 }
 
@@ -156,6 +166,26 @@ fn resolveStepRef(allocator: std.mem.Allocator, rest: []const u8, step_outputs: 
     }
 
     return error.StepNotFound;
+}
+
+fn resolveTaskField(allocator: std.mem.Allocator, task_json: []const u8, field_path: []const u8) RenderError![]const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, task_json, .{}) catch {
+        return error.InvalidInputJson;
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return error.InvalidInputJson;
+
+    // Handle nested paths like "metadata.repo_url"
+    var current = root;
+    var path_iter = std.mem.splitScalar(u8, field_path, '.');
+    while (path_iter.next()) |segment| {
+        if (current != .object) return error.InputFieldNotFound;
+        current = current.object.get(segment) orelse return error.InputFieldNotFound;
+    }
+
+    return jsonValueToString(allocator, current);
 }
 
 fn serializeOutputs(allocator: std.mem.Allocator, outputs: ?[]const []const u8) RenderError![]const u8 {
@@ -421,4 +451,40 @@ test "debate_responses defaults to empty array when not set" {
     });
     defer allocator.free(result);
     try std.testing.expectEqualStrings("[]", result);
+}
+
+test "render task.title variable" {
+    const allocator = std.testing.allocator;
+    const result = try render(allocator, "Work on: {{task.title}}", .{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .task_json = "{\"title\":\"Fix login bug\",\"description\":\"Users cannot log in\"}",
+    });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Work on: Fix login bug", result);
+}
+
+test "render task.description variable" {
+    const allocator = std.testing.allocator;
+    const result = try render(allocator, "{{task.description}}", .{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .task_json = "{\"title\":\"Fix\",\"description\":\"Users cannot log in\"}",
+    });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Users cannot log in", result);
+}
+
+test "render task.metadata.X nested variable" {
+    const allocator = std.testing.allocator;
+    const result = try render(allocator, "Repo: {{task.metadata.repo_url}}", .{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .task_json = "{\"title\":\"T\",\"description\":\"D\",\"metadata\":{\"repo_url\":\"https://github.com/org/repo\"}}",
+    });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Repo: https://github.com/org/repo", result);
 }
