@@ -109,6 +109,7 @@ pub const WorkerSource = enum {
 pub const TrackerTaskState = enum {
     claiming,
     workspace_setup,
+    spawning,
     running,
     completing,
     completed,
