@@ -123,14 +123,14 @@ pub fn waitForHealth(
 
 // ── Prompt Sending ────────────────────────────────────────────────────
 
-/// Send a prompt to a NullClaw child process via POST /task with {"message": prompt}.
+/// Send a prompt to a NullClaw child process via POST /webhook with {"message": prompt}.
 /// Returns the response body on success, or null on failure.
 pub fn sendPrompt(
     allocator: std.mem.Allocator,
     port: u16,
     prompt: []const u8,
 ) !?[]const u8 {
-    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/task", .{port});
+    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/webhook", .{port});
     defer allocator.free(url);
 
     const body = try std.json.Stringify.valueAlloc(allocator, .{
