@@ -45,8 +45,12 @@ pub const WorkspaceConfig = struct {
 
 pub const SubprocessDefaults = struct {
     command: []const u8 = "nullclaw",
+    args: []const []const u8 = &.{},
+    base_port: u16 = 9200,
+    health_check_retries: u32 = 10,
     max_turns: u32 = 20,
     turn_timeout_ms: u32 = 600000,
+    continuation_prompt: []const u8 = "Continue working on this task. Your previous context is preserved.",
 };
 
 pub const TrackerConfig = struct {
@@ -170,4 +174,13 @@ test "TrackerConfig defaults" {
 test "Config with tracker null by default" {
     const cfg = Config{};
     try std.testing.expectEqual(@as(?TrackerConfig, null), cfg.tracker);
+}
+
+test "SubprocessDefaults has base_port and health_check_retries" {
+    const sd = SubprocessDefaults{};
+    try std.testing.expectEqual(@as(u16, 9200), sd.base_port);
+    try std.testing.expectEqual(@as(u32, 10), sd.health_check_retries);
+    try std.testing.expectEqualStrings("nullclaw", sd.command);
+    try std.testing.expectEqual(@as(usize, 0), sd.args.len);
+    try std.testing.expectEqualStrings("Continue working on this task. Your previous context is preserved.", sd.continuation_prompt);
 }
