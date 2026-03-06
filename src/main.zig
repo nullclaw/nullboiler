@@ -559,4 +559,5 @@ comptime {
     _ = @import("async_dispatch.zig");
     _ = @import("redis_client.zig");
     _ = @import("mqtt_client.zig");
+    _ = @import("workflow_loader.zig");
 }
