@@ -4,8 +4,10 @@
 /// Each tick:
 ///   1. Heartbeat all active leases
 ///   2. Detect stalled subprocesses
-///   3. Poll NullTickets and claim new tasks (respecting concurrency limits)
-///   4. Clean expired cooldowns
+///   3. Drive running task state machines
+///   4. Reconcile running tasks with NullTickets state
+///   5. Poll NullTickets and claim new tasks (respecting concurrency limits)
+///   6. Clean expired cooldowns
 const std = @import("std");
 const log = std.log.scoped(.tracker);
 
@@ -252,6 +254,7 @@ pub const Tracker = struct {
         self.heartbeatAll(tick_alloc);
         self.detectStalls(tick_alloc);
         self.driveRunningTasks(tick_alloc);
+        self.reconcile(tick_alloc);
         self.pollAndClaim(tick_alloc);
         self.cleanCooldowns();
     }
@@ -287,12 +290,14 @@ pub const Tracker = struct {
         }
 
         // Remove failed heartbeat tasks and free owned strings
+        self.state.mutex.lock();
         for (to_remove.items) |key| {
             if (self.state.running.fetchSwapRemove(key)) |entry| {
                 self.freeRunningTaskStrings(entry.value);
                 self.allocator.free(entry.key);
             }
         }
+        self.state.mutex.unlock();
     }
 
     /// Detect stalled subprocesses. If stalled, report failure to NullTickets,
@@ -318,18 +323,22 @@ pub const Tracker = struct {
                         subprocess_mod.killSubprocess(child);
                     }
 
+                    self.state.mutex.lock();
                     self.state.failed_count += 1;
+                    self.state.mutex.unlock();
                     to_remove.append(tick_alloc, key) catch continue;
                 }
             }
         }
 
+        self.state.mutex.lock();
         for (to_remove.items) |key| {
             if (self.state.running.fetchSwapRemove(key)) |entry| {
                 self.freeRunningTaskStrings(entry.value);
                 self.allocator.free(entry.key);
             }
         }
+        self.state.mutex.unlock();
     }
 
     /// Poll NullTickets for each workflow's claim_roles and claim available tasks.
@@ -466,6 +475,8 @@ pub const Tracker = struct {
             .state = .workspace_setup,
         };
 
+        self.state.mutex.lock();
+        defer self.state.mutex.unlock();
         try self.state.running.put(self.allocator, key, running_task);
 
         log.info("started task {s} (pipeline={s}, role={s}, mode={s})", .{
@@ -528,12 +539,79 @@ pub const Tracker = struct {
             }
         }
 
+        self.state.mutex.lock();
         for (to_remove.items) |key| {
             if (self.state.running.fetchSwapRemove(key)) |entry| {
                 self.freeRunningTaskStrings(entry.value);
                 self.allocator.free(entry.key);
             }
         }
+        self.state.mutex.unlock();
+    }
+
+    /// Reconcile running tasks with NullTickets state.
+    /// If task was deleted, reassigned, or pipeline changed, kill and clean up.
+    fn reconcile(self: *Tracker, tick_alloc: std.mem.Allocator) void {
+        const base_url = self.cfg.url orelse return;
+
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer to_remove.deinit(tick_alloc);
+
+        for (self.state.running.keys(), self.state.running.values()) |key, *task| {
+            // Only reconcile tasks that are actively running
+            if (task.state != .running and task.state != .workspace_setup and task.state != .spawning) continue;
+
+            var client = tracker_client.TrackerClient.init(tick_alloc, base_url, self.cfg.api_token);
+            const task_info = client.getTask(task.task_id) catch continue;
+            if (task_info == null) {
+                log.warn("task {s} not found in NullTickets, removing", .{task.task_id});
+                if (task.subprocess) |*sub| {
+                    if (sub.child) |*child| {
+                        subprocess_mod.killSubprocess(child);
+                    }
+                    self.releasePort(sub.port);
+                }
+                self.state.mutex.lock();
+                self.state.failed_count += 1;
+                self.state.mutex.unlock();
+                to_remove.append(tick_alloc, key) catch continue;
+                continue;
+            }
+
+            const info = task_info.?;
+            defer {
+                tick_alloc.free(info.id);
+                tick_alloc.free(info.title);
+                tick_alloc.free(info.description);
+                tick_alloc.free(info.stage);
+                tick_alloc.free(info.pipeline_id);
+                tick_alloc.free(info.metadata_json);
+            }
+
+            // If pipeline changed, task was reassigned
+            if (!std.mem.eql(u8, info.pipeline_id, task.pipeline_id)) {
+                log.warn("task {s} pipeline changed, removing", .{task.task_id});
+                if (task.subprocess) |*sub| {
+                    if (sub.child) |*child| {
+                        subprocess_mod.killSubprocess(child);
+                    }
+                    self.releasePort(sub.port);
+                }
+                self.state.mutex.lock();
+                self.state.failed_count += 1;
+                self.state.mutex.unlock();
+                to_remove.append(tick_alloc, key) catch continue;
+            }
+        }
+
+        self.state.mutex.lock();
+        for (to_remove.items) |key| {
+            if (self.state.running.fetchSwapRemove(key)) |entry| {
+                self.freeRunningTaskStrings(entry.value);
+                self.allocator.free(entry.key);
+            }
+        }
+        self.state.mutex.unlock();
     }
 
     /// workspace_setup → running (or failed). Subprocess: spawn NullClaw. Dispatch: skip to running.
@@ -772,7 +850,9 @@ pub const Tracker = struct {
         };
         ws.remove();
 
+        self.state.mutex.lock();
         self.state.completed_count += 1;
+        self.state.mutex.unlock();
         task.state = .cooldown;
     }
 
@@ -800,7 +880,9 @@ pub const Tracker = struct {
         };
         ws.remove();
 
+        self.state.mutex.lock();
         self.state.failed_count += 1;
+        self.state.mutex.unlock();
         task.state = .cooldown;
     }
 
