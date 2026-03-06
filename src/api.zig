@@ -6,6 +6,8 @@ const workflow_validation = @import("workflow_validation.zig");
 const worker_protocol = @import("worker_protocol.zig");
 const metrics_mod = @import("metrics.zig");
 const strategy_mod = @import("strategy.zig");
+const tracker_mod = @import("tracker.zig");
+const config_mod = @import("config.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -20,6 +22,8 @@ pub const Context = struct {
     metrics: ?*metrics_mod.Metrics = null,
     drain_mode: ?*std.atomic.Value(bool) = null,
     strategies: ?*const strategy_mod.StrategyMap = null,
+    tracker_state: ?*const tracker_mod.TrackerState = null,
+    tracker_cfg: ?*const config_mod.TrackerConfig = null,
 };
 
 pub const HttpResponse = struct {
@@ -140,6 +144,21 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
     // POST /admin/drain
     if (is_post and eql(seg0, "admin") and eql(seg1, "drain") and seg2 == null) {
         return handleEnableDrain(ctx);
+    }
+
+    // GET /tracker/status
+    if (is_get and eql(seg0, "tracker") and eql(seg1, "status") and seg2 == null) {
+        return handleTrackerStatus(ctx);
+    }
+
+    // GET /tracker/tasks
+    if (is_get and eql(seg0, "tracker") and eql(seg1, "tasks") and seg2 == null) {
+        return handleTrackerTasks(ctx);
+    }
+
+    // GET /tracker/tasks/{task_id}
+    if (is_get and eql(seg0, "tracker") and eql(seg1, "tasks") and seg2 != null and seg3 == null) {
+        return handleTrackerTaskDetail(ctx, seg2.?);
     }
 
     return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"endpoint not found\"}}");
@@ -991,6 +1010,103 @@ fn handleGetChatTranscript(ctx: *Context, run_id: []const u8, step_id: []const u
 
     buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, json_body);
+}
+
+// ── Tracker Handlers ─────────────────────────────────────────────────
+
+fn formatRunningTask(allocator: std.mem.Allocator, task: tracker_mod.RunningTask) ![]const u8 {
+    const task_id_json = try jsonQuoted(allocator, task.task_id);
+    const title_json = try jsonQuoted(allocator, task.task_title);
+    const pipeline_json = try jsonQuoted(allocator, task.pipeline_id);
+    const role_json = try jsonQuoted(allocator, task.agent_role);
+    const exec_json = try jsonQuoted(allocator, task.execution_mode);
+    const state_json = try jsonQuoted(allocator, task.state.toString());
+
+    return std.fmt.allocPrint(allocator,
+        \\{{"task_id":{s},"task_title":{s},"pipeline_id":{s},"agent_role":{s},"execution":{s},"current_turn":{d},"max_turns":{d},"started_at_ms":{d},"last_activity_ms":{d},"state":{s}}}
+    , .{
+        task_id_json,
+        title_json,
+        pipeline_json,
+        role_json,
+        exec_json,
+        task.current_turn,
+        task.max_turns,
+        task.started_at_ms,
+        task.last_activity_ms,
+        state_json,
+    });
+}
+
+fn handleTrackerStatus(ctx: *Context) HttpResponse {
+    const state = ctx.tracker_state orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
+    };
+    const cfg = ctx.tracker_cfg orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
+    };
+
+    // Build running tasks array
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    for (state.running.values(), 0..) |task, i| {
+        if (i > 0) {
+            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        }
+        const entry = formatRunningTask(ctx.allocator, task) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    }
+
+    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const running_json = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"mode":"pull","running_count":{d},"max_concurrent":{d},"completed_count":{d},"failed_count":{d},"poll_interval_ms":{d},"running":{s}}}
+    , .{
+        state.runningCount(),
+        cfg.concurrency.max_concurrent_tasks,
+        state.completed_count,
+        state.failed_count,
+        cfg.poll_interval_ms,
+        running_json,
+    }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    return jsonResponse(200, resp);
+}
+
+fn handleTrackerTasks(ctx: *Context) HttpResponse {
+    const state = ctx.tracker_state orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    for (state.running.values(), 0..) |task, i| {
+        if (i > 0) {
+            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        }
+        const entry = formatRunningTask(ctx.allocator, task) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    }
+
+    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, json_body);
+}
+
+fn handleTrackerTaskDetail(ctx: *Context, task_id: []const u8) HttpResponse {
+    const state = ctx.tracker_state orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
+    };
+
+    const task = state.running.get(task_id) orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"task not found\"}}");
+    };
+
+    const json_body = formatRunningTask(ctx.allocator, task) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, json_body);
 }
 
