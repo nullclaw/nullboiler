@@ -563,4 +563,5 @@ comptime {
     _ = @import("workspace.zig");
     _ = @import("subprocess.zig");
     _ = @import("tracker_client.zig");
+    _ = @import("tracker.zig");
 }
