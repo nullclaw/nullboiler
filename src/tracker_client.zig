@@ -110,19 +110,15 @@ pub const TrackerClient = struct {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/runs/{s}/transition", .{ self.base_url, run_id });
         defer self.allocator.free(url);
 
-        var body_buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_buf.deinit(self.allocator);
+        const body = if (usage_json) |usage| blk: {
+            const trigger_json = try std.json.Stringify.valueAlloc(self.allocator, trigger, .{});
+            defer self.allocator.free(trigger_json);
+            break :blk try std.fmt.allocPrint(self.allocator, "{{\"trigger\":{s},\"usage\":{s}}}", .{ trigger_json, usage });
+        } else blk: {
+            break :blk try std.json.Stringify.valueAlloc(self.allocator, .{ .trigger = trigger }, .{});
+        };
+        defer self.allocator.free(body);
 
-        try body_buf.appendSlice(self.allocator, "{\"trigger\":\"");
-        try body_buf.appendSlice(self.allocator, trigger);
-        try body_buf.appendSlice(self.allocator, "\"");
-        if (usage_json) |usage| {
-            try body_buf.appendSlice(self.allocator, ",\"usage\":");
-            try body_buf.appendSlice(self.allocator, usage);
-        }
-        try body_buf.appendSlice(self.allocator, "}");
-
-        const body = body_buf.items;
         const result = try self.httpRequest(url, .POST, body, lease_token);
         defer self.allocator.free(result.body);
 
@@ -135,19 +131,15 @@ pub const TrackerClient = struct {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/runs/{s}/fail", .{ self.base_url, run_id });
         defer self.allocator.free(url);
 
-        var body_buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_buf.deinit(self.allocator);
+        const body = if (usage_json) |usage| blk: {
+            const reason_json = try std.json.Stringify.valueAlloc(self.allocator, reason, .{});
+            defer self.allocator.free(reason_json);
+            break :blk try std.fmt.allocPrint(self.allocator, "{{\"reason\":{s},\"usage\":{s}}}", .{ reason_json, usage });
+        } else blk: {
+            break :blk try std.json.Stringify.valueAlloc(self.allocator, .{ .reason = reason }, .{});
+        };
+        defer self.allocator.free(body);
 
-        try body_buf.appendSlice(self.allocator, "{\"reason\":\"");
-        try body_buf.appendSlice(self.allocator, reason);
-        try body_buf.appendSlice(self.allocator, "\"");
-        if (usage_json) |usage| {
-            try body_buf.appendSlice(self.allocator, ",\"usage\":");
-            try body_buf.appendSlice(self.allocator, usage);
-        }
-        try body_buf.appendSlice(self.allocator, "}");
-
-        const body = body_buf.items;
         const result = try self.httpRequest(url, .POST, body, lease_token);
         defer self.allocator.free(result.body);
 
@@ -160,16 +152,12 @@ pub const TrackerClient = struct {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/runs/{s}/events", .{ self.base_url, run_id });
         defer self.allocator.free(url);
 
-        var body_buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer body_buf.deinit(self.allocator);
+        const kind_json = try std.json.Stringify.valueAlloc(self.allocator, kind, .{});
+        defer self.allocator.free(kind_json);
 
-        try body_buf.appendSlice(self.allocator, "{\"kind\":\"");
-        try body_buf.appendSlice(self.allocator, kind);
-        try body_buf.appendSlice(self.allocator, "\",\"data\":");
-        try body_buf.appendSlice(self.allocator, data_json);
-        try body_buf.appendSlice(self.allocator, "}");
+        const body = try std.fmt.allocPrint(self.allocator, "{{\"kind\":{s},\"data\":{s}}}", .{ kind_json, data_json });
+        defer self.allocator.free(body);
 
-        const body = body_buf.items;
         const result = try self.httpRequest(url, .POST, body, lease_token);
         defer self.allocator.free(result.body);
 

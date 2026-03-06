@@ -39,6 +39,7 @@ pub const RunningTask = struct {
     current_turn: u32,
     max_turns: u32,
     state: types.TrackerTaskState,
+    health_retries: u32 = 0,
 };
 
 // ── TrackerState ────────────────────────────────────────────────────
@@ -509,18 +510,21 @@ pub const Tracker = struct {
 
     /// Drive each running task through its state machine.
     fn driveRunningTasks(self: *Tracker, tick_alloc: std.mem.Allocator) void {
+        // Collect task IDs under lock to avoid race with API reader thread
         var task_ids: std.ArrayListUnmanaged([]const u8) = .empty;
         defer task_ids.deinit(tick_alloc);
 
+        self.state.mutex.lock();
         for (self.state.running.keys()) |key| {
             task_ids.append(tick_alloc, key) catch continue;
         }
+        self.state.mutex.unlock();
 
         for (task_ids.items) |task_id| {
             const task = self.state.running.getPtr(task_id) orelse continue;
             switch (task.state) {
                 .workspace_setup => self.driveSpawning(tick_alloc, task),
-                .spawning => {},
+                .spawning => self.driveHealthCheck(tick_alloc, task),
                 .running => self.driveRunning(tick_alloc, task),
                 .completing => self.driveCompleting(tick_alloc, task),
                 .completed => self.driveCompleted(tick_alloc, task),
@@ -529,12 +533,12 @@ pub const Tracker = struct {
             }
         }
 
-        // Remove tasks marked for removal (state == cooldown)
+        // Remove tasks marked for removal (state == removing)
         var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
         defer to_remove.deinit(tick_alloc);
 
         for (self.state.running.keys(), self.state.running.values()) |key, task| {
-            if (task.state == .cooldown) {
+            if (task.state == .removing) {
                 to_remove.append(tick_alloc, key) catch continue;
             }
         }
@@ -614,7 +618,8 @@ pub const Tracker = struct {
         self.state.mutex.unlock();
     }
 
-    /// workspace_setup → running (or failed). Subprocess: spawn NullClaw. Dispatch: skip to running.
+    /// workspace_setup → spawning (subprocess) or running (dispatch).
+    /// Spawns NullClaw and transitions to spawning for async health check.
     fn driveSpawning(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) void {
         if (std.mem.eql(u8, task.execution_mode, "dispatch")) {
             task.state = .running;
@@ -667,29 +672,44 @@ pub const Tracker = struct {
         const event_data = std.fmt.allocPrint(tick_alloc, "{{\"port\":{d}}}", .{port}) catch "{}";
         _ = client.postEvent(task.run_id, "agent_started", event_data, task.lease_token) catch {};
 
-        // Wait for health check
-        const healthy = subprocess_mod.waitForHealth(
-            tick_alloc,
-            port,
-            self.cfg.subprocess.health_check_retries,
-        );
+        // Transition to spawning — health check will be done non-blocking in driveHealthCheck
+        task.state = .spawning;
+        task.health_retries = 0;
+        task.last_activity_ms = ids.nowMs();
+    }
 
-        if (!healthy) {
-            log.err("NullClaw health check failed for task {s} on port {d}", .{ task.task_id, port });
-            if (task.subprocess) |*sub| {
-                if (sub.child) |*ch| {
-                    subprocess_mod.killSubprocess(ch);
-                }
-            }
-            self.releasePort(port);
-            task.subprocess = null;
+    /// spawning: non-blocking health check, one attempt per tick.
+    /// After max retries → failed. On success → running.
+    fn driveHealthCheck(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) void {
+        const sub = &(task.subprocess orelse {
             task.state = .failed;
+            return;
+        });
+
+        // Try one health check attempt (non-blocking, no retries)
+        const healthy = subprocess_mod.waitForHealth(tick_alloc, sub.port, 1);
+
+        if (healthy) {
+            log.info("NullClaw healthy for task {s} on port {d}", .{ task.task_id, sub.port });
+            task.state = .running;
+            task.last_activity_ms = ids.nowMs();
             return;
         }
 
-        log.info("NullClaw healthy for task {s} on port {d}", .{ task.task_id, port });
-        task.state = .running;
-        task.last_activity_ms = ids.nowMs();
+        task.health_retries += 1;
+        if (task.health_retries >= self.cfg.subprocess.health_check_retries) {
+            log.err("NullClaw health check failed for task {s} on port {d} after {d} retries", .{
+                task.task_id,
+                sub.port,
+                task.health_retries,
+            });
+            if (sub.child) |*ch| {
+                subprocess_mod.killSubprocess(ch);
+            }
+            self.releasePort(sub.port);
+            task.subprocess = null;
+            task.state = .failed;
+        }
     }
 
     /// running: send prompt, check NullTickets state after response
@@ -768,9 +788,8 @@ pub const Tracker = struct {
             }
         }
 
-        if (response) |resp| {
-            sub.last_output = resp;
-        }
+        // response (if any) is allocated with tick_alloc and freed at end of tick — do not store
+        _ = response;
 
         if (task.current_turn >= task.max_turns) {
             log.warn("task {s} reached max_turns ({d}), failing", .{ task.task_id, task.max_turns });
@@ -806,8 +825,9 @@ pub const Tracker = struct {
             return;
         };
 
-        log.info("dispatch task {s}: rendered prompt ({d} bytes)", .{ task.task_id, rendered.len });
-        task.state = .completing;
+        // TODO: Wire actual dispatch.zig call using workflow.dispatch.worker_tags and protocol
+        log.warn("dispatch execution not yet implemented for task {s} ({d} bytes rendered), failing", .{ task.task_id, rendered.len });
+        task.state = .failed;
     }
 
     /// completing: run after_run hook, call transition, kill subprocess
@@ -853,7 +873,7 @@ pub const Tracker = struct {
         self.state.mutex.lock();
         self.state.completed_count += 1;
         self.state.mutex.unlock();
-        task.state = .cooldown;
+        task.state = .removing;
     }
 
     /// failed: call failRun, run after_run hook, kill subprocess, remove workspace, mark for removal
@@ -883,7 +903,7 @@ pub const Tracker = struct {
         self.state.mutex.lock();
         self.state.failed_count += 1;
         self.state.mutex.unlock();
-        task.state = .cooldown;
+        task.state = .removing;
     }
 
     /// Kill all running subprocesses (called during shutdown).

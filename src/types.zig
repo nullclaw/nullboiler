@@ -116,6 +116,7 @@ pub const TrackerTaskState = enum {
     failed,
     stalled,
     cooldown,
+    removing,
 
     pub fn toString(self: TrackerTaskState) []const u8 {
         return @tagName(self);
