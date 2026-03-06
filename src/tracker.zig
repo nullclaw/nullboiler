@@ -225,7 +225,7 @@ pub const Tracker = struct {
         var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
         defer to_remove.deinit(tick_alloc);
 
-        for (self.state.running.keys(), self.state.running.values()) |key, task| {
+        for (self.state.running.keys(), self.state.running.values()) |key, *task| {
             var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
             const ok = client.heartbeat(task.lease_id, task.lease_token) catch false;
             if (!ok) {
@@ -254,7 +254,7 @@ pub const Tracker = struct {
         var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
         defer to_remove.deinit(tick_alloc);
 
-        for (self.state.running.keys(), self.state.running.values()) |key, task| {
+        for (self.state.running.keys(), self.state.running.values()) |key, *task| {
             if (task.subprocess) |*sub| {
                 if (subprocess_mod.isStalled(sub, @as(i64, @intCast(self.cfg.stall_timeout_ms)))) {
                     log.warn("task {s} stalled (no activity for {d}ms), failing", .{
@@ -432,7 +432,7 @@ pub const Tracker = struct {
 
     /// Kill all running subprocesses (called during shutdown).
     fn shutdownSubprocesses(self: *Tracker) void {
-        for (self.state.running.values()) |task| {
+        for (self.state.running.values()) |*task| {
             if (task.subprocess) |*sub| {
                 if (sub.child) |*child| {
                     log.info("killing subprocess for task {s}", .{task.task_id});

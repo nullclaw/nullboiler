@@ -10,6 +10,8 @@ const worker_protocol = @import("worker_protocol.zig");
 const async_dispatch = @import("async_dispatch.zig");
 const redis_client = @import("redis_client.zig");
 const mqtt_client = @import("mqtt_client.zig");
+const tracker_mod = @import("tracker.zig");
+const workflow_loader = @import("workflow_loader.zig");
 const c = @cImport({
     @cInclude("signal.h");
 });
@@ -270,6 +272,35 @@ pub fn main() !void {
         }
     }
 
+    // Start Tracker thread for pull-mode (conditionally)
+    var tracker_instance: ?tracker_mod.Tracker = null;
+    var tracker_thread: ?std.Thread = null;
+
+    if (cfg.tracker) |tracker_cfg| {
+        if (tracker_cfg.url != null) {
+            const workflows = workflow_loader.loadWorkflows(cfg_arena.allocator(), tracker_cfg.workflows_dir);
+
+            tracker_instance = tracker_mod.Tracker.init(
+                allocator,
+                tracker_cfg,
+                workflows,
+                &shutdown_requested,
+            );
+
+            tracker_thread = std.Thread.spawn(.{}, tracker_mod.Tracker.run, .{&tracker_instance.?}) catch |err| blk: {
+                std.debug.print("warning: failed to start tracker thread: {}\n", .{err});
+                break :blk null;
+            };
+
+            if (tracker_thread != null) {
+                std.debug.print("tracker started (poll_interval={d}ms, workflows_dir={s})\n", .{
+                    tracker_cfg.poll_interval_ms,
+                    tracker_cfg.workflows_dir,
+                });
+            }
+        }
+    }
+
     std.debug.print("listening on http://{s}:{d}\n", .{ bind_host, port });
     std.debug.print("engine started (poll_interval={d}ms)\n", .{poll_ms});
 
@@ -284,6 +315,13 @@ pub fn main() !void {
         if (redis_listener_thread) |t| {
             t.join();
             std.debug.print("redis listener stopped\n", .{});
+        }
+        if (tracker_thread) |t| {
+            t.join();
+            std.debug.print("tracker stopped\n", .{});
+        }
+        if (tracker_instance) |*ti| {
+            ti.deinit();
         }
     }
 
@@ -333,6 +371,8 @@ pub fn main() !void {
             .metrics = &metrics,
             .drain_mode = &drain_mode,
             .strategies = &strategy_map,
+            .tracker_state = if (tracker_instance) |*ti| &ti.state else null,
+            .tracker_cfg = if (cfg.tracker) |*tc| tc else null,
         };
         const response = api.handleRequest(&ctx, request.method, request.target, request.body);
 
