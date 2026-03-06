@@ -24,6 +24,45 @@ pub const EngineConfig = struct {
     shutdown_grace_ms: u32 = 30000,
 };
 
+pub const ConcurrencyConfig = struct {
+    max_concurrent_tasks: u32 = 10,
+    per_pipeline: ?std.json.Value = null,
+    per_role: ?std.json.Value = null,
+};
+
+pub const WorkspaceHooksConfig = struct {
+    after_create: ?[]const u8 = null,
+    before_run: ?[]const u8 = null,
+    after_run: ?[]const u8 = null,
+    before_remove: ?[]const u8 = null,
+};
+
+pub const WorkspaceConfig = struct {
+    root: []const u8 = "/tmp/nullboiler-workspaces",
+    hooks: WorkspaceHooksConfig = .{},
+    hook_timeout_ms: u32 = 30000,
+};
+
+pub const SubprocessDefaults = struct {
+    command: []const u8 = "nullclaw",
+    max_turns: u32 = 20,
+    turn_timeout_ms: u32 = 600000,
+};
+
+pub const TrackerConfig = struct {
+    url: ?[]const u8 = null,
+    api_token: ?[]const u8 = null,
+    poll_interval_ms: u32 = 10000,
+    agent_id: []const u8 = "nullboiler",
+    concurrency: ConcurrencyConfig = .{},
+    workspace: WorkspaceConfig = .{},
+    subprocess: SubprocessDefaults = .{},
+    stall_timeout_ms: u32 = 300000,
+    lease_ttl_ms: u32 = 60000,
+    heartbeat_interval_ms: u32 = 30000,
+    workflows_dir: []const u8 = "workflows",
+};
+
 pub const Config = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 8080,
@@ -32,6 +71,7 @@ pub const Config = struct {
     strategies_dir: []const u8 = "strategies",
     workers: []const WorkerConfig = &.{},
     engine: EngineConfig = .{},
+    tracker: ?TrackerConfig = null,
 };
 
 /// Load configuration from a JSON file. If the file does not exist,
@@ -114,4 +154,20 @@ test "loadFromFile reads configured host and worker URL from JSON file" {
     try std.testing.expectEqualStrings("cfg.db", cfg.db);
     try std.testing.expectEqual(@as(usize, 1), cfg.workers.len);
     try std.testing.expectEqualStrings("http://localhost:3000/webhook", cfg.workers[0].url);
+}
+
+test "TrackerConfig defaults" {
+    const tc = TrackerConfig{};
+    try std.testing.expectEqual(@as(?[]const u8, null), tc.url);
+    try std.testing.expectEqual(@as(u32, 10000), tc.poll_interval_ms);
+    try std.testing.expectEqual(@as(u32, 10), tc.concurrency.max_concurrent_tasks);
+    try std.testing.expectEqual(@as(u32, 300000), tc.stall_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 60000), tc.lease_ttl_ms);
+    try std.testing.expectEqual(@as(u32, 30000), tc.heartbeat_interval_ms);
+    try std.testing.expectEqualStrings("workflows", tc.workflows_dir);
+}
+
+test "Config with tracker null by default" {
+    const cfg = Config{};
+    try std.testing.expectEqual(@as(?TrackerConfig, null), cfg.tracker);
 }
