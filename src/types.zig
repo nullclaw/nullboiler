@@ -106,6 +106,28 @@ pub const WorkerSource = enum {
     }
 };
 
+pub const TrackerTaskState = enum {
+    claiming,
+    workspace_setup,
+    running,
+    completing,
+    completed,
+    failed,
+    stalled,
+    cooldown,
+
+    pub fn toString(self: TrackerTaskState) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn fromString(s: []const u8) ?TrackerTaskState {
+        inline for (@typeInfo(TrackerTaskState).@"enum".fields) |f| {
+            if (std.mem.eql(u8, s, f.name)) return @enumFromInt(f.value);
+        }
+        return null;
+    }
+};
+
 // ── DB Row Types ───────────────────────────────────────────────────────
 
 pub const WorkerRow = struct {
@@ -249,6 +271,12 @@ test "WorkerStatus round-trip" {
 
 test "WorkerSource round-trip" {
     try std.testing.expectEqual(WorkerSource.registered, WorkerSource.fromString("registered").?);
+}
+
+test "TrackerTaskState round-trip" {
+    const s = TrackerTaskState.running;
+    try std.testing.expectEqualStrings("running", s.toString());
+    try std.testing.expectEqual(TrackerTaskState.running, TrackerTaskState.fromString("running").?);
 }
 
 test "fromString returns null for unknown" {
