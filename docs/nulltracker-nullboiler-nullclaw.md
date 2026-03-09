@@ -1,26 +1,32 @@
-# nullTracker + nullBoiler + nullClaw
+# NullTickets + NullBoiler + NullClaw
+
+This guide keeps its historical filename, but the tracker is now `NullTickets`.
 
 This setup gives you:
 
-1. `nullTracker` as durable queue/state machine (`claim`, `lease`, `transition`).
+1. `NullTickets` as durable queue/state machine (`claim`, `lease`, `transition`).
 2. `nullBoiler` as workflow orchestrator.
 3. `nullClaw` as execution workers behind `nullBoiler`.
 
 ## How it works
 
-1. Bridge executor claims a task from `nullTracker` by `agent_role`.
-2. Bridge creates a `nullBoiler` run with one `task` step.
+1. `nullBoiler` polls `NullTickets` directly by `agent_role`.
+2. `nullBoiler` claims a task lease and materializes a run from `tracker-workflow.json`.
 3. `nullBoiler` dispatches to `nullClaw` workers by `worker_tags`.
-4. Bridge polls run status and writes events/artifact back to `nullTracker`.
-5. On success bridge calls `POST /runs/{id}/transition`, otherwise `POST /runs/{id}/fail`.
+4. `nullBoiler` heartbeats the lease, records artifacts, and transitions/fails the tracker run natively.
+
+Legacy note:
+
+1. `tools/nulltracker_nullboiler_executor.py` still exists as a bridge for older stacks.
+2. New installations should prefer native `tracker` config in `nullboiler`.
 
 ## Prerequisites
 
 Start services:
 
 ```bash
-# nulltracker
-zig-out/bin/nulltracker --port 7700 --db nulltracker.db
+# nulltickets
+zig-out/bin/nulltickets --port 7700 --db nulltickets.db
 
 # nullboiler
 zig-out/bin/nullboiler --port 8080 --db nullboiler.db --config config.json
@@ -34,8 +40,8 @@ nullclaw gateway --port 3000
 For the containerized stack, use root compose profiles:
 
 ```bash
-# nullboiler + nullclaw + nulltracker + bridge executor
-docker compose --profile nulltracker up -d
+# nullboiler + nullclaw + nulltickets
+docker compose --profile nulltickets up -d
 ```
 
 Detailed compose guide:
@@ -60,41 +66,27 @@ Configure `nullBoiler` workers to point at `nullClaw`:
 
 Important:
 
-1. `nullTracker` task `agent_role` must match bridge `--agent-role`.
-2. Bridge `--worker-tags` must match `nullBoiler` worker tags.
-
-## Run bridge executor
-
-```bash
-python3 tools/nulltracker_nullboiler_executor.py \
-  --tracker-base http://127.0.0.1:7700 \
-  --boiler-base http://127.0.0.1:8080 \
-  --agent-id dev-1 \
-  --agent-role llm-dev \
-  --worker-tags llm-dev
-```
+1. `NullTickets` task `agent_role` must match `nullboiler.tracker.agent_role`.
+2. `nullBoiler` worker tags must match the workers able to execute the claimed role.
+3. `tracker.workflow_path` should point at a workflow template available from the `nullboiler` process.
 
 ## Environment variables
 
-Supported equivalents:
+Recommended native equivalents via `config.json`:
 
-1. `TRACKER_BASE`
-2. `NULLBOILER_BASE`
-3. `NULLBOILER_TOKEN` (optional bearer token for protected nullBoiler API)
-4. `AGENT_ID`
-5. `AGENT_ROLE`
-6. `NULLBOILER_WORKER_TAGS` (comma-separated)
-7. `SUCCESS_TRIGGER` (optional fixed transition trigger)
-8. `LEASE_TTL_MS`
-9. `HEARTBEAT_INTERVAL_SEC`
-10. `POLL_INTERVAL_SEC`
-11. `CLAIM_SLEEP_SEC`
-12. `HTTP_TIMEOUT_SEC`
-13. `WORK_DIR`
-14. `MAX_TASKS` (0 means infinite loop)
+1. `tracker.url`
+2. `tracker.api_token`
+3. `tracker.agent_id`
+4. `tracker.agent_role`
+5. `tracker.workflow_path`
+6. `tracker.success_trigger`
+7. `tracker.max_concurrent_tasks`
+8. `tracker.lease_ttl_ms`
+9. `tracker.heartbeat_interval_ms`
+10. `tracker.poll_interval_ms`
 
 ## Notes
 
-1. Bridge writes markdown reports to `WORK_DIR` and attaches them as `nullboiler_report` artifacts in `nullTracker`.
-2. If no transition is available after successful execution, bridge marks tracker run as failed to avoid stuck `running` runs.
-3. This bridge is intentionally simple: one tracker claim maps to one `nullBoiler` run with one `task` step.
+1. Native tracker mode exposes status in `GET /tracker/status`, `GET /tracker/tasks`, and `GET /tracker/stats`.
+2. `nullhub` can auto-link a local `nulltickets` instance to `nullboiler` and write `tracker-workflow.json` for you.
+3. The legacy bridge is still available for compatibility, but it is no longer the recommended path.

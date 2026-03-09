@@ -16,6 +16,7 @@ services:
     volumes:
       - nullboiler-data:/nullboiler-data
       - ./docker/nullboiler.config.json:/nullboiler-data/config.json:ro
+      - ./docker/tracker-workflow.json:/nullboiler-data/tracker-workflow.json:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
@@ -24,7 +25,7 @@ services:
       retries: 3
 
   nullclaw:
-    profiles: ["nullclaw", "nulltracker"]
+    profiles: ["nullclaw", "nulltickets", "nulltracker"]
     build:
       context: ./reference/nullclaw
     image: nullclaw:latest
@@ -40,15 +41,15 @@ services:
       timeout: 5s
       retries: 3
 
-  nulltracker:
-    profiles: ["nulltracker"]
+  nulltickets:
+    profiles: ["nulltickets", "nulltracker"]
     build:
-      context: ./reference/nulltracker
-    image: nulltracker:latest
+      context: ./reference/nulltickets
+    image: nulltickets:latest
     ports:
       - "7700:7700"
     volumes:
-      - nulltracker-data:/nulltracker-data
+      - nulltickets-data:/nulltickets-data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
@@ -56,36 +57,7 @@ services:
       timeout: 5s
       retries: 3
 
-  nulltracker-executor:
-    profiles: ["nulltracker"]
-    image: python:3.12-alpine
-    depends_on:
-      nullboiler:
-        condition: service_healthy
-      nullclaw:
-        condition: service_healthy
-      nulltracker:
-        condition: service_healthy
-    working_dir: /workspace
-    command:
-      - python3
-      - tools/nulltracker_nullboiler_executor.py
-    environment:
-      TRACKER_BASE: http://nulltracker:7700
-      NULLBOILER_BASE: http://nullboiler:8080
-      AGENT_ID: docker-dev-1
-      AGENT_ROLE: llm-dev
-      NULLBOILER_WORKER_TAGS: llm-dev
-      NULLBOILER_TOKEN: ${NULLBOILER_TOKEN:-}
-      WORK_DIR: /work/reports
-      MAX_TASKS: "0"
-    volumes:
-      - .:/workspace:ro
-      - nulltracker-executor-data:/work
-    restart: unless-stopped
-
 volumes:
   nullboiler-data:
   nullclaw-data:
-  nulltracker-data:
-  nulltracker-executor-data:
+  nulltickets-data:

@@ -11,10 +11,10 @@ This directory contains integration guides for different deployment modes.
    `nullboiler + (nullclaw | zeroclaw | openclaw | picoclaw bridge)`
    See: `multi-bot-integration.md`
 3. Full async loop with durable task queue:
-   `nulltracker + nullboiler + nullclaw`
+   `nulltickets + nullboiler + nullclaw`
    See: `nulltracker-nullboiler-nullclaw.md`
 4. Containerized local stack with profiles:
-   `docker compose + nullboiler + nullclaw + nulltracker`
+   `docker compose + nullboiler + nullclaw + nulltickets`
    See: `docker-compose-nulltracker-nullclaw.md`
 
 ## Document map
@@ -30,4 +30,5 @@ This directory contains integration guides for different deployment modes.
 
 ## Design principle
 
-NullBoiler stays orchestration-focused. Execution logic belongs to workers (for example NullClaw), and durable queue/state logic belongs to nullTracker. You can run each component independently or combine them per workload requirements.
+NullBoiler stays orchestration-focused. Execution logic belongs to workers (for example NullClaw), and durable queue/state logic belongs to NullTickets. You can run each component independently or combine them per workload requirements.
+Native pull-mode now targets NullTickets directly. Legacy filenames in this folder still mention `nulltracker`, but the active tracker is `nulltickets`.

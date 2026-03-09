@@ -129,6 +129,17 @@ pub const Store = struct {
             }
             return error.MigrationFailed;
         }
+
+        // Migration 003 — tracker integration state
+        const sql_003 = @embedFile("migrations/003_tracker.sql");
+        prc = c.sqlite3_exec(self.db, sql_003.ptr, null, null, &err_msg);
+        if (prc != c.SQLITE_OK) {
+            if (err_msg) |msg| {
+                log.err("migration 003 failed (rc={d}): {s}", .{ prc, std.mem.span(msg) });
+                c.sqlite3_free(msg);
+            }
+            return error.MigrationFailed;
+        }
     }
 
     pub fn beginTransaction(self: *Self) !void {
@@ -904,6 +915,173 @@ pub const Store = struct {
             });
         }
         return list.toOwnedSlice(allocator);
+    }
+
+    // ── Tracker Runs ─────────────────────────────────────────────────
+
+    pub fn upsertTrackerRun(
+        self: *Self,
+        task_id: []const u8,
+        tracker_run_id: []const u8,
+        boiler_run_id: []const u8,
+        lease_id: []const u8,
+        lease_token: []const u8,
+        pipeline_id: []const u8,
+        agent_role: []const u8,
+        task_title: []const u8,
+        task_stage: []const u8,
+        task_version: i64,
+        success_trigger: ?[]const u8,
+        artifact_kind: []const u8,
+        state: []const u8,
+        claimed_at_ms: i64,
+        last_heartbeat_ms: ?i64,
+        lease_expires_at_ms: ?i64,
+        completed_at_ms: ?i64,
+        last_error_text: ?[]const u8,
+    ) !void {
+        const sql =
+            "INSERT INTO tracker_runs (" ++
+            "task_id, tracker_run_id, boiler_run_id, lease_id, lease_token, pipeline_id, agent_role, task_title, task_stage, task_version, success_trigger, artifact_kind, state, claimed_at_ms, last_heartbeat_ms, lease_expires_at_ms, completed_at_ms, last_error_text" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " ++
+            "ON CONFLICT(task_id) DO UPDATE SET " ++
+            "tracker_run_id = excluded.tracker_run_id, boiler_run_id = excluded.boiler_run_id, lease_id = excluded.lease_id, lease_token = excluded.lease_token, " ++
+            "pipeline_id = excluded.pipeline_id, agent_role = excluded.agent_role, task_title = excluded.task_title, task_stage = excluded.task_stage, task_version = excluded.task_version, " ++
+            "success_trigger = excluded.success_trigger, artifact_kind = excluded.artifact_kind, state = excluded.state, claimed_at_ms = excluded.claimed_at_ms, " ++
+            "last_heartbeat_ms = excluded.last_heartbeat_ms, lease_expires_at_ms = excluded.lease_expires_at_ms, completed_at_ms = excluded.completed_at_ms, last_error_text = excluded.last_error_text";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, task_id.ptr, @intCast(task_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, tracker_run_id.ptr, @intCast(tracker_run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, boiler_run_id.ptr, @intCast(boiler_run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, lease_id.ptr, @intCast(lease_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 5, lease_token.ptr, @intCast(lease_token.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 6, pipeline_id.ptr, @intCast(pipeline_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 7, agent_role.ptr, @intCast(agent_role.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 8, task_title.ptr, @intCast(task_title.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 9, task_stage.ptr, @intCast(task_stage.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 10, task_version);
+        bindTextOpt(stmt, 11, success_trigger);
+        _ = c.sqlite3_bind_text(stmt, 12, artifact_kind.ptr, @intCast(artifact_kind.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 13, state.ptr, @intCast(state.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 14, claimed_at_ms);
+        bindIntOpt(stmt, 15, last_heartbeat_ms);
+        bindIntOpt(stmt, 16, lease_expires_at_ms);
+        bindIntOpt(stmt, 17, completed_at_ms);
+        bindTextOpt(stmt, 18, last_error_text);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getTrackerRunByTaskId(self: *Self, allocator: std.mem.Allocator, task_id: []const u8) !?types.TrackerRunRow {
+        const sql = "SELECT task_id, tracker_run_id, boiler_run_id, lease_id, lease_token, pipeline_id, agent_role, task_title, task_stage, task_version, success_trigger, artifact_kind, state, claimed_at_ms, last_heartbeat_ms, lease_expires_at_ms, completed_at_ms, last_error_text FROM tracker_runs WHERE task_id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, task_id.ptr, @intCast(task_id.len), SQLITE_STATIC);
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+        return try readTrackerRunRow(allocator, stmt);
+    }
+
+    pub fn getTrackerRunByBoilerRunId(self: *Self, allocator: std.mem.Allocator, boiler_run_id: []const u8) !?types.TrackerRunRow {
+        const sql = "SELECT task_id, tracker_run_id, boiler_run_id, lease_id, lease_token, pipeline_id, agent_role, task_title, task_stage, task_version, success_trigger, artifact_kind, state, claimed_at_ms, last_heartbeat_ms, lease_expires_at_ms, completed_at_ms, last_error_text FROM tracker_runs WHERE boiler_run_id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, boiler_run_id.ptr, @intCast(boiler_run_id.len), SQLITE_STATIC);
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+        return try readTrackerRunRow(allocator, stmt);
+    }
+
+    pub fn listTrackerRuns(self: *Self, allocator: std.mem.Allocator, state_filter: ?[]const u8, limit: ?i64) ![]types.TrackerRunRow {
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (state_filter) |state| {
+            const sql = if (limit != null)
+                "SELECT task_id, tracker_run_id, boiler_run_id, lease_id, lease_token, pipeline_id, agent_role, task_title, task_stage, task_version, success_trigger, artifact_kind, state, claimed_at_ms, last_heartbeat_ms, lease_expires_at_ms, completed_at_ms, last_error_text FROM tracker_runs WHERE state = ? ORDER BY claimed_at_ms DESC LIMIT ?"
+            else
+                "SELECT task_id, tracker_run_id, boiler_run_id, lease_id, lease_token, pipeline_id, agent_role, task_title, task_stage, task_version, success_trigger, artifact_kind, state, claimed_at_ms, last_heartbeat_ms, lease_expires_at_ms, completed_at_ms, last_error_text FROM tracker_runs WHERE state = ? ORDER BY claimed_at_ms DESC";
+            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+                return error.SqlitePrepareFailed;
+            }
+            _ = c.sqlite3_bind_text(stmt, 1, state.ptr, @intCast(state.len), SQLITE_STATIC);
+            if (limit) |l| _ = c.sqlite3_bind_int64(stmt, 2, l);
+        } else {
+            const sql = if (limit != null)
+                "SELECT task_id, tracker_run_id, boiler_run_id, lease_id, lease_token, pipeline_id, agent_role, task_title, task_stage, task_version, success_trigger, artifact_kind, state, claimed_at_ms, last_heartbeat_ms, lease_expires_at_ms, completed_at_ms, last_error_text FROM tracker_runs ORDER BY claimed_at_ms DESC LIMIT ?"
+            else
+                "SELECT task_id, tracker_run_id, boiler_run_id, lease_id, lease_token, pipeline_id, agent_role, task_title, task_stage, task_version, success_trigger, artifact_kind, state, claimed_at_ms, last_heartbeat_ms, lease_expires_at_ms, completed_at_ms, last_error_text FROM tracker_runs ORDER BY claimed_at_ms DESC";
+            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+                return error.SqlitePrepareFailed;
+            }
+            if (limit) |l| _ = c.sqlite3_bind_int64(stmt, 1, l);
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var list: std.ArrayListUnmanaged(types.TrackerRunRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(allocator, try readTrackerRunRow(allocator, stmt));
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    pub fn countTrackerRunsByState(self: *Self, state: []const u8) !i64 {
+        const sql = "SELECT COUNT(*) FROM tracker_runs WHERE state = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, state.ptr, @intCast(state.len), SQLITE_STATIC);
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return 0;
+        return colInt(stmt, 0);
+    }
+
+    pub fn countTrackerRuns(self: *Self) !i64 {
+        const sql = "SELECT COUNT(*) FROM tracker_runs";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return 0;
+        return colInt(stmt, 0);
+    }
+
+    fn readTrackerRunRow(allocator: std.mem.Allocator, stmt: ?*c.sqlite3_stmt) !types.TrackerRunRow {
+        return .{
+            .task_id = try allocStr(allocator, stmt, 0),
+            .tracker_run_id = try allocStr(allocator, stmt, 1),
+            .boiler_run_id = try allocStr(allocator, stmt, 2),
+            .lease_id = try allocStr(allocator, stmt, 3),
+            .lease_token = try allocStr(allocator, stmt, 4),
+            .pipeline_id = try allocStr(allocator, stmt, 5),
+            .agent_role = try allocStr(allocator, stmt, 6),
+            .task_title = try allocStr(allocator, stmt, 7),
+            .task_stage = try allocStr(allocator, stmt, 8),
+            .task_version = colInt(stmt, 9),
+            .success_trigger = try allocStrOpt(allocator, stmt, 10),
+            .artifact_kind = try allocStr(allocator, stmt, 11),
+            .state = try allocStr(allocator, stmt, 12),
+            .claimed_at_ms = colInt(stmt, 13),
+            .last_heartbeat_ms = colIntOpt(stmt, 14),
+            .lease_expires_at_ms = colIntOpt(stmt, 15),
+            .completed_at_ms = colIntOpt(stmt, 16),
+            .last_error_text = try allocStrOpt(allocator, stmt, 17),
+        };
     }
 
     // ── Cycle State CRUD ─────────────────────────────────────────────

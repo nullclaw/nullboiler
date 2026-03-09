@@ -3,6 +3,7 @@
 ///
 /// Supported expressions:
 ///   - `{{input.X}}`          -- look up key X in the workflow input JSON
+///   - `{{input.X.Y}}`        -- nested object lookups inside workflow input JSON
 ///   - `{{steps.ID.output}}`  -- output of a single completed step
 ///   - `{{steps.ID.outputs}}` -- JSON array of outputs from map/fan_out child steps
 ///   - `{{item}}`             -- current item string for map iterations
@@ -138,9 +139,16 @@ fn resolveInputField(allocator: std.mem.Allocator, input_json: []const u8, field
     const root = parsed.value;
     if (root != .object) return error.InvalidInputJson;
 
-    const val = root.object.get(field_name) orelse return error.InputFieldNotFound;
+    var current = root;
+    var parts = std.mem.splitScalar(u8, field_name, '.');
+    while (parts.next()) |segment| {
+        current = switch (current) {
+            .object => |obj| obj.get(segment) orelse return error.InputFieldNotFound,
+            else => return error.InputFieldNotFound,
+        };
+    }
 
-    return jsonValueToString(allocator, val);
+    return jsonValueToString(allocator, current);
 }
 
 fn resolveStepRef(allocator: std.mem.Allocator, rest: []const u8, step_outputs: []const Context.StepOutput) RenderError![]const u8 {
@@ -277,6 +285,17 @@ test "render input variable" {
     });
     defer allocator.free(result);
     try std.testing.expectEqualStrings("Hello World", result);
+}
+
+test "render nested input variable" {
+    const allocator = std.testing.allocator;
+    const result = try render(allocator, "Repo {{input.task.metadata.repo}}", .{
+        .input_json = "{\"task\":{\"metadata\":{\"repo\":\"nullboiler\"}}}",
+        .step_outputs = &.{},
+        .item = null,
+    });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Repo nullboiler", result);
 }
 
 test "render step output" {

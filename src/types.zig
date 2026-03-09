@@ -217,6 +217,27 @@ pub const ChatMessageRow = struct {
     ts_ms: i64,
 };
 
+pub const TrackerRunRow = struct {
+    task_id: []const u8,
+    tracker_run_id: []const u8,
+    boiler_run_id: []const u8,
+    lease_id: []const u8,
+    lease_token: []const u8,
+    pipeline_id: []const u8,
+    agent_role: []const u8,
+    task_title: []const u8,
+    task_stage: []const u8,
+    task_version: i64,
+    success_trigger: ?[]const u8,
+    artifact_kind: []const u8,
+    state: []const u8,
+    claimed_at_ms: i64,
+    last_heartbeat_ms: ?i64,
+    lease_expires_at_ms: ?i64,
+    completed_at_ms: ?i64,
+    last_error_text: ?[]const u8,
+};
+
 pub const SagaStateRow = struct {
     run_id: []const u8,
     saga_step_id: []const u8,

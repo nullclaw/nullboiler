@@ -1,0 +1,11 @@
+{
+  "success_trigger": "complete",
+  "artifact_kind": "nullboiler_run",
+  "steps": [
+    {
+      "id": "task",
+      "type": "task",
+      "prompt_template": "Task {{input.task.id}}: {{input.task.title}}\n\n{{input.task.description}}\n\nMetadata:\n{{input.task.metadata}}"
+    }
+  ]
+}

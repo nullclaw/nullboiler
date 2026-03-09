@@ -29,10 +29,19 @@ pub fn run() !void {
         \\  "wizard": { "steps": [
         \\    { "id": "port", "title": "API Port", "type": "number", "required": true, "options": [] },
         \\    { "id": "api_token", "title": "API Token", "description": "Optional bearer token for API auth", "type": "secret", "required": false, "options": [] },
-        \\    { "id": "db_path", "title": "Database Path", "type": "text", "required": true, "options": [] }
+        \\    { "id": "db_path", "title": "Database Path", "type": "text", "required": true, "options": [] },
+        \\    { "id": "tracker_enabled", "title": "Enable NullTickets Pull Mode", "description": "Let NullBoiler claim work directly from NullTickets", "type": "toggle", "required": false, "options": [] },
+        \\    { "id": "tracker_url", "title": "NullTickets URL", "type": "text", "required": true, "default_value": "http://127.0.0.1:7700", "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
+        \\    { "id": "tracker_api_token", "title": "NullTickets API Token", "description": "Optional bearer token for NullTickets auth", "type": "secret", "required": false, "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
+        \\    { "id": "tracker_agent_role", "title": "Agent Role", "description": "NullTickets role to claim", "type": "text", "required": true, "default_value": "coder", "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
+        \\    { "id": "tracker_agent_id", "title": "Agent ID", "description": "Stable worker identity in NullTickets", "type": "text", "required": false, "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
+        \\    { "id": "tracker_success_trigger", "title": "Success Trigger", "description": "Optional transition trigger after a successful run", "type": "text", "required": false, "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
+        \\    { "id": "tracker_max_concurrent_tasks", "title": "Max Concurrent Tasks", "type": "number", "required": false, "default_value": "1", "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] }
         \\  ] },
         \\  "depends_on": [],
-        \\  "connects_to": []
+        \\  "connects_to": [
+        \\    { "component": "nulltickets", "role": "tracker", "description": "Claims work from NullTickets" }
+        \\  ]
         \\}
     ;
     const stdout = std.fs.File.stdout();

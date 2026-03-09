@@ -1,6 +1,6 @@
 # Single NullClaw Integration
 
-Use this mode when you want `nullboiler` to orchestrate tasks through one `nullclaw` worker setup (without `nulltracker`).
+Use this mode when you want `nullboiler` to orchestrate tasks through one `nullclaw` worker setup (without `nulltickets`).
 
 ## 1) Configure NullClaw gateway
 

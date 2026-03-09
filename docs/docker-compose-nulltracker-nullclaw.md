@@ -1,6 +1,8 @@
-# Docker Compose: nullBoiler + nullClaw + nullTracker
+# Docker Compose: nullBoiler + nullClaw + NullTickets
 
-This guide describes how to run `nullboiler`, `nullclaw`, and `nulltracker` together with the root `docker-compose.yml`.
+This guide keeps its historical filename, but the tracker service is now `nulltickets`.
+
+This guide describes how to run `nullboiler`, `nullclaw`, and `nulltickets` together with the root `docker-compose.yml`.
 
 ## 1. Prerequisites
 
@@ -8,7 +10,7 @@ This guide describes how to run `nullboiler`, `nullclaw`, and `nulltracker` toge
 
 ```bash
 git clone https://github.com/nullclaw/nullclaw reference/nullclaw
-git clone https://github.com/nullclaw/nulltracker reference/nulltracker
+git clone https://github.com/nullclaw/nulltickets reference/nulltickets
 ```
 
 2. Verify token alignment between:
@@ -35,18 +37,18 @@ docker compose up -d nullboiler
 docker compose --profile nullclaw up -d
 ```
 
-3. Full async stack (`nullboiler + nullclaw + nulltracker + executor`):
+3. Full async stack (`nullboiler + nullclaw + nulltickets`):
 
 ```bash
-docker compose --profile nulltracker up -d
+docker compose --profile nulltickets up -d
 ```
 
 ## 3. Service roles in full stack
 
 1. `nullboiler` listens on `:8080` and orchestrates workflows.
 2. `nullclaw` listens on `:3000` and executes worker calls from `nullboiler`.
-3. `nulltracker` listens on `:7700` and stores tasks/runs/leases.
-4. `nulltracker-executor` claims tasks from `nulltracker`, creates runs in `nullboiler`, and writes status/events back.
+3. `nulltickets` listens on `:7700` and stores tasks/runs/leases.
+4. `nullboiler` claims work from `nulltickets` natively via `tracker` config.
 
 ## 4. Health checks
 
@@ -54,7 +56,7 @@ docker compose --profile nulltracker up -d
 curl -fsS http://127.0.0.1:8080/health
 curl -fsS http://127.0.0.1:3000/health
 curl -fsS http://127.0.0.1:7700/health
-docker compose logs -f nulltracker-executor
+curl -fsS http://127.0.0.1:8080/tracker/status
 ```
 
 ## 5. Minimal task flow test (full stack)
@@ -96,7 +98,7 @@ curl -sS -X POST http://127.0.0.1:7700/tasks \
 3. Watch execution:
 
 ```bash
-docker compose logs -f nulltracker-executor
+curl -sS http://127.0.0.1:8080/tracker/status | jq
 ```
 
 ## 6. Stop stack
