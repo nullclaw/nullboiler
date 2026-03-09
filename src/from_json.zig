@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
@@ -33,6 +34,17 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const tracker_agent_id = getString(obj, "tracker_agent_id") orelse getString(obj, "instance_name") orelse "nullboiler";
     const tracker_success_trigger = getString(obj, "tracker_success_trigger") orelse "complete";
     const tracker_max_concurrent_tasks = getU32(obj, "tracker_max_concurrent_tasks") orelse 1;
+    const tracker_poll_interval_ms = getU32(obj, "tracker_poll_interval_ms") orelse 10000;
+    const tracker_lease_ttl_ms = getU32(obj, "tracker_lease_ttl_ms") orelse 60000;
+    const tracker_heartbeat_interval_ms = getU32(obj, "tracker_heartbeat_interval_ms") orelse 30000;
+    const tracker_stall_timeout_ms = getU32(obj, "tracker_stall_timeout_ms") orelse 300000;
+    const tracker_workspace_root = getString(obj, "tracker_workspace_root") orelse "workspaces";
+    const tracker_subprocess_command = getString(obj, "tracker_subprocess_command") orelse "nullclaw";
+    const tracker_subprocess_base_port = getU16(obj, "tracker_subprocess_base_port") orelse 9200;
+    const tracker_subprocess_health_check_retries = getU32(obj, "tracker_subprocess_health_check_retries") orelse 10;
+    const tracker_subprocess_max_turns = getU32(obj, "tracker_subprocess_max_turns") orelse 20;
+    const tracker_subprocess_turn_timeout_ms = getU32(obj, "tracker_subprocess_turn_timeout_ms") orelse 600000;
+    const tracker_subprocess_continuation_prompt = getString(obj, "tracker_subprocess_continuation_prompt") orelse "Continue working on this task. Your previous context is preserved.";
     const workflows_dir = "workflows";
 
     if (tracker_enabled and tracker_url != null and tracker_pipeline_id == null) {
@@ -52,10 +64,22 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 .concurrency = .{
                     .max_concurrent_tasks = tracker_max_concurrent_tasks,
                 },
-                .poll_interval_ms = 5000,
-                .lease_ttl_ms = 120000,
-                .heartbeat_interval_ms = 30000,
+                .poll_interval_ms = tracker_poll_interval_ms,
+                .stall_timeout_ms = tracker_stall_timeout_ms,
+                .lease_ttl_ms = tracker_lease_ttl_ms,
+                .heartbeat_interval_ms = tracker_heartbeat_interval_ms,
                 .workflows_dir = workflows_dir,
+                .workspace = .{
+                    .root = tracker_workspace_root,
+                },
+                .subprocess = .{
+                    .command = tracker_subprocess_command,
+                    .base_port = tracker_subprocess_base_port,
+                    .health_check_retries = tracker_subprocess_health_check_retries,
+                    .max_turns = tracker_subprocess_max_turns,
+                    .turn_timeout_ms = tracker_subprocess_turn_timeout_ms,
+                    .continuation_prompt = tracker_subprocess_continuation_prompt,
+                },
             },
         }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false })
     else
@@ -79,8 +103,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try writeFileAtHome(allocator, home, workflow_rel_path, workflow_json);
     }
 
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll("{\"status\":\"ok\"}\n");
+    if (!builtin.is_test) {
+        const stdout = std.fs.File.stdout();
+        try stdout.writeAll("{\"status\":\"ok\"}\n");
+    }
 }
 
 fn buildDefaultWorkflow(
@@ -202,4 +228,132 @@ fn sanitizeFileComponent(allocator: std.mem.Allocator, value: []const u8) ![]con
             '_';
     }
     return out;
+}
+
+test "run writes tracker config and workflow with advanced settings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const input = try std.json.Stringify.valueAlloc(arena.allocator(), .{
+        .home = home,
+        .port = 9091,
+        .db_path = "tracker.db",
+        .api_token = "local-token",
+        .instance_name = "boiler-a",
+        .tracker_enabled = "true",
+        .tracker_url = "http://127.0.0.1:7700",
+        .tracker_api_token = "tracker-secret",
+        .tracker_pipeline_id = "pipeline.dev",
+        .tracker_claim_role = "reviewer",
+        .tracker_success_trigger = "ship",
+        .tracker_max_concurrent_tasks = "2",
+        .tracker_poll_interval_ms = "15000",
+        .tracker_lease_ttl_ms = "90000",
+        .tracker_heartbeat_interval_ms = "45000",
+        .tracker_stall_timeout_ms = "123000",
+        .tracker_workspace_root = "workspaces",
+        .tracker_subprocess_command = "nullclaw",
+        .tracker_subprocess_base_port = "9300",
+        .tracker_subprocess_health_check_retries = "7",
+        .tracker_subprocess_max_turns = "11",
+        .tracker_subprocess_turn_timeout_ms = "700000",
+        .tracker_subprocess_continuation_prompt = "Keep going.",
+    }, .{});
+
+    try run(arena.allocator(), &.{input});
+
+    const config_path = try std.fs.path.join(std.testing.allocator, &.{ home, "config.json" });
+    defer std.testing.allocator.free(config_path);
+    const config_file = try std.fs.openFileAbsolute(config_path, .{});
+    defer config_file.close();
+    const config_bytes = try config_file.readToEndAlloc(arena.allocator(), 64 * 1024);
+
+    const ConfigFile = struct {
+        port: u16,
+        db: []const u8,
+        api_token: ?[]const u8 = null,
+        tracker: struct {
+            url: []const u8,
+            api_token: ?[]const u8 = null,
+            agent_id: []const u8,
+            poll_interval_ms: u32,
+            stall_timeout_ms: u32,
+            lease_ttl_ms: u32,
+            heartbeat_interval_ms: u32,
+            workflows_dir: []const u8,
+            concurrency: struct {
+                max_concurrent_tasks: u32,
+            },
+            workspace: struct {
+                root: []const u8,
+            },
+            subprocess: struct {
+                command: []const u8,
+                base_port: u16,
+                health_check_retries: u32,
+                max_turns: u32,
+                turn_timeout_ms: u32,
+                continuation_prompt: []const u8,
+            },
+        },
+    };
+
+    const parsed_cfg = try std.json.parseFromSlice(ConfigFile, arena.allocator(), config_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed_cfg.deinit();
+
+    try std.testing.expectEqual(@as(u16, 9091), parsed_cfg.value.port);
+    try std.testing.expectEqualStrings("tracker.db", parsed_cfg.value.db);
+    try std.testing.expectEqualStrings("local-token", parsed_cfg.value.api_token.?);
+    try std.testing.expectEqualStrings("http://127.0.0.1:7700", parsed_cfg.value.tracker.url);
+    try std.testing.expectEqualStrings("tracker-secret", parsed_cfg.value.tracker.api_token.?);
+    try std.testing.expectEqualStrings("boiler-a", parsed_cfg.value.tracker.agent_id);
+    try std.testing.expectEqual(@as(u32, 2), parsed_cfg.value.tracker.concurrency.max_concurrent_tasks);
+    try std.testing.expectEqual(@as(u32, 15000), parsed_cfg.value.tracker.poll_interval_ms);
+    try std.testing.expectEqual(@as(u32, 123000), parsed_cfg.value.tracker.stall_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 90000), parsed_cfg.value.tracker.lease_ttl_ms);
+    try std.testing.expectEqual(@as(u32, 45000), parsed_cfg.value.tracker.heartbeat_interval_ms);
+    try std.testing.expectEqualStrings("workflows", parsed_cfg.value.tracker.workflows_dir);
+    try std.testing.expectEqualStrings("workspaces", parsed_cfg.value.tracker.workspace.root);
+    try std.testing.expectEqualStrings("nullclaw", parsed_cfg.value.tracker.subprocess.command);
+    try std.testing.expectEqual(@as(u16, 9300), parsed_cfg.value.tracker.subprocess.base_port);
+    try std.testing.expectEqual(@as(u32, 7), parsed_cfg.value.tracker.subprocess.health_check_retries);
+    try std.testing.expectEqual(@as(u32, 11), parsed_cfg.value.tracker.subprocess.max_turns);
+    try std.testing.expectEqual(@as(u32, 700000), parsed_cfg.value.tracker.subprocess.turn_timeout_ms);
+    try std.testing.expectEqualStrings("Keep going.", parsed_cfg.value.tracker.subprocess.continuation_prompt);
+
+    const workflow_path = try std.fs.path.join(std.testing.allocator, &.{ home, "workflows", "pipeline.dev.json" });
+    defer std.testing.allocator.free(workflow_path);
+    const workflow_file = try std.fs.openFileAbsolute(workflow_path, .{});
+    defer workflow_file.close();
+    const workflow_bytes = try workflow_file.readToEndAlloc(arena.allocator(), 16 * 1024);
+
+    const WorkflowFile = struct {
+        pipeline_id: []const u8,
+        claim_roles: []const []const u8,
+        execution: []const u8,
+        on_success: struct {
+            transition_to: []const u8,
+        },
+    };
+
+    const parsed_workflow = try std.json.parseFromSlice(WorkflowFile, arena.allocator(), workflow_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    defer parsed_workflow.deinit();
+
+    try std.testing.expectEqualStrings("pipeline.dev", parsed_workflow.value.pipeline_id);
+    try std.testing.expectEqual(@as(usize, 1), parsed_workflow.value.claim_roles.len);
+    try std.testing.expectEqualStrings("reviewer", parsed_workflow.value.claim_roles[0]);
+    try std.testing.expectEqualStrings("subprocess", parsed_workflow.value.execution);
+    try std.testing.expectEqualStrings("ship", parsed_workflow.value.on_success.transition_to);
 }
