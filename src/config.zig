@@ -1,4 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+pub const home_env_var = "NULLBOILER_HOME";
+pub const home_dir_name = ".nullboiler";
 
 pub const WorkerConfig = struct {
     id: []const u8,
@@ -78,6 +82,27 @@ pub const Config = struct {
     tracker: ?TrackerConfig = null,
 };
 
+pub fn resolveConfigPath(allocator: std.mem.Allocator, override_path: ?[]const u8) ![]const u8 {
+    if (override_path) |path| return allocator.dupe(u8, path);
+
+    const home_dir = try resolveHomeDir(allocator);
+    defer allocator.free(home_dir);
+    return std.fs.path.join(allocator, &.{ home_dir, "config.json" });
+}
+
+pub fn resolveHomeDir(allocator: std.mem.Allocator) ![]const u8 {
+    if (std.process.getEnvVarOwned(allocator, home_env_var)) |env_home| {
+        return env_home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const home = try getHomeDirOwned(allocator);
+    defer allocator.free(home);
+    return std.fs.path.join(allocator, &.{ home, home_dir_name });
+}
+
 /// Load configuration from a JSON file. If the file does not exist,
 /// return a default Config.
 pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !Config {
@@ -114,6 +139,18 @@ fn resolveRelativePath(allocator: std.mem.Allocator, config_path: []const u8, va
 
     const base_dir = std.fs.path.dirname(config_path) orelse ".";
     return std.fs.path.resolve(allocator, &.{ base_dir, value });
+}
+
+fn getHomeDirOwned(allocator: std.mem.Allocator) ![]u8 {
+    return std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => {
+            if (builtin.os.tag == .windows) {
+                return std.process.getEnvVarOwned(allocator, "USERPROFILE") catch error.HomeNotSet;
+            }
+            return error.HomeNotSet;
+        },
+        else => return err,
+    };
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -215,7 +252,7 @@ test "SubprocessDefaults has base_port and health_check_retries" {
     try std.testing.expectEqualStrings("Continue working on this task. Your previous context is preserved.", sd.continuation_prompt);
 }
 
-test "resolveRelativePaths anchors tracker compat and advanced paths to config directory" {
+test "resolveRelativePaths anchors tracker paths to config directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 

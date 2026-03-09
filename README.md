@@ -66,3 +66,13 @@ This keeps the architecture modular, simpler to reason about, and easier to evol
 - `nulltickets + nullboiler + nullclaw`: full multi-agent orchestration with durable task source.
 
 See additional integration docs in [`docs/`](./docs).
+
+## Config Location
+
+- Default config path: `~/.nullboiler/config.json`
+- Override instance home with `NULLBOILER_HOME=/path/to/dir`
+- Override config file directly with `--config /path/to/config.json`
+
+When `NULLBOILER_HOME` is set, `nullboiler` reads `config.json` from that directory and
+resolves relative paths like `db`, `strategies_dir`, `tracker.workflows_dir`, and
+`tracker.workspace.root` relative to that config file.

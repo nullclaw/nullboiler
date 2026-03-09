@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const config_mod = @import("config.zig");
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
@@ -25,7 +26,11 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const port = getU16(obj, "port") orelse 8080;
     const api_token = getString(obj, "api_token");
     const db_path = getString(obj, "db_path") orelse "nullboiler.db";
-    const home = getString(obj, "home") orelse ".";
+    const home = resolveHome(allocator, getString(obj, "home")) catch |err| {
+        std.debug.print("error: failed to resolve home: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer allocator.free(home);
     const tracker_enabled = getBoolish(obj, "tracker_enabled");
     const tracker_url = getString(obj, "tracker_url");
     const tracker_api_token = getString(obj, "tracker_api_token");
@@ -228,6 +233,11 @@ fn sanitizeFileComponent(allocator: std.mem.Allocator, value: []const u8) ![]con
             '_';
     }
     return out;
+}
+
+fn resolveHome(allocator: std.mem.Allocator, json_home: ?[]const u8) ![]const u8 {
+    if (json_home) |home| return allocator.dupe(u8, home);
+    return config_mod.resolveHomeDir(allocator);
 }
 
 test "run writes tracker config and workflow with advanced settings" {
