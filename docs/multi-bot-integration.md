@@ -65,12 +65,4 @@ Bridge response is strict webhook-compatible JSON:
 
 Then register that bridge endpoint in NullBoiler with protocol `webhook`.
 
-## NullTickets bridge (legacy)
-
-For older `nullTracker`-style bridge flow, run:
-
-```bash
-python3 tools/nulltracker_nullboiler_executor.py --agent-id dev-1 --agent-role llm-dev
-```
-
-For native pull-mode with `NullTickets`, prefer `nullboiler.tracker` config and the flow documented in `docs/nulltracker-nullboiler-nullclaw.md`.
+Native pull-mode with `NullTickets` is documented in `docs/nulltickets-nullboiler-nullclaw.md`.

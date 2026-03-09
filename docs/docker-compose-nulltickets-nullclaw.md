@@ -1,7 +1,5 @@
 # Docker Compose: nullBoiler + nullClaw + NullTickets
 
-This guide keeps its historical filename, but the tracker service is now `nulltickets`.
-
 This guide describes how to run `nullboiler`, `nullclaw`, and `nulltickets` together with the root `docker-compose.yml`.
 
 ## 1. Prerequisites

@@ -26,6 +26,7 @@ pub const RunningTask = struct {
     task_id: []const u8,
     task_title: []const u8,
     task_identifier: []const u8,
+    task_json: []const u8,
     pipeline_id: []const u8,
     agent_role: []const u8,
     lease_id: []const u8,
@@ -36,6 +37,7 @@ pub const RunningTask = struct {
     subprocess: ?subprocess_mod.SubprocessInfo,
     started_at_ms: i64,
     last_activity_ms: i64,
+    task_version: i64,
     current_turn: u32,
     max_turns: u32,
     state: types.TrackerTaskState,
@@ -67,6 +69,7 @@ pub const TrackerState = struct {
             allocator.free(task.task_id);
             allocator.free(task.task_title);
             allocator.free(task.task_identifier);
+            allocator.free(task.task_json);
             allocator.free(task.pipeline_id);
             allocator.free(task.lease_id);
             allocator.free(task.lease_token);
@@ -197,6 +200,7 @@ pub const Tracker = struct {
         self.allocator.free(task.task_id);
         self.allocator.free(task.task_title);
         self.allocator.free(task.task_identifier);
+        self.allocator.free(task.task_json);
         self.allocator.free(task.pipeline_id);
         self.allocator.free(task.lease_id);
         self.allocator.free(task.lease_token);
@@ -277,8 +281,8 @@ pub const Tracker = struct {
 
         for (self.state.running.keys(), self.state.running.values()) |key, *task| {
             var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
-            const ok = client.heartbeat(task.lease_id, task.lease_token) catch false;
-            if (!ok) {
+            const new_expiry = client.heartbeat(task.lease_id, task.lease_token) catch null;
+            if (new_expiry == null) {
                 log.warn("heartbeat failed for task {s} (lease {s}), removing", .{ key, task.lease_id });
                 // Kill subprocess if present
                 if (task.subprocess) |*sub| {
@@ -444,6 +448,8 @@ pub const Tracker = struct {
         errdefer self.allocator.free(owned_title);
         const owned_identifier = try self.allocator.dupe(u8, claim.task.stage);
         errdefer self.allocator.free(owned_identifier);
+        const owned_task_json = try self.allocator.dupe(u8, claim.task.task_json);
+        errdefer self.allocator.free(owned_task_json);
         const owned_pipeline = try self.allocator.dupe(u8, claim.task.pipeline_id);
         errdefer self.allocator.free(owned_pipeline);
         const owned_lease_id = try self.allocator.dupe(u8, claim.lease_id);
@@ -461,6 +467,7 @@ pub const Tracker = struct {
             .task_id = owned_task_id,
             .task_title = owned_title,
             .task_identifier = owned_identifier,
+            .task_json = owned_task_json,
             .pipeline_id = owned_pipeline,
             .agent_role = role, // from workflow, lives in cfg_arena
             .lease_id = owned_lease_id,
@@ -471,6 +478,7 @@ pub const Tracker = struct {
             .subprocess = null,
             .started_at_ms = now,
             .last_activity_ms = now,
+            .task_version = claim.task.task_version,
             .current_turn = 0,
             .max_turns = workflow.subprocess.max_turns,
             .state = .workspace_setup,
@@ -590,6 +598,7 @@ pub const Tracker = struct {
                 tick_alloc.free(info.stage);
                 tick_alloc.free(info.pipeline_id);
                 tick_alloc.free(info.metadata_json);
+                tick_alloc.free(info.task_json);
             }
 
             // If pipeline changed, task was reassigned
@@ -605,7 +614,22 @@ pub const Tracker = struct {
                 self.state.failed_count += 1;
                 self.state.mutex.unlock();
                 to_remove.append(tick_alloc, key) catch continue;
+                continue;
             }
+
+            if (!std.mem.eql(u8, info.stage, task.task_identifier)) {
+                log.info("task {s} stage changed externally from {s} to {s}, stopping local execution", .{
+                    task.task_id,
+                    task.task_identifier,
+                    info.stage,
+                });
+                self.finishAfterExternalTransition(task);
+                continue;
+            }
+
+            self.replaceOwnedString(&task.task_title, info.title) catch {};
+            self.replaceOwnedString(&task.task_json, info.task_json) catch {};
+            task.task_version = info.task_version;
         }
 
         self.state.mutex.lock();
@@ -737,10 +761,10 @@ pub const Tracker = struct {
                 break :blk null;
             };
             const ctx = templates.Context{
-                .input_json = "{}",
+                .input_json = task.task_json,
                 .step_outputs = &.{},
                 .item = null,
-                .task_json = task.task_identifier,
+                .task_json = task.task_json,
             };
             break :blk templates.render(tick_alloc, tmpl, ctx) catch |err| {
                 log.err("template render failed for task {s}: {s}", .{ task.task_id, @errorName(err) });
@@ -780,12 +804,16 @@ pub const Tracker = struct {
                 tick_alloc.free(info.stage);
                 tick_alloc.free(info.pipeline_id);
                 tick_alloc.free(info.metadata_json);
+                tick_alloc.free(info.task_json);
             }
             if (!std.mem.eql(u8, info.stage, task.task_identifier)) {
-                log.info("task {s} stage changed from {s} to {s}, completing", .{ task.task_id, task.task_identifier, info.stage });
-                task.state = .completing;
+                log.info("task {s} stage changed externally from {s} to {s}, stopping local execution", .{ task.task_id, task.task_identifier, info.stage });
+                self.finishAfterExternalTransition(task);
                 return;
             }
+            self.replaceOwnedString(&task.task_title, info.title) catch {};
+            self.replaceOwnedString(&task.task_json, info.task_json) catch {};
+            task.task_version = info.task_version;
         }
 
         // response (if any) is allocated with tick_alloc and freed at end of tick — do not store
@@ -813,10 +841,10 @@ pub const Tracker = struct {
         };
 
         const ctx = templates.Context{
-            .input_json = "{}",
+            .input_json = task.task_json,
             .step_outputs = &.{},
             .item = null,
-            .task_json = task.task_identifier,
+            .task_json = task.task_json,
         };
 
         const rendered = templates.render(tick_alloc, tmpl, ctx) catch |err| {
@@ -836,13 +864,30 @@ pub const Tracker = struct {
             _ = workspace_mod.runHook(self.allocator, hook, task.workspace_path, @as(u64, self.cfg.workspace.hook_timeout_ms)) catch false;
         }
 
-        const workflow = self.workflows.get(task.pipeline_id);
-        const trigger = if (workflow) |w| w.on_success.transition_to else "done";
+        const trigger = self.resolveSuccessTrigger(tick_alloc, task) catch |err| {
+            log.warn("failed to resolve success trigger for task {s}: {s}", .{ task.task_id, @errorName(err) });
+            task.state = .failed;
+            return;
+        };
 
         var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
-        _ = client.transition(task.run_id, trigger, task.lease_token, null) catch |err| {
+        const ok = client.transition(
+            task.run_id,
+            trigger,
+            task.lease_token,
+            null,
+            task.task_identifier,
+            task.task_version,
+        ) catch |err| {
             log.warn("transition failed for task {s}: {s}", .{ task.task_id, @errorName(err) });
+            task.state = .failed;
+            return;
         };
+        if (!ok) {
+            log.warn("transition rejected for task {s} with trigger {s}", .{ task.task_id, trigger });
+            task.state = .failed;
+            return;
+        }
 
         if (task.subprocess) |*sub| {
             if (sub.child) |*child| {
@@ -917,6 +962,38 @@ pub const Tracker = struct {
             }
         }
     }
+
+    fn replaceOwnedString(self: *Tracker, target: *[]const u8, value: []const u8) !void {
+        const duped = try self.allocator.dupe(u8, value);
+        self.allocator.free(target.*);
+        target.* = duped;
+    }
+
+    fn finishAfterExternalTransition(self: *Tracker, task: *RunningTask) void {
+        if (task.subprocess) |*sub| {
+            if (sub.child) |*child| {
+                subprocess_mod.killSubprocess(child);
+            }
+            self.releasePort(sub.port);
+            task.subprocess = null;
+        }
+        task.state = .completed;
+    }
+
+    fn resolveSuccessTrigger(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) ![]const u8 {
+        if (self.workflows.get(task.pipeline_id)) |workflow| {
+            if (workflow.on_success.transition_to.len > 0) {
+                return workflow.on_success.transition_to;
+            }
+        }
+
+        var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
+        const info = (try client.getTask(task.task_id)) orelse return error.MissingSuccessTrigger;
+        if (info.available_transitions.len == 1) {
+            return info.available_transitions[0].trigger;
+        }
+        return error.MissingSuccessTrigger;
+    }
 };
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -975,6 +1052,7 @@ test "TrackerState countByPipeline and countByRole" {
         .task_id = try allocator.dupe(u8, "task-001"),
         .task_title = try allocator.dupe(u8, "Task 1"),
         .task_identifier = try allocator.dupe(u8, "T-1"),
+        .task_json = try allocator.dupe(u8, "{\"id\":\"task-001\"}"),
         .pipeline_id = try allocator.dupe(u8, "pipeline-a"),
         .agent_role = "coder",
         .lease_id = try allocator.dupe(u8, "lease-1"),
@@ -985,6 +1063,7 @@ test "TrackerState countByPipeline and countByRole" {
         .subprocess = null,
         .started_at_ms = now,
         .last_activity_ms = now,
+        .task_version = 1,
         .current_turn = 0,
         .max_turns = 10,
         .state = .running,
@@ -995,6 +1074,7 @@ test "TrackerState countByPipeline and countByRole" {
         .task_id = try allocator.dupe(u8, "task-002"),
         .task_title = try allocator.dupe(u8, "Task 2"),
         .task_identifier = try allocator.dupe(u8, "T-2"),
+        .task_json = try allocator.dupe(u8, "{\"id\":\"task-002\"}"),
         .pipeline_id = try allocator.dupe(u8, "pipeline-a"),
         .agent_role = "reviewer",
         .lease_id = try allocator.dupe(u8, "lease-2"),
@@ -1005,6 +1085,7 @@ test "TrackerState countByPipeline and countByRole" {
         .subprocess = null,
         .started_at_ms = now,
         .last_activity_ms = now,
+        .task_version = 1,
         .current_turn = 0,
         .max_turns = 10,
         .state = .running,
@@ -1015,6 +1096,7 @@ test "TrackerState countByPipeline and countByRole" {
         .task_id = try allocator.dupe(u8, "task-003"),
         .task_title = try allocator.dupe(u8, "Task 3"),
         .task_identifier = try allocator.dupe(u8, "T-3"),
+        .task_json = try allocator.dupe(u8, "{\"id\":\"task-003\"}"),
         .pipeline_id = try allocator.dupe(u8, "pipeline-b"),
         .agent_role = "coder",
         .lease_id = try allocator.dupe(u8, "lease-3"),
@@ -1025,6 +1107,7 @@ test "TrackerState countByPipeline and countByRole" {
         .subprocess = null,
         .started_at_ms = now,
         .last_activity_ms = now,
+        .task_version = 1,
         .current_turn = 0,
         .max_turns = 20,
         .state = .running,
@@ -1071,6 +1154,7 @@ test "canClaimMore at global limit returns false" {
         .task_id = try allocator.dupe(u8, "task-fill"),
         .task_title = try allocator.dupe(u8, "Fill"),
         .task_identifier = try allocator.dupe(u8, "F-1"),
+        .task_json = try allocator.dupe(u8, "{\"id\":\"task-fill\"}"),
         .pipeline_id = try allocator.dupe(u8, "pipe"),
         .agent_role = "coder",
         .lease_id = try allocator.dupe(u8, "l"),
@@ -1081,6 +1165,7 @@ test "canClaimMore at global limit returns false" {
         .subprocess = null,
         .started_at_ms = now,
         .last_activity_ms = now,
+        .task_version = 1,
         .current_turn = 0,
         .max_turns = 10,
         .state = .running,

@@ -11,7 +11,6 @@ const async_dispatch = @import("async_dispatch.zig");
 const redis_client = @import("redis_client.zig");
 const mqtt_client = @import("mqtt_client.zig");
 const tracker_mod = @import("tracker.zig");
-const tracker_compat_mod = @import("tracker_compat.zig");
 const workflow_loader = @import("workflow_loader.zig");
 const c = @cImport({
     @cInclude("signal.h");
@@ -278,34 +277,11 @@ pub fn main() !void {
     }
 
     // Start Tracker thread for pull-mode (conditionally)
-    var compat_tracker_state: ?tracker_compat_mod.State = null;
-    var compat_tracker_thread: ?std.Thread = null;
     var tracker_instance: ?tracker_mod.Tracker = null;
     var tracker_thread: ?std.Thread = null;
 
     if (cfg.tracker) |tracker_cfg| {
-        if (tracker_cfg.url != null and tracker_cfg.workflow_path != null) {
-            compat_tracker_state = tracker_compat_mod.State.init(
-                allocator,
-                &store,
-                tracker_cfg,
-                &drain_mode,
-                &shutdown_requested,
-            );
-
-            compat_tracker_thread = std.Thread.spawn(.{}, tracker_compat_mod.State.run, .{&compat_tracker_state.?}) catch |err| blk: {
-                std.debug.print("warning: failed to start compat tracker thread: {}\n", .{err});
-                compat_tracker_state = null;
-                break :blk null;
-            };
-
-            if (compat_tracker_thread != null) {
-                std.debug.print("tracker started (compat mode, role={s}, workflow={s})\n", .{
-                    tracker_cfg.agent_role,
-                    tracker_cfg.workflow_path.?,
-                });
-            }
-        } else if (tracker_cfg.url != null) {
+        if (tracker_cfg.url != null) {
             const workflows = workflow_loader.loadWorkflows(cfg_arena.allocator(), tracker_cfg.workflows_dir);
 
             tracker_instance = tracker_mod.Tracker.init(
@@ -343,10 +319,6 @@ pub fn main() !void {
         if (redis_listener_thread) |t| {
             t.join();
             std.debug.print("redis listener stopped\n", .{});
-        }
-        if (compat_tracker_thread) |t| {
-            t.join();
-            std.debug.print("compat tracker stopped\n", .{});
         }
         if (tracker_thread) |t| {
             t.join();
@@ -403,7 +375,6 @@ pub fn main() !void {
             .metrics = &metrics,
             .drain_mode = &drain_mode,
             .strategies = &strategy_map,
-            .compat_tracker_state = if (compat_tracker_state) |*state| state else null,
             .tracker_state = if (tracker_instance) |*ti| &ti.state else null,
             .tracker_cfg = if (cfg.tracker) |*tc| tc else null,
         };

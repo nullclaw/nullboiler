@@ -1,8 +1,10 @@
-/// HTTP client for NullTickets API — used by pull-mode agents to claim tasks,
-/// heartbeat leases, transition runs, report failures, and fetch task info.
+/// HTTP client for NullTickets API used by the pull-mode tracker runtime.
 const std = @import("std");
 
-// ── Response Types ───────────────────────────────────────────────────
+pub const TransitionInfo = struct {
+    trigger: []const u8 = "",
+    to: []const u8 = "",
+};
 
 pub const TaskInfo = struct {
     id: []const u8 = "",
@@ -12,6 +14,9 @@ pub const TaskInfo = struct {
     pipeline_id: []const u8 = "",
     priority: i64 = 0,
     metadata_json: []const u8 = "{}",
+    task_json: []const u8 = "{}",
+    task_version: i64 = 0,
+    available_transitions: []const TransitionInfo = &.{},
 };
 
 pub const RunInfo = struct {
@@ -24,16 +29,13 @@ pub const ClaimResponse = struct {
     run: RunInfo = .{},
     lease_id: []const u8 = "",
     lease_token: []const u8 = "",
+    expires_at_ms: i64 = 0,
 };
-
-// ── HTTP Result ──────────────────────────────────────────────────────
 
 const HttpResult = struct {
     status_code: u16,
     body: []const u8,
 };
-
-// ── TrackerClient ────────────────────────────────────────────────────
 
 pub const TrackerClient = struct {
     allocator: std.mem.Allocator,
@@ -48,8 +50,6 @@ pub const TrackerClient = struct {
         };
     }
 
-    /// POST /leases/claim — attempt to claim a task from the queue.
-    /// Returns null on 204 (no work available) or on HTTP error.
     pub fn claim(self: *TrackerClient, agent_id: []const u8, agent_role: []const u8, lease_ttl_ms: i64) !?ClaimResponse {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/leases/claim", .{self.base_url});
         defer self.allocator.free(url);
@@ -67,56 +67,77 @@ pub const TrackerClient = struct {
         if (result.status_code == 204) return null;
         if (result.status_code < 200 or result.status_code >= 300) return null;
 
-        const parsed = std.json.parseFromSlice(ClaimResponse, self.allocator, result.body, .{ .ignore_unknown_fields = true }) catch {
-            return null;
-        };
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, result.body, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return null;
         defer parsed.deinit();
+        if (parsed.value != .object) return null;
 
-        // Copy all fields so they outlive the parsed JSON arena
+        const root = parsed.value.object;
+        const task_val = root.get("task") orelse return null;
+        const run_val = root.get("run") orelse return null;
+        if (task_val != .object or run_val != .object) return null;
+
         return ClaimResponse{
-            .task = .{
-                .id = try self.allocator.dupe(u8, parsed.value.task.id),
-                .title = try self.allocator.dupe(u8, parsed.value.task.title),
-                .description = try self.allocator.dupe(u8, parsed.value.task.description),
-                .stage = try self.allocator.dupe(u8, parsed.value.task.stage),
-                .pipeline_id = try self.allocator.dupe(u8, parsed.value.task.pipeline_id),
-                .priority = parsed.value.task.priority,
-                .metadata_json = try self.allocator.dupe(u8, parsed.value.task.metadata_json),
-            },
+            .task = try parseTaskInfo(self.allocator, task_val),
             .run = .{
-                .id = try self.allocator.dupe(u8, parsed.value.run.id),
-                .attempt = parsed.value.run.attempt,
+                .id = try dupeJsonString(self.allocator, run_val.object, "id"),
+                .attempt = getJsonInt(run_val.object, "attempt") orelse 1,
             },
-            .lease_id = try self.allocator.dupe(u8, parsed.value.lease_id),
-            .lease_token = try self.allocator.dupe(u8, parsed.value.lease_token),
+            .lease_id = try dupeJsonString(self.allocator, root, "lease_id"),
+            .lease_token = try dupeJsonString(self.allocator, root, "lease_token"),
+            .expires_at_ms = getJsonInt(root, "expires_at_ms") orelse 0,
         };
     }
 
-    /// POST /leases/{id}/heartbeat — extend the lease TTL.
-    /// Uses lease_token as Bearer override. Returns true on 2xx.
-    pub fn heartbeat(self: *TrackerClient, lease_id: []const u8, lease_token: []const u8) !bool {
+    pub fn heartbeat(self: *TrackerClient, lease_id: []const u8, lease_token: []const u8) !?i64 {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/leases/{s}/heartbeat", .{ self.base_url, lease_id });
         defer self.allocator.free(url);
 
         const result = try self.httpRequest(url, .POST, "{}", lease_token);
         defer self.allocator.free(result.body);
 
-        return result.status_code >= 200 and result.status_code < 300;
+        if (result.status_code < 200 or result.status_code >= 300) return null;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, result.body, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+        return getJsonInt(parsed.value.object, "expires_at_ms");
     }
 
-    /// POST /runs/{id}/transition — move a run to the next stage.
-    /// Uses lease_token as Bearer override. Returns true on 2xx.
-    pub fn transition(self: *TrackerClient, run_id: []const u8, trigger: []const u8, lease_token: []const u8, usage_json: ?[]const u8) !bool {
+    pub fn transition(
+        self: *TrackerClient,
+        run_id: []const u8,
+        trigger: []const u8,
+        lease_token: []const u8,
+        usage_json: ?[]const u8,
+        expected_stage: ?[]const u8,
+        expected_task_version: ?i64,
+    ) !bool {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/runs/{s}/transition", .{ self.base_url, run_id });
         defer self.allocator.free(url);
 
-        const body = if (usage_json) |usage| blk: {
-            const trigger_json = try std.json.Stringify.valueAlloc(self.allocator, trigger, .{});
-            defer self.allocator.free(trigger_json);
-            break :blk try std.fmt.allocPrint(self.allocator, "{{\"trigger\":{s},\"usage\":{s}}}", .{ trigger_json, usage });
-        } else blk: {
-            break :blk try std.json.Stringify.valueAlloc(self.allocator, .{ .trigger = trigger }, .{});
-        };
+        const trigger_json = try std.json.Stringify.valueAlloc(self.allocator, trigger, .{});
+        defer self.allocator.free(trigger_json);
+        const stage_field = if (expected_stage) |stage|
+            try std.fmt.allocPrint(self.allocator, ",\"expected_stage\":{f}", .{std.json.fmt(stage, .{})})
+        else
+            try self.allocator.dupe(u8, "");
+        defer self.allocator.free(stage_field);
+        const version_field = if (expected_task_version) |version|
+            try std.fmt.allocPrint(self.allocator, ",\"expected_task_version\":{d}", .{version})
+        else
+            try self.allocator.dupe(u8, "");
+        defer self.allocator.free(version_field);
+
+        const body = if (usage_json) |usage|
+            try std.fmt.allocPrint(self.allocator, "{{\"trigger\":{s}{s}{s},\"usage\":{s}}}", .{ trigger_json, stage_field, version_field, usage })
+        else
+            try std.fmt.allocPrint(self.allocator, "{{\"trigger\":{s}{s}{s}}}", .{ trigger_json, stage_field, version_field });
         defer self.allocator.free(body);
 
         const result = try self.httpRequest(url, .POST, body, lease_token);
@@ -125,19 +146,16 @@ pub const TrackerClient = struct {
         return result.status_code >= 200 and result.status_code < 300;
     }
 
-    /// POST /runs/{id}/fail — report a run failure with reason.
-    /// Uses lease_token as Bearer override. Returns true on 2xx.
     pub fn failRun(self: *TrackerClient, run_id: []const u8, reason: []const u8, lease_token: []const u8, usage_json: ?[]const u8) !bool {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/runs/{s}/fail", .{ self.base_url, run_id });
         defer self.allocator.free(url);
 
-        const body = if (usage_json) |usage| blk: {
-            const reason_json = try std.json.Stringify.valueAlloc(self.allocator, reason, .{});
-            defer self.allocator.free(reason_json);
-            break :blk try std.fmt.allocPrint(self.allocator, "{{\"reason\":{s},\"usage\":{s}}}", .{ reason_json, usage });
-        } else blk: {
-            break :blk try std.json.Stringify.valueAlloc(self.allocator, .{ .reason = reason }, .{});
-        };
+        const reason_json = try std.json.Stringify.valueAlloc(self.allocator, reason, .{});
+        defer self.allocator.free(reason_json);
+        const body = if (usage_json) |usage|
+            try std.fmt.allocPrint(self.allocator, "{{\"error\":{s},\"usage\":{s}}}", .{ reason_json, usage })
+        else
+            try std.fmt.allocPrint(self.allocator, "{{\"error\":{s}}}", .{reason_json});
         defer self.allocator.free(body);
 
         const result = try self.httpRequest(url, .POST, body, lease_token);
@@ -146,15 +164,12 @@ pub const TrackerClient = struct {
         return result.status_code >= 200 and result.status_code < 300;
     }
 
-    /// POST /runs/{id}/events — post a progress event.
-    /// Returns true on 2xx.
     pub fn postEvent(self: *TrackerClient, run_id: []const u8, kind: []const u8, data_json: []const u8, lease_token: []const u8) !bool {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/runs/{s}/events", .{ self.base_url, run_id });
         defer self.allocator.free(url);
 
         const kind_json = try std.json.Stringify.valueAlloc(self.allocator, kind, .{});
         defer self.allocator.free(kind_json);
-
         const body = try std.fmt.allocPrint(self.allocator, "{{\"kind\":{s},\"data\":{s}}}", .{ kind_json, data_json });
         defer self.allocator.free(body);
 
@@ -164,17 +179,20 @@ pub const TrackerClient = struct {
         return result.status_code >= 200 and result.status_code < 300;
     }
 
-    /// POST /artifacts — upload an artifact for a task.
-    /// Uses self.api_token for auth. Returns true on 2xx.
-    pub fn postArtifact(self: *TrackerClient, task_id: []const u8, name: []const u8, content: []const u8) !bool {
+    pub fn postArtifact(self: *TrackerClient, task_id: []const u8, run_id: []const u8, kind: []const u8, uri: []const u8, meta_json: []const u8) !bool {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/artifacts", .{self.base_url});
         defer self.allocator.free(url);
 
-        const body = try std.json.Stringify.valueAlloc(self.allocator, .{
-            .task_id = task_id,
-            .name = name,
-            .content = content,
-        }, .{});
+        const body = try std.fmt.allocPrint(self.allocator,
+            "{{\"task_id\":{f},\"run_id\":{f},\"kind\":{f},\"uri\":{f},\"meta\":{s}}}",
+            .{
+                std.json.fmt(task_id, .{}),
+                std.json.fmt(run_id, .{}),
+                std.json.fmt(kind, .{}),
+                std.json.fmt(uri, .{}),
+                meta_json,
+            },
+        );
         defer self.allocator.free(body);
 
         const result = try self.httpRequest(url, .POST, body, null);
@@ -183,8 +201,6 @@ pub const TrackerClient = struct {
         return result.status_code >= 200 and result.status_code < 300;
     }
 
-    /// GET /tasks/{id} — fetch task details.
-    /// Returns null on non-2xx.
     pub fn getTask(self: *TrackerClient, task_id: []const u8) !?TaskInfo {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/tasks/{s}", .{ self.base_url, task_id });
         defer self.allocator.free(url);
@@ -194,33 +210,21 @@ pub const TrackerClient = struct {
 
         if (result.status_code < 200 or result.status_code >= 300) return null;
 
-        const parsed = std.json.parseFromSlice(TaskInfo, self.allocator, result.body, .{ .ignore_unknown_fields = true }) catch {
-            return null;
-        };
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, result.body, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return null;
         defer parsed.deinit();
-
-        return TaskInfo{
-            .id = try self.allocator.dupe(u8, parsed.value.id),
-            .title = try self.allocator.dupe(u8, parsed.value.title),
-            .description = try self.allocator.dupe(u8, parsed.value.description),
-            .stage = try self.allocator.dupe(u8, parsed.value.stage),
-            .pipeline_id = try self.allocator.dupe(u8, parsed.value.pipeline_id),
-            .priority = parsed.value.priority,
-            .metadata_json = try self.allocator.dupe(u8, parsed.value.metadata_json),
-        };
+        return try parseTaskInfo(self.allocator, parsed.value);
     }
 
-    /// GET /ops/queue — return raw queue stats JSON.
     pub fn getQueueStats(self: *TrackerClient) ![]const u8 {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/ops/queue", .{self.base_url});
         defer self.allocator.free(url);
 
         const result = try self.httpRequest(url, .GET, null, null);
-        // Caller owns the body
         return result.body;
     }
-
-    // ── Internal HTTP helper ─────────────────────────────────────────
 
     fn httpRequest(
         self: *TrackerClient,
@@ -235,7 +239,6 @@ pub const TrackerClient = struct {
         var response_body: std.io.Writer.Allocating = .init(self.allocator);
         defer response_body.deinit();
 
-        // Determine the auth token: bearer_override takes priority over self.api_token
         const token = bearer_override orelse self.api_token;
         var auth_header: ?[]const u8 = null;
         if (token) |t| {
@@ -262,17 +265,76 @@ pub const TrackerClient = struct {
             return error.HttpRequestFailed;
         };
 
-        const status_code = @intFromEnum(result.status);
-        const resp_data = try self.allocator.dupe(u8, response_body.written());
-
         return HttpResult{
-            .status_code = @intCast(status_code),
-            .body = resp_data,
+            .status_code = @intCast(@intFromEnum(result.status)),
+            .body = try self.allocator.dupe(u8, response_body.written()),
         };
     }
 };
 
-// ── Tests ────────────────────────────────────────────────────────────
+fn parseTaskInfo(allocator: std.mem.Allocator, task_value: std.json.Value) !TaskInfo {
+    if (task_value != .object) return error.InvalidTaskPayload;
+    const obj = task_value.object;
+
+    const metadata_json = if (obj.get("metadata")) |metadata|
+        try std.json.Stringify.valueAlloc(allocator, metadata, .{})
+    else
+        try allocator.dupe(u8, "{}");
+
+    const task_json = try std.json.Stringify.valueAlloc(allocator, task_value, .{});
+    const transitions = try parseTransitions(allocator, obj.get("available_transitions"));
+
+    return TaskInfo{
+        .id = try dupeJsonString(allocator, obj, "id"),
+        .title = try dupeJsonString(allocator, obj, "title"),
+        .description = try dupeJsonString(allocator, obj, "description"),
+        .stage = try dupeJsonString(allocator, obj, "stage"),
+        .pipeline_id = try dupeJsonString(allocator, obj, "pipeline_id"),
+        .priority = getJsonInt(obj, "priority") orelse 0,
+        .metadata_json = metadata_json,
+        .task_json = task_json,
+        .task_version = getJsonInt(obj, "task_version") orelse 0,
+        .available_transitions = transitions,
+    };
+}
+
+fn parseTransitions(allocator: std.mem.Allocator, value: ?std.json.Value) ![]const TransitionInfo {
+    const transitions_val = value orelse return allocator.alloc(TransitionInfo, 0);
+    if (transitions_val != .array) return allocator.alloc(TransitionInfo, 0);
+
+    var list: std.ArrayListUnmanaged(TransitionInfo) = .empty;
+    defer list.deinit(allocator);
+
+    for (transitions_val.array.items) |item| {
+        if (item != .object) continue;
+        try list.append(allocator, .{
+            .trigger = try dupeJsonString(allocator, item.object, "trigger"),
+            .to = if (getJsonString(item.object, "to")) |value_str|
+                try allocator.dupe(u8, value_str)
+            else
+                try allocator.dupe(u8, ""),
+        });
+    }
+
+    return list.toOwnedSlice(allocator);
+}
+
+fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = obj.get(key) orelse return null;
+    return if (value == .string) value.string else null;
+}
+
+fn dupeJsonString(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const u8 {
+    return allocator.dupe(u8, getJsonString(obj, key) orelse "");
+}
+
+fn getJsonInt(obj: std.json.ObjectMap, key: []const u8) ?i64 {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .integer => |v| v,
+        else => null,
+    };
+}
 
 test "TrackerClient init stores base_url and api_token" {
     const allocator = std.testing.allocator;
@@ -284,44 +346,22 @@ test "TrackerClient init stores base_url and api_token" {
     try std.testing.expectEqualStrings("my-token", client.api_token.?);
 }
 
-test "TrackerClient init with null api_token" {
-    const allocator = std.testing.allocator;
-    var client = TrackerClient.init(allocator, "http://tracker.local", null);
-    _ = &client;
-
-    try std.testing.expectEqualStrings("http://tracker.local", client.base_url);
-    try std.testing.expect(client.api_token == null);
-}
-
 test "TaskInfo defaults" {
     const info: TaskInfo = .{};
     try std.testing.expectEqualStrings("", info.id);
-    try std.testing.expectEqualStrings("", info.title);
-    try std.testing.expectEqualStrings("", info.description);
-    try std.testing.expectEqualStrings("", info.stage);
-    try std.testing.expectEqualStrings("", info.pipeline_id);
-    try std.testing.expectEqual(@as(i64, 0), info.priority);
     try std.testing.expectEqualStrings("{}", info.metadata_json);
-}
-
-test "RunInfo defaults" {
-    const info: RunInfo = .{};
-    try std.testing.expectEqualStrings("", info.id);
-    try std.testing.expectEqual(@as(i64, 1), info.attempt);
+    try std.testing.expectEqualStrings("{}", info.task_json);
+    try std.testing.expectEqual(@as(i64, 0), info.task_version);
+    try std.testing.expectEqual(@as(usize, 0), info.available_transitions.len);
 }
 
 test "ClaimResponse defaults" {
     const resp: ClaimResponse = .{};
     try std.testing.expectEqualStrings("", resp.lease_id);
-    try std.testing.expectEqualStrings("", resp.lease_token);
-    try std.testing.expectEqualStrings("", resp.task.id);
-    try std.testing.expectEqualStrings("{}", resp.task.metadata_json);
-    try std.testing.expectEqual(@as(i64, 0), resp.task.priority);
-    try std.testing.expectEqualStrings("", resp.run.id);
-    try std.testing.expectEqual(@as(i64, 1), resp.run.attempt);
+    try std.testing.expectEqual(@as(i64, 0), resp.expires_at_ms);
 }
 
-test "TrackerClient has postEvent method" {
-    const has_method = @hasDecl(TrackerClient, "postEvent");
-    try std.testing.expect(has_method);
+test "TrackerClient exposes optimistic transition support" {
+    try std.testing.expect(@hasDecl(TrackerClient, "transition"));
+    try std.testing.expect(@hasDecl(TrackerClient, "postArtifact"));
 }

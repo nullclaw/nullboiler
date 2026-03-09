@@ -7,7 +7,6 @@ const worker_protocol = @import("worker_protocol.zig");
 const metrics_mod = @import("metrics.zig");
 const strategy_mod = @import("strategy.zig");
 const tracker_mod = @import("tracker.zig");
-const tracker_compat_mod = @import("tracker_compat.zig");
 const config_mod = @import("config.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -23,7 +22,6 @@ pub const Context = struct {
     metrics: ?*metrics_mod.Metrics = null,
     drain_mode: ?*std.atomic.Value(bool) = null,
     strategies: ?*const strategy_mod.StrategyMap = null,
-    compat_tracker_state: ?*tracker_compat_mod.State = null,
     tracker_state: ?*tracker_mod.TrackerState = null,
     tracker_cfg: ?*const config_mod.TrackerConfig = null,
 };
@@ -1052,13 +1050,6 @@ fn formatRunningTask(allocator: std.mem.Allocator, task: tracker_mod.RunningTask
 }
 
 fn handleTrackerStatus(ctx: *Context) HttpResponse {
-    if (ctx.compat_tracker_state) |tracker_state| {
-        const body = tracker_state.renderStatusJson(ctx.allocator) catch {
-            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to render tracker status\"}}");
-        };
-        return jsonResponse(200, body);
-    }
-
     const state = ctx.tracker_state orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
     };
@@ -1099,13 +1090,6 @@ fn handleTrackerStatus(ctx: *Context) HttpResponse {
 }
 
 fn handleTrackerTasks(ctx: *Context) HttpResponse {
-    if (ctx.compat_tracker_state) |tracker_state| {
-        const body = tracker_state.renderTasksJson(ctx.allocator) catch {
-            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to render tracker tasks\"}}");
-        };
-        return jsonResponse(200, body);
-    }
-
     const state = ctx.tracker_state orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
     };
@@ -1130,15 +1114,6 @@ fn handleTrackerTasks(ctx: *Context) HttpResponse {
 }
 
 fn handleTrackerTaskDetail(ctx: *Context, task_id: []const u8) HttpResponse {
-    if (ctx.compat_tracker_state) |tracker_state| {
-        const body = tracker_state.renderTaskJson(ctx.allocator, task_id) catch {
-            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to render tracker task\"}}");
-        } orelse {
-            return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"tracker task not found\"}}");
-        };
-        return jsonResponse(200, body);
-    }
-
     const state = ctx.tracker_state orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
     };
@@ -1155,13 +1130,6 @@ fn handleTrackerTaskDetail(ctx: *Context, task_id: []const u8) HttpResponse {
 }
 
 fn handleTrackerStats(ctx: *Context) HttpResponse {
-    if (ctx.compat_tracker_state) |tracker_state| {
-        const body = tracker_state.renderStatsJson(ctx.allocator) catch {
-            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to render tracker stats\"}}");
-        };
-        return jsonResponse(200, body);
-    }
-
     const state = ctx.tracker_state orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
     };
@@ -1185,9 +1153,7 @@ fn handleTrackerStats(ctx: *Context) HttpResponse {
 }
 
 fn handleTrackerRefresh(ctx: *Context) HttpResponse {
-    if (ctx.compat_tracker_state != null) {
-        return jsonResponse(200, "{\"status\":\"ok\",\"message\":\"compat tracker polls automatically\"}");
-    }
+    _ = ctx;
     return jsonResponse(200, "{\"status\":\"ok\",\"message\":\"refresh requested\"}");
 }
 

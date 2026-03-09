@@ -33,9 +33,10 @@ pub fn run() !void {
         \\    { "id": "tracker_enabled", "title": "Enable NullTickets Pull Mode", "description": "Let NullBoiler claim work directly from NullTickets", "type": "toggle", "required": false, "options": [] },
         \\    { "id": "tracker_url", "title": "NullTickets URL", "type": "text", "required": true, "default_value": "http://127.0.0.1:7700", "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
         \\    { "id": "tracker_api_token", "title": "NullTickets API Token", "description": "Optional bearer token for NullTickets auth", "type": "secret", "required": false, "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
-        \\    { "id": "tracker_agent_role", "title": "Agent Role", "description": "NullTickets role to claim", "type": "text", "required": true, "default_value": "coder", "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
+        \\    { "id": "tracker_pipeline_id", "title": "Pipeline ID", "description": "NullTickets pipeline handled by this NullBoiler tracker workflow", "type": "text", "required": true, "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
+        \\    { "id": "tracker_claim_role", "title": "Claim Role", "description": "NullTickets stage role this workflow claims", "type": "text", "required": true, "default_value": "coder", "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
         \\    { "id": "tracker_agent_id", "title": "Agent ID", "description": "Stable worker identity in NullTickets", "type": "text", "required": false, "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
-        \\    { "id": "tracker_success_trigger", "title": "Success Trigger", "description": "Optional transition trigger after a successful run", "type": "text", "required": false, "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
+        \\    { "id": "tracker_success_trigger", "title": "Success Trigger", "description": "Transition trigger sent to NullTickets after a successful run", "type": "text", "required": true, "default_value": "complete", "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] },
         \\    { "id": "tracker_max_concurrent_tasks", "title": "Max Concurrent Tasks", "type": "number", "required": false, "default_value": "1", "condition": { "step": "tracker_enabled", "equals": "true" }, "options": [] }
         \\  ] },
         \\  "depends_on": [],

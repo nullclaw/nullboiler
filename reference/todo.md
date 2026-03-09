@@ -27,6 +27,6 @@ This backlog tracks the main gaps that prevent `nullboiler` from matching produc
 
 ## Current Execution
 
-- [x] `P0-01` completed: bearer auth implemented in API path, config/CLI wiring added, and nulltracker bridge updated with optional token propagation.
+- [x] `P0-01` completed: bearer auth implemented in API path, config/CLI wiring added, and native NullTickets tracker integration updated with optional token propagation.
 - [x] `P0-02` completed: `POST /runs` now wrapped in DB transaction with rollback on any failure.
 - [ ] Next: `P0-03` worker health checks + circuit-breaker states.

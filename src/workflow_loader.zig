@@ -20,7 +20,7 @@ pub const DispatchConfig = struct {
 };
 
 pub const TransitionConfig = struct {
-    transition_to: []const u8 = "done",
+    transition_to: []const u8 = "",
 };
 
 pub const WorkflowDef = struct {
@@ -41,10 +41,10 @@ pub const WorkflowMap = std.StringArrayHashMapUnmanaged(WorkflowDef);
 
 pub fn loadWorkflows(allocator: std.mem.Allocator, dir_path: []const u8) WorkflowMap {
     var map = WorkflowMap{};
-
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
-        return map;
-    };
+    var dir = if (std.fs.path.isAbsolute(dir_path))
+        std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return map
+    else
+        std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return map;
     defer dir.close();
 
     var iter = dir.iterate();
@@ -62,6 +62,33 @@ pub fn loadWorkflows(allocator: std.mem.Allocator, dir_path: []const u8) Workflo
     }
 
     return map;
+}
+
+test "loadWorkflows: supports absolute workflow directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "current.json",
+        .data =
+        \\{
+        \\  "id": "wf-absolute",
+        \\  "pipeline_id": "absolute",
+        \\  "claim_roles": ["coder"],
+        \\  "on_success": {"transition_to": "complete"}
+        \\}
+        ,
+    });
+
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const map = loadWorkflows(arena.allocator(), dir_path);
+    try std.testing.expectEqual(@as(usize, 1), map.count());
+    try std.testing.expectEqualStrings("absolute", map.get("absolute").?.pipeline_id);
 }
 
 // ── getWorkflowForPipeline ────────────────────────────────────────────
@@ -85,7 +112,7 @@ test "WorkflowDef defaults" {
     try std.testing.expectEqual(@as(usize, 0), def.dispatch.worker_tags.len);
     try std.testing.expectEqualStrings("webhook", def.dispatch.protocol);
     try std.testing.expectEqual(@as(?[]const u8, null), def.prompt_template);
-    try std.testing.expectEqualStrings("done", def.on_success.transition_to);
+    try std.testing.expectEqualStrings("", def.on_success.transition_to);
     try std.testing.expectEqualStrings("failed", def.on_failure.transition_to);
 }
 

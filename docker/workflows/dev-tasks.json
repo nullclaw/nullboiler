@@ -1,0 +1,12 @@
+{
+  "id": "wf-dev-tasks-llm-dev",
+  "pipeline_id": "dev-tasks",
+  "claim_roles": [
+    "llm-dev"
+  ],
+  "execution": "subprocess",
+  "prompt_template": "Task {{task.id}}: {{task.title}}\n\n{{task.description}}\n\nMetadata:\n{{task.metadata}}",
+  "on_success": {
+    "transition_to": "complete"
+  }
+}

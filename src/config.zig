@@ -58,11 +58,6 @@ pub const TrackerConfig = struct {
     api_token: ?[]const u8 = null,
     poll_interval_ms: u32 = 10000,
     agent_id: []const u8 = "nullboiler",
-    agent_role: []const u8 = "coder",
-    workflow_path: ?[]const u8 = null,
-    success_trigger: ?[]const u8 = null,
-    artifact_kind: []const u8 = "nullboiler_run",
-    max_concurrent_tasks: ?u32 = null,
     concurrency: ConcurrencyConfig = .{},
     workspace: WorkspaceConfig = .{},
     subprocess: SubprocessDefaults = .{},
@@ -99,7 +94,7 @@ pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !Config {
     // Do NOT free `contents` or deinit `parsed` here.
     // `Config` fields may point into these allocations.
     // The caller should provide an arena allocator and clean it up once on shutdown.
-    const parsed = try std.json.parseFromSlice(Config, allocator, contents, .{ .ignore_unknown_fields = true });
+    const parsed = try std.json.parseFromSlice(Config, allocator, contents, .{});
 
     return parsed.value;
 }
@@ -109,14 +104,8 @@ pub fn resolveRelativePaths(allocator: std.mem.Allocator, config_path: []const u
     cfg.strategies_dir = try resolveRelativePath(allocator, config_path, cfg.strategies_dir);
 
     if (cfg.tracker) |*tracker| {
-        if (tracker.max_concurrent_tasks) |limit| {
-            tracker.concurrency.max_concurrent_tasks = limit;
-        }
         tracker.workflows_dir = try resolveRelativePath(allocator, config_path, tracker.workflows_dir);
         tracker.workspace.root = try resolveRelativePath(allocator, config_path, tracker.workspace.root);
-        if (tracker.workflow_path) |path| {
-            tracker.workflow_path = try resolveRelativePath(allocator, config_path, path);
-        }
     }
 }
 
@@ -159,9 +148,10 @@ test "loadFromFile reads configured host and worker URL from JSON file" {
         \\  "tracker": {
         \\    "url": "http://127.0.0.1:7700",
         \\    "agent_id": "boiler-1",
-        \\    "agent_role": "reviewer",
-        \\    "workflow_path": "tracker-workflow.json",
-        \\    "max_concurrent_tasks": 3
+        \\    "concurrency": {
+        \\      "max_concurrent_tasks": 3
+        \\    },
+        \\    "workflows_dir": "workflows"
         \\  },
         \\  "workers": [
         \\    {
@@ -196,22 +186,19 @@ test "loadFromFile reads configured host and worker URL from JSON file" {
     try std.testing.expect(cfg.tracker != null);
     try std.testing.expectEqualStrings("http://127.0.0.1:7700", cfg.tracker.?.url.?);
     try std.testing.expectEqualStrings("boiler-1", cfg.tracker.?.agent_id);
-    try std.testing.expectEqualStrings("reviewer", cfg.tracker.?.agent_role);
-    try std.testing.expectEqual(@as(?u32, 3), cfg.tracker.?.max_concurrent_tasks);
+    try std.testing.expectEqual(@as(u32, 3), cfg.tracker.?.concurrency.max_concurrent_tasks);
+    try std.testing.expectEqualStrings("workflows", cfg.tracker.?.workflows_dir);
 }
 
 test "TrackerConfig defaults" {
     const tc = TrackerConfig{};
     try std.testing.expectEqual(@as(?[]const u8, null), tc.url);
     try std.testing.expectEqual(@as(u32, 10000), tc.poll_interval_ms);
-    try std.testing.expectEqualStrings("coder", tc.agent_role);
     try std.testing.expectEqual(@as(u32, 10), tc.concurrency.max_concurrent_tasks);
     try std.testing.expectEqual(@as(u32, 300000), tc.stall_timeout_ms);
     try std.testing.expectEqual(@as(u32, 60000), tc.lease_ttl_ms);
     try std.testing.expectEqual(@as(u32, 30000), tc.heartbeat_interval_ms);
     try std.testing.expectEqualStrings("workflows", tc.workflows_dir);
-    try std.testing.expectEqual(@as(?[]const u8, null), tc.workflow_path);
-    try std.testing.expectEqualStrings("nullboiler_run", tc.artifact_kind);
 }
 
 test "Config with tracker null by default" {
@@ -239,12 +226,13 @@ test "resolveRelativePaths anchors tracker compat and advanced paths to config d
         \\  "strategies_dir": "strategies",
         \\  "tracker": {
         \\    "url": "http://127.0.0.1:7700",
-        \\    "workflow_path": "tracker-workflow.json",
         \\    "workflows_dir": "workflows",
         \\    "workspace": {
         \\      "root": "workspaces"
         \\    },
-        \\    "max_concurrent_tasks": 4
+        \\    "concurrency": {
+        \\      "max_concurrent_tasks": 4
+        \\    }
         \\  }
         \\}
     ;
@@ -267,13 +255,11 @@ test "resolveRelativePaths anchors tracker compat and advanced paths to config d
     const config_dir = std.fs.path.dirname(cfg_path).?;
     const expected_db = try std.fs.path.resolve(arena.allocator(), &.{ config_dir, "data/nullboiler.db" });
     const expected_strategies = try std.fs.path.resolve(arena.allocator(), &.{ config_dir, "strategies" });
-    const expected_workflow = try std.fs.path.resolve(arena.allocator(), &.{ config_dir, "tracker-workflow.json" });
     const expected_workflows = try std.fs.path.resolve(arena.allocator(), &.{ config_dir, "workflows" });
     const expected_workspace = try std.fs.path.resolve(arena.allocator(), &.{ config_dir, "workspaces" });
 
     try std.testing.expectEqualStrings(expected_db, cfg.db);
     try std.testing.expectEqualStrings(expected_strategies, cfg.strategies_dir);
-    try std.testing.expectEqualStrings(expected_workflow, tracker.workflow_path.?);
     try std.testing.expectEqualStrings(expected_workflows, tracker.workflows_dir);
     try std.testing.expectEqualStrings(expected_workspace, tracker.workspace.root);
     try std.testing.expectEqual(@as(u32, 4), tracker.concurrency.max_concurrent_tasks);

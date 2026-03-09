@@ -16,14 +16,13 @@
   "tracker": {
     "url": "http://nulltickets:7700",
     "agent_id": "docker-dev-1",
-    "agent_role": "llm-dev",
-    "workflow_path": "/nullboiler-data/tracker-workflow.json",
-    "success_trigger": "complete",
-    "artifact_kind": "nullboiler_run",
-    "max_concurrent_tasks": 2,
+    "concurrency": {
+      "max_concurrent_tasks": 2
+    },
     "poll_interval_ms": 5000,
     "lease_ttl_ms": 120000,
-    "heartbeat_interval_ms": 30000
+    "heartbeat_interval_ms": 30000,
+    "workflows_dir": "/nullboiler-data/workflows"
   },
   "engine": {
     "poll_interval_ms": 500,
