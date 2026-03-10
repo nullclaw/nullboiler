@@ -28,6 +28,7 @@ pub const RunningTask = struct {
     task_id: []const u8,
     task_title: []const u8,
     task_identifier: []const u8,
+    task_state: []const u8,
     task_json: []const u8,
     pipeline_id: []const u8,
     agent_role: []const u8,
@@ -71,6 +72,7 @@ pub const TrackerState = struct {
             allocator.free(task.task_id);
             allocator.free(task.task_title);
             allocator.free(task.task_identifier);
+            allocator.free(task.task_state);
             allocator.free(task.task_json);
             allocator.free(task.pipeline_id);
             allocator.free(task.lease_id);
@@ -106,6 +108,16 @@ pub const TrackerState = struct {
         var count: u32 = 0;
         for (self.running.values()) |task| {
             if (std.mem.eql(u8, task.agent_role, role)) {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    pub fn countByState(self: *const TrackerState, state_name: []const u8) u32 {
+        var count: u32 = 0;
+        for (self.running.values()) |task| {
+            if (std.mem.eql(u8, task.task_state, state_name)) {
                 count += 1;
             }
         }
@@ -205,6 +217,7 @@ pub const Tracker = struct {
         self.allocator.free(task.task_id);
         self.allocator.free(task.task_title);
         self.allocator.free(task.task_identifier);
+        self.allocator.free(task.task_state);
         self.allocator.free(task.task_json);
         self.allocator.free(task.pipeline_id);
         self.allocator.free(task.lease_id);
@@ -370,6 +383,21 @@ pub const Tracker = struct {
 
                 const claim = claim_result orelse continue;
 
+                // Check per_state concurrency limit
+                if (self.cfg.concurrency.per_state) |ps| {
+                    if (ps == .object) {
+                        if (ps.object.get(claim.task.stage)) |limit_val| {
+                            if (limit_val == .integer) {
+                                const limit: u32 = @intCast(limit_val.integer);
+                                if (self.state.countByState(claim.task.stage) >= limit) {
+                                    log.debug("per_state limit reached for state {s}, skipping task {s}", .{ claim.task.stage, claim.task.id });
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Skip if in cooldown
                 if (self.state.isInCooldown(claim.task.id)) {
                     log.debug("task {s} in cooldown, skipping", .{claim.task.id});
@@ -450,6 +478,8 @@ pub const Tracker = struct {
         errdefer self.allocator.free(owned_title);
         const owned_identifier = try self.allocator.dupe(u8, claim.task.stage);
         errdefer self.allocator.free(owned_identifier);
+        const owned_state = try self.allocator.dupe(u8, claim.task.stage);
+        errdefer self.allocator.free(owned_state);
         const owned_task_json = try self.allocator.dupe(u8, claim.task.task_json);
         errdefer self.allocator.free(owned_task_json);
         const owned_pipeline = try self.allocator.dupe(u8, claim.task.pipeline_id);
@@ -469,6 +499,7 @@ pub const Tracker = struct {
             .task_id = owned_task_id,
             .task_title = owned_title,
             .task_identifier = owned_identifier,
+            .task_state = owned_state,
             .task_json = owned_task_json,
             .pipeline_id = owned_pipeline,
             .agent_role = role, // from workflow, lives in cfg_arena
@@ -1142,6 +1173,7 @@ test "TrackerState countByPipeline and countByRole" {
         .task_id = try allocator.dupe(u8, "task-001"),
         .task_title = try allocator.dupe(u8, "Task 1"),
         .task_identifier = try allocator.dupe(u8, "T-1"),
+        .task_state = try allocator.dupe(u8, "in_progress"),
         .task_json = try allocator.dupe(u8, "{\"id\":\"task-001\"}"),
         .pipeline_id = try allocator.dupe(u8, "pipeline-a"),
         .agent_role = "coder",
@@ -1164,6 +1196,7 @@ test "TrackerState countByPipeline and countByRole" {
         .task_id = try allocator.dupe(u8, "task-002"),
         .task_title = try allocator.dupe(u8, "Task 2"),
         .task_identifier = try allocator.dupe(u8, "T-2"),
+        .task_state = try allocator.dupe(u8, "in_progress"),
         .task_json = try allocator.dupe(u8, "{\"id\":\"task-002\"}"),
         .pipeline_id = try allocator.dupe(u8, "pipeline-a"),
         .agent_role = "reviewer",
@@ -1186,6 +1219,7 @@ test "TrackerState countByPipeline and countByRole" {
         .task_id = try allocator.dupe(u8, "task-003"),
         .task_title = try allocator.dupe(u8, "Task 3"),
         .task_identifier = try allocator.dupe(u8, "T-3"),
+        .task_state = try allocator.dupe(u8, "rework"),
         .task_json = try allocator.dupe(u8, "{\"id\":\"task-003\"}"),
         .pipeline_id = try allocator.dupe(u8, "pipeline-b"),
         .agent_role = "coder",
@@ -1210,6 +1244,9 @@ test "TrackerState countByPipeline and countByRole" {
     try std.testing.expectEqual(@as(u32, 2), state.countByRole("coder"));
     try std.testing.expectEqual(@as(u32, 1), state.countByRole("reviewer"));
     try std.testing.expectEqual(@as(u32, 0), state.countByRole("deployer"));
+    try std.testing.expectEqual(@as(u32, 2), state.countByState("in_progress"));
+    try std.testing.expectEqual(@as(u32, 1), state.countByState("rework"));
+    try std.testing.expectEqual(@as(u32, 0), state.countByState("done"));
 }
 
 test "TrackerState isInCooldown" {
@@ -1244,6 +1281,7 @@ test "canClaimMore at global limit returns false" {
         .task_id = try allocator.dupe(u8, "task-fill"),
         .task_title = try allocator.dupe(u8, "Fill"),
         .task_identifier = try allocator.dupe(u8, "F-1"),
+        .task_state = try allocator.dupe(u8, "in_progress"),
         .task_json = try allocator.dupe(u8, "{\"id\":\"task-fill\"}"),
         .pipeline_id = try allocator.dupe(u8, "pipe"),
         .agent_role = "coder",
@@ -1298,4 +1336,92 @@ test "Tracker allocatePort returns unique ports" {
 
     const port3 = tracker_inst.allocatePort();
     try std.testing.expectEqual(@as(u16, 9200), port3.?);
+}
+
+test "TrackerState countByState" {
+    const allocator = std.testing.allocator;
+    var state = TrackerState.init();
+    defer state.deinit(allocator);
+
+    const now = ids.nowMs();
+
+    // Empty state — all counts zero
+    try std.testing.expectEqual(@as(u32, 0), state.countByState("in_progress"));
+    try std.testing.expectEqual(@as(u32, 0), state.countByState("rework"));
+
+    // Add one task in "in_progress" state
+    const key1 = try allocator.dupe(u8, "task-s1");
+    try state.running.put(allocator, key1, RunningTask{
+        .task_id = try allocator.dupe(u8, "task-s1"),
+        .task_title = try allocator.dupe(u8, "S1"),
+        .task_identifier = try allocator.dupe(u8, "ID-1"),
+        .task_state = try allocator.dupe(u8, "in_progress"),
+        .task_json = try allocator.dupe(u8, "{}"),
+        .pipeline_id = try allocator.dupe(u8, "pipe"),
+        .agent_role = "coder",
+        .lease_id = try allocator.dupe(u8, "l1"),
+        .lease_token = try allocator.dupe(u8, "t1"),
+        .run_id = try allocator.dupe(u8, "r1"),
+        .workspace_path = try allocator.dupe(u8, "/tmp"),
+        .execution_mode = "subprocess",
+        .subprocess = null,
+        .started_at_ms = now,
+        .last_activity_ms = now,
+        .task_version = 1,
+        .current_turn = 0,
+        .max_turns = 10,
+        .state = .running,
+    });
+
+    // Add another task in "rework" state
+    const key2 = try allocator.dupe(u8, "task-s2");
+    try state.running.put(allocator, key2, RunningTask{
+        .task_id = try allocator.dupe(u8, "task-s2"),
+        .task_title = try allocator.dupe(u8, "S2"),
+        .task_identifier = try allocator.dupe(u8, "ID-2"),
+        .task_state = try allocator.dupe(u8, "rework"),
+        .task_json = try allocator.dupe(u8, "{}"),
+        .pipeline_id = try allocator.dupe(u8, "pipe"),
+        .agent_role = "coder",
+        .lease_id = try allocator.dupe(u8, "l2"),
+        .lease_token = try allocator.dupe(u8, "t2"),
+        .run_id = try allocator.dupe(u8, "r2"),
+        .workspace_path = try allocator.dupe(u8, "/tmp"),
+        .execution_mode = "subprocess",
+        .subprocess = null,
+        .started_at_ms = now,
+        .last_activity_ms = now,
+        .task_version = 1,
+        .current_turn = 0,
+        .max_turns = 10,
+        .state = .running,
+    });
+
+    // Add a second "in_progress" task
+    const key3 = try allocator.dupe(u8, "task-s3");
+    try state.running.put(allocator, key3, RunningTask{
+        .task_id = try allocator.dupe(u8, "task-s3"),
+        .task_title = try allocator.dupe(u8, "S3"),
+        .task_identifier = try allocator.dupe(u8, "ID-3"),
+        .task_state = try allocator.dupe(u8, "in_progress"),
+        .task_json = try allocator.dupe(u8, "{}"),
+        .pipeline_id = try allocator.dupe(u8, "pipe"),
+        .agent_role = "coder",
+        .lease_id = try allocator.dupe(u8, "l3"),
+        .lease_token = try allocator.dupe(u8, "t3"),
+        .run_id = try allocator.dupe(u8, "r3"),
+        .workspace_path = try allocator.dupe(u8, "/tmp"),
+        .execution_mode = "subprocess",
+        .subprocess = null,
+        .started_at_ms = now,
+        .last_activity_ms = now,
+        .task_version = 1,
+        .current_turn = 0,
+        .max_turns = 10,
+        .state = .running,
+    });
+
+    try std.testing.expectEqual(@as(u32, 2), state.countByState("in_progress"));
+    try std.testing.expectEqual(@as(u32, 1), state.countByState("rework"));
+    try std.testing.expectEqual(@as(u32, 0), state.countByState("done"));
 }
