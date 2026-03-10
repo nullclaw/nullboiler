@@ -32,6 +32,7 @@ pub const ConcurrencyConfig = struct {
     max_concurrent_tasks: u32 = 10,
     per_pipeline: ?std.json.Value = null,
     per_role: ?std.json.Value = null,
+    per_state: ?std.json.Value = null,
 };
 
 pub const WorkspaceHooksConfig = struct {
@@ -300,4 +301,18 @@ test "resolveRelativePaths anchors tracker paths to config directory" {
     try std.testing.expectEqualStrings(expected_workflows, tracker.workflows_dir);
     try std.testing.expectEqualStrings(expected_workspace, tracker.workspace.root);
     try std.testing.expectEqual(@as(u32, 4), tracker.concurrency.max_concurrent_tasks);
+}
+
+test "parse concurrency config with per_state" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "max_concurrent_tasks": 10,
+        \\  "per_state": {"in_progress": 5, "rework": 2}
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(ConcurrencyConfig, allocator, json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.per_state != null);
+    try std.testing.expect(parsed.value.per_state.? == .object);
 }
