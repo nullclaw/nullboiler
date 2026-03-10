@@ -74,6 +74,42 @@ pub const Workspace = struct {
     }
 };
 
+/// Remove all subdirectories under the workspace root.
+/// Used for startup cleanup — workspaces are ephemeral and will be recreated by hooks.
+pub fn cleanAll(root: []const u8) void {
+    var dir = std.fs.cwd().openDir(root, .{ .iterate = true }) catch |err| {
+        log.warn("workspace: cannot open root {s} for cleanup: {}", .{ root, err });
+        return;
+    };
+    defer dir.close();
+
+    var iter = dir.iterate();
+    // Collect names first to avoid modifying directory while iterating
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (names.items) |name| std.heap.page_allocator.free(@constCast(name));
+        names.deinit(std.heap.page_allocator);
+    }
+
+    while (iter.next() catch null) |entry| {
+        if (entry.kind == .directory) {
+            names.append(std.heap.page_allocator, std.heap.page_allocator.dupe(u8, entry.name) catch continue) catch continue;
+        }
+    }
+
+    for (names.items) |name| {
+        dir.deleteTree(name) catch |err| {
+            log.warn("workspace: failed to clean {s}/{s}: {}", .{ root, name, err });
+            continue;
+        };
+        log.info("workspace: cleaned up {s}/{s}", .{ root, name });
+    }
+
+    if (names.items.len > 0) {
+        log.info("workspace: startup cleanup removed {d} workspace(s)", .{names.items.len});
+    }
+}
+
 /// Run a shell hook command via /bin/sh in the given working directory.
 /// Returns true when the command exits with code 0, false otherwise.
 /// Times out after `timeout_ms` milliseconds (the child is killed on timeout).
@@ -206,4 +242,23 @@ test "runHook returns false for failing command" {
 
     const ok = try runHook(allocator, "exit 1", cwd, 5000);
     try std.testing.expect(!ok);
+}
+
+test "cleanAll removes all subdirectories" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    // Create some fake workspace dirs
+    try tmp.dir.makeDir("task-001");
+    try tmp.dir.makeDir("task-002");
+
+    cleanAll(root);
+
+    // Verify they're gone
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openDir("task-001", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openDir("task-002", .{}));
 }
