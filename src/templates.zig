@@ -8,6 +8,12 @@
 ///   - `{{steps.ID.outputs}}` -- JSON array of outputs from map/fan_out child steps
 ///   - `{{item}}`             -- current item string for map iterations
 ///   - `{{task.X}}`           -- look up field X in the NullTickets task JSON (supports nested paths like `task.metadata.repo_url`)
+///
+/// Conditional blocks:
+///   - `{% if <expr> %}...{% endif %}`
+///   - `{% if <expr> %}...{% else %}...{% endif %}`
+///   Conditionals are processed before expression substitution.
+///   Truthiness: non-null, non-empty, not "false", not "null" string values are truthy.
 
 const std = @import("std");
 
@@ -42,24 +48,150 @@ pub const RenderError = error{
     OutOfMemory,
 };
 
-// ── render() ──────────────────────────────────────────────────────────
+// ── Conditional processing ────────────────────────────────────────────
 
-pub fn render(allocator: std.mem.Allocator, template: []const u8, ctx: Context) RenderError![]const u8 {
+/// Evaluate whether an expression is "truthy" in the given context.
+/// An expression is truthy if it resolves to a non-null, non-empty,
+/// not "false", not "null" string value.
+fn isTruthy(allocator: std.mem.Allocator, expr: []const u8, ctx: Context) bool {
+    const value = resolveExpression(allocator, expr, ctx) catch return false;
+    defer allocator.free(value);
+
+    if (value.len == 0) return false;
+    if (std.mem.eql(u8, value, "false")) return false;
+    if (std.mem.eql(u8, value, "null")) return false;
+    return true;
+}
+
+/// Preprocess conditional blocks in a template. Strips or keeps content
+/// based on expression truthiness. Handles nested conditionals.
+/// Called before `{{expression}}` substitution.
+fn processConditionals(allocator: std.mem.Allocator, template: []const u8, ctx: Context) RenderError![]const u8 {
     var result: std.ArrayListUnmanaged(u8) = .empty;
     errdefer result.deinit(allocator);
 
     var pos: usize = 0;
 
     while (pos < template.len) {
-        // Look for next `{{`
-        if (std.mem.indexOfPos(u8, template, pos, "{{")) |open| {
-            // Append literal text before the `{{`
+        // Look for next `{%`
+        if (std.mem.indexOfPos(u8, template, pos, "{%")) |open| {
+            // Append literal text before the tag
             result.appendSlice(allocator, template[pos..open]) catch return error.OutOfMemory;
+
+            // Find closing `%}`
+            const after_open = open + 2;
+            const close = std.mem.indexOfPos(u8, template, after_open, "%}") orelse
+                return error.UnterminatedExpression;
+            const tag_content = std.mem.trim(u8, template[after_open..close], " \t\n\r");
+            const after_tag = close + 2;
+
+            if (std.mem.startsWith(u8, tag_content, "if ")) {
+                const expr = std.mem.trim(u8, tag_content["if ".len..], " \t\n\r");
+
+                // Find the matching {% else %} and {% endif %} at this nesting level
+                var depth: usize = 0;
+                var scan: usize = after_tag;
+                var else_start: ?usize = null; // start of {% else %} tag
+                var else_end: ?usize = null; // position after {% else %} tag
+                var endif_start: ?usize = null; // start of {% endif %} tag
+                var endif_end: ?usize = null; // position after {% endif %} tag
+
+                while (scan < template.len) {
+                    if (std.mem.indexOfPos(u8, template, scan, "{%")) |inner_open| {
+                        const inner_after = inner_open + 2;
+                        const inner_close = std.mem.indexOfPos(u8, template, inner_after, "%}") orelse
+                            return error.UnterminatedExpression;
+                        const inner_tag = std.mem.trim(u8, template[inner_after..inner_close], " \t\n\r");
+                        const inner_after_tag = inner_close + 2;
+
+                        if (std.mem.startsWith(u8, inner_tag, "if ")) {
+                            depth += 1;
+                            scan = inner_after_tag;
+                        } else if (std.mem.eql(u8, inner_tag, "else") and depth == 0) {
+                            else_start = inner_open;
+                            else_end = inner_after_tag;
+                            scan = inner_after_tag;
+                        } else if (std.mem.eql(u8, inner_tag, "endif")) {
+                            if (depth == 0) {
+                                endif_start = inner_open;
+                                endif_end = inner_after_tag;
+                                break;
+                            }
+                            depth -= 1;
+                            scan = inner_after_tag;
+                        } else {
+                            scan = inner_after_tag;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                if (endif_end == null) {
+                    return error.UnterminatedExpression;
+                }
+
+                // Determine which branch content to include
+                const truthy = isTruthy(allocator, expr, ctx);
+
+                if (truthy) {
+                    // If-branch: from after_tag to else_start (or endif_start)
+                    const branch_end = else_start orelse endif_start.?;
+                    const branch = template[after_tag..branch_end];
+                    // Recursively process nested conditionals
+                    const processed = try processConditionals(allocator, branch, ctx);
+                    defer allocator.free(processed);
+                    result.appendSlice(allocator, processed) catch return error.OutOfMemory;
+                } else {
+                    // Else-branch (if it exists)
+                    if (else_end) |ee| {
+                        const branch = template[ee..endif_start.?];
+                        const processed = try processConditionals(allocator, branch, ctx);
+                        defer allocator.free(processed);
+                        result.appendSlice(allocator, processed) catch return error.OutOfMemory;
+                    }
+                    // If no else branch, nothing is appended (content is stripped)
+                }
+
+                pos = endif_end.?;
+            } else {
+                // Not an "if" tag -- keep it as literal text
+                result.appendSlice(allocator, template[open..after_tag]) catch return error.OutOfMemory;
+                pos = after_tag;
+            }
+        } else {
+            // No more tags; append the rest
+            result.appendSlice(allocator, template[pos..]) catch return error.OutOfMemory;
+            break;
+        }
+    }
+
+    return result.toOwnedSlice(allocator) catch return error.OutOfMemory;
+}
+
+// ── render() ──────────────────────────────────────────────────────────
+
+pub fn render(allocator: std.mem.Allocator, template: []const u8, ctx: Context) RenderError![]const u8 {
+    // Phase 1: Process conditional blocks
+    const preprocessed = try processConditionals(allocator, template, ctx);
+    defer allocator.free(preprocessed);
+
+    // Phase 2: Resolve {{expression}} substitutions
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(allocator);
+
+    var pos: usize = 0;
+
+    while (pos < preprocessed.len) {
+        // Look for next `{{`
+        if (std.mem.indexOfPos(u8, preprocessed, pos, "{{")) |open| {
+            // Append literal text before the `{{`
+            result.appendSlice(allocator, preprocessed[pos..open]) catch return error.OutOfMemory;
 
             // Find matching `}}`
             const after_open = open + 2;
-            if (std.mem.indexOfPos(u8, template, after_open, "}}")) |close| {
-                const raw_expr = template[after_open..close];
+            if (std.mem.indexOfPos(u8, preprocessed, after_open, "}}")) |close| {
+                const raw_expr = preprocessed[after_open..close];
                 const expr = std.mem.trim(u8, raw_expr, " \t\n\r");
 
                 const value = try resolveExpression(allocator, expr, ctx);
@@ -72,7 +204,7 @@ pub fn render(allocator: std.mem.Allocator, template: []const u8, ctx: Context) 
             }
         } else {
             // No more expressions; append the rest
-            result.appendSlice(allocator, template[pos..]) catch return error.OutOfMemory;
+            result.appendSlice(allocator, preprocessed[pos..]) catch return error.OutOfMemory;
             break;
         }
     }
@@ -542,4 +674,145 @@ test "render attempt variable when null" {
     const result = try render(allocator, template, ctx);
     defer allocator.free(result);
     try std.testing.expectEqualStrings("Attempt: ", result);
+}
+
+// ── Conditional block tests ───────────────────────────────────────────
+
+test "conditional block with truthy value" {
+    const allocator = std.testing.allocator;
+    const template = "{% if attempt %}Retry #{{attempt}}{% endif %}";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .attempt = 3,
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Retry #3", result);
+}
+
+test "conditional block with falsy value strips content" {
+    const allocator = std.testing.allocator;
+    const template = "{% if attempt %}Retry #{{attempt}}{% endif %}Done";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .attempt = null,
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Done", result);
+}
+
+test "conditional block with else branch" {
+    const allocator = std.testing.allocator;
+    const template = "{% if attempt %}Retry{% else %}First run{% endif %}";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .attempt = null,
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("First run", result);
+}
+
+test "conditional block with task.description truthy" {
+    const allocator = std.testing.allocator;
+    const template = "{% if task.description %}Desc: {{task.description}}{% else %}No description{% endif %}";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .task_json = "{\"description\": \"Fix bug\"}",
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Desc: Fix bug", result);
+}
+
+test "conditional block with task.description falsy" {
+    const allocator = std.testing.allocator;
+    const template = "{% if task.description %}Desc: {{task.description}}{% else %}No description{% endif %}";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .task_json = "{}",
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("No description", result);
+}
+
+test "nested conditional blocks" {
+    const allocator = std.testing.allocator;
+    const template = "{% if attempt %}Retry{% if task.description %}: {{task.description}}{% endif %}{% else %}New{% endif %}";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .attempt = 2,
+        .task_json = "{\"description\": \"Fix it\"}",
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Retry: Fix it", result);
+}
+
+test "conditional block with false string is falsy" {
+    const allocator = std.testing.allocator;
+    const template = "{% if input.enabled %}ON{% else %}OFF{% endif %}";
+    const ctx = Context{
+        .input_json = "{\"enabled\": false}",
+        .step_outputs = &.{},
+        .item = null,
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("OFF", result);
+}
+
+test "conditional block with null string is falsy" {
+    const allocator = std.testing.allocator;
+    const template = "{% if input.val %}YES{% else %}NO{% endif %}";
+    const ctx = Context{
+        .input_json = "{\"val\": null}",
+        .step_outputs = &.{},
+        .item = null,
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("NO", result);
+}
+
+test "multiple consecutive conditional blocks" {
+    const allocator = std.testing.allocator;
+    const template = "{% if attempt %}A{% endif %}{% if task.title %}B{% endif %}";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .attempt = 1,
+        .task_json = "{\"title\": \"x\"}",
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("AB", result);
+}
+
+test "unterminated conditional block returns error" {
+    const allocator = std.testing.allocator;
+    const template = "{% if attempt %}content";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .attempt = 3,
+    };
+    const result = render(allocator, template, ctx);
+    try std.testing.expectError(error.UnterminatedExpression, result);
 }
