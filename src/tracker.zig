@@ -738,13 +738,14 @@ pub const Tracker = struct {
             return;
         });
 
-        // Render prompt
+        // Render prompt - lookup workflow first (needed by both branches)
+        const workflow = self.workflows.get(task.pipeline_id) orelse {
+            log.err("no workflow for pipeline {s}", .{task.pipeline_id});
+            task.state = .failed;
+            return;
+        };
+
         const prompt: ?[]const u8 = if (task.current_turn == 0) blk: {
-            const workflow = self.workflows.get(task.pipeline_id) orelse {
-                log.err("no workflow for pipeline {s}", .{task.pipeline_id});
-                task.state = .failed;
-                break :blk null;
-            };
             const tmpl = workflow.prompt_template orelse {
                 log.err("no prompt_template for pipeline {s}", .{task.pipeline_id});
                 task.state = .failed;
@@ -755,6 +756,7 @@ pub const Tracker = struct {
                 .step_outputs = &.{},
                 .item = null,
                 .task_json = task.task_json,
+                .attempt = null,
             };
             break :blk templates.render(tick_alloc, tmpl, ctx) catch |err| {
                 log.err("template render failed for task {s}: {s}", .{ task.task_id, @errorName(err) });
@@ -762,7 +764,20 @@ pub const Tracker = struct {
                 break :blk null;
             };
         } else blk: {
-            break :blk self.cfg.subprocess.continuation_prompt;
+            // Continuation turn: use per-workflow prompt, fall back to global default
+            const cont_tmpl = workflow.subprocess.continuation_prompt orelse self.cfg.subprocess.continuation_prompt;
+            const ctx = templates.Context{
+                .input_json = task.task_json,
+                .step_outputs = &.{},
+                .item = null,
+                .task_json = task.task_json,
+                .attempt = task.current_turn,
+            };
+            break :blk templates.render(tick_alloc, cont_tmpl, ctx) catch |err| {
+                log.err("continuation template render failed for task {s}: {s}", .{ task.task_id, @errorName(err) });
+                task.state = .failed;
+                break :blk null;
+            };
         };
 
         if (prompt == null) return;
