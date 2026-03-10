@@ -22,6 +22,13 @@ pub const DispatchConfig = struct {
 
 pub const TransitionConfig = struct {
     transition_to: []const u8 = "",
+    retry: bool = false,
+};
+
+pub const RetryConfig = struct {
+    max_attempts: u32 = 3,
+    backoff_base_ms: u32 = 10000,
+    backoff_max_ms: u32 = 300000,
 };
 
 pub const WorkflowDef = struct {
@@ -34,6 +41,7 @@ pub const WorkflowDef = struct {
     prompt_template: ?[]const u8 = null,
     on_success: TransitionConfig = .{},
     on_failure: TransitionConfig = .{ .transition_to = "failed" },
+    retry: ?RetryConfig = null,
 };
 
 pub const WorkflowMap = std.StringArrayHashMapUnmanaged(WorkflowDef);
@@ -115,6 +123,8 @@ test "WorkflowDef defaults" {
     try std.testing.expectEqual(@as(?[]const u8, null), def.prompt_template);
     try std.testing.expectEqualStrings("", def.on_success.transition_to);
     try std.testing.expectEqualStrings("failed", def.on_failure.transition_to);
+    try std.testing.expect(!def.on_failure.retry);
+    try std.testing.expectEqual(@as(?RetryConfig, null), def.retry);
 }
 
 test "SubprocessConfig defaults" {
@@ -241,6 +251,32 @@ test "getWorkflowForPipeline: returns null when not found" {
     var map = WorkflowMap{};
     const result = getWorkflowForPipeline(&map, "nonexistent");
     try std.testing.expectEqual(@as(?*const WorkflowDef, null), result);
+}
+
+test "parse workflow with retry config" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "id": "retry-wf",
+        \\  "pipeline_id": "pipeline-retry",
+        \\  "claim_roles": ["dev"],
+        \\  "execution": "subprocess",
+        \\  "retry": {
+        \\    "max_attempts": 3,
+        \\    "backoff_base_ms": 10000,
+        \\    "backoff_max_ms": 300000
+        \\  },
+        \\  "on_failure": {
+        \\    "transition_to": "failed",
+        \\    "retry": true
+        \\  }
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(WorkflowDef, allocator, json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.retry != null);
+    try std.testing.expectEqual(@as(u32, 3), parsed.value.retry.?.max_attempts);
+    try std.testing.expect(parsed.value.on_failure.retry);
 }
 
 test "parse workflow with continuation_prompt" {
