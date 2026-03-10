@@ -12,6 +12,7 @@ pub const SubprocessConfig = struct {
     args: []const []const u8 = &.{},
     max_turns: u32 = 20,
     turn_timeout_ms: u32 = 600000,
+    continuation_prompt: ?[]const u8 = null,
 };
 
 pub const DispatchConfig = struct {
@@ -240,4 +241,25 @@ test "getWorkflowForPipeline: returns null when not found" {
     var map = WorkflowMap{};
     const result = getWorkflowForPipeline(&map, "nonexistent");
     try std.testing.expectEqual(@as(?*const WorkflowDef, null), result);
+}
+
+test "parse workflow with continuation_prompt" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "id": "test-wf",
+        \\  "pipeline_id": "pipeline-test",
+        \\  "claim_roles": ["dev"],
+        \\  "execution": "subprocess",
+        \\  "subprocess": {
+        \\    "command": "nullclaw",
+        \\    "max_turns": 10,
+        \\    "continuation_prompt": "Continue: attempt #{{attempt}}"
+        \\  },
+        \\  "prompt_template": "Do {{task.title}}"
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(WorkflowDef, allocator, json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("Continue: attempt #{{attempt}}", parsed.value.subprocess.continuation_prompt.?);
 }
