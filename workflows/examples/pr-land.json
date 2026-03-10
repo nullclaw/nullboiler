@@ -1,0 +1,26 @@
+{
+  "id": "pr-land",
+  "pipeline_id": "pipeline-pr-land",
+  "claim_roles": ["developer", "merger"],
+  "execution": "subprocess",
+  "subprocess": {
+    "command": "nullclaw",
+    "args": ["--single-task"],
+    "max_turns": 25,
+    "turn_timeout_ms": 600000,
+    "continuation_prompt": "{% if attempt %}PR landing is still in progress (attempt #{{attempt}}).\nCheck current PR status, CI results, and review comments.\nResume the landing process from where you left off.{% endif %}"
+  },
+  "prompt_template": "You are landing a pull request for NullTickets task `{{task.identifier}}`\n\n{% if attempt %}Continuation: attempt #{{attempt}}. Check current PR and CI state before proceeding.{% endif %}\n\nTask context:\nIdentifier: {{task.identifier}}\nTitle: {{task.title}}\n\nDescription:\n{% if task.description %}{{task.description}}{% else %}No description provided.{% endif %}\n\nPR landing workflow:\n\n1. This is an unattended orchestration session. Do not ask a human to perform follow-up actions.\n2. Only stop early for a true blocker (missing required auth/permissions/secrets).\n\nPhase 1 - Pre-flight:\n- Identify the PR for the current branch.\n- Check mergeability and conflicts against main.\n- If conflicts exist, merge origin/main and resolve them.\n- Ensure all review comments (human and automated) are addressed.\n\nPhase 2 - Review feedback:\n- Gather feedback from all channels:\n  - Top-level PR comments.\n  - Inline review comments.\n  - Review summaries and states.\n- Treat every actionable reviewer comment as blocking until:\n  - Code/test/docs updated to address it, OR\n  - Explicit, justified pushback reply is posted.\n- After addressing feedback, push updates and re-run validation.\n\nPhase 3 - CI watch:\n- Wait for all CI checks to complete.\n- If checks fail, pull logs, diagnose the issue, and fix it.\n- Commit fixes, push, and re-watch checks.\n- Use judgment to identify flaky failures. If a failure is clearly a flake (e.g., timeout on one platform only), you may proceed.\n\nPhase 4 - Merge:\n- When all checks are green and review feedback is addressed:\n  - Squash-merge the PR using the PR title and body.\n  - Do not enable auto-merge.\n- After merge is complete, confirm the merge was successful.\n\nGuardrails:\n- Do not use --force; only use --force-with-lease when history was rewritten.\n- Do not merge while review comments are outstanding.\n- Keep PR title and description reflecting the full scope of changes.\n- If blocked by auth/permissions, report the exact error and stop.",
+  "retry": {
+    "max_attempts": 5,
+    "backoff_base_ms": 30000,
+    "backoff_max_ms": 300000
+  },
+  "on_success": {
+    "transition_to": "done"
+  },
+  "on_failure": {
+    "transition_to": "merge-failed",
+    "retry": true
+  }
+}
