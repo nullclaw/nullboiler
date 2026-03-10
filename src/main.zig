@@ -297,6 +297,7 @@ pub fn main() !void {
                 allocator,
                 tracker_cfg,
                 workflows,
+                &store,
                 &shutdown_requested,
             );
 

@@ -14,7 +14,9 @@ const log = std.log.scoped(.tracker);
 const config = @import("config.zig");
 const types = @import("types.zig");
 const ids = @import("ids.zig");
+const dispatch_mod = @import("dispatch.zig");
 const subprocess_mod = @import("subprocess.zig");
+const Store = @import("store.zig").Store;
 const workspace_mod = @import("workspace.zig");
 const workflow_loader = @import("workflow_loader.zig");
 const tracker_client = @import("tracker_client.zig");
@@ -167,6 +169,7 @@ pub const Tracker = struct {
     cfg: config.TrackerConfig,
     state: TrackerState,
     workflows: workflow_loader.WorkflowMap,
+    store: ?*Store,
     shutdown: *std.atomic.Value(bool),
     last_heartbeat_ms: i64,
     used_ports: std.AutoArrayHashMapUnmanaged(u16, void),
@@ -175,6 +178,7 @@ pub const Tracker = struct {
         allocator: std.mem.Allocator,
         cfg: config.TrackerConfig,
         workflows: workflow_loader.WorkflowMap,
+        store: ?*Store,
         shutdown: *std.atomic.Value(bool),
     ) Tracker {
         return .{
@@ -182,6 +186,7 @@ pub const Tracker = struct {
             .cfg = cfg,
             .state = TrackerState.init(),
             .workflows = workflows,
+            .store = store,
             .shutdown = shutdown,
             .last_heartbeat_ms = 0,
             .used_ports = .{},
@@ -256,6 +261,9 @@ pub const Tracker = struct {
         defer arena.deinit();
         const tick_alloc = arena.allocator();
 
+        self.state.mutex.lock();
+        defer self.state.mutex.unlock();
+
         self.heartbeatAll(tick_alloc);
         self.detectStalls(tick_alloc);
         self.driveRunningTasks(tick_alloc);
@@ -295,14 +303,12 @@ pub const Tracker = struct {
         }
 
         // Remove failed heartbeat tasks and free owned strings
-        self.state.mutex.lock();
         for (to_remove.items) |key| {
             if (self.state.running.fetchSwapRemove(key)) |entry| {
                 self.freeRunningTaskStrings(entry.value);
                 self.allocator.free(entry.key);
             }
         }
-        self.state.mutex.unlock();
     }
 
     /// Detect stalled subprocesses. If stalled, report failure to NullTickets,
@@ -328,22 +334,18 @@ pub const Tracker = struct {
                         subprocess_mod.killSubprocess(child);
                     }
 
-                    self.state.mutex.lock();
                     self.state.failed_count += 1;
-                    self.state.mutex.unlock();
                     to_remove.append(tick_alloc, key) catch continue;
                 }
             }
         }
 
-        self.state.mutex.lock();
         for (to_remove.items) |key| {
             if (self.state.running.fetchSwapRemove(key)) |entry| {
                 self.freeRunningTaskStrings(entry.value);
                 self.allocator.free(entry.key);
             }
         }
-        self.state.mutex.unlock();
     }
 
     /// Poll NullTickets for each workflow's claim_roles and claim available tasks.
@@ -484,8 +486,6 @@ pub const Tracker = struct {
             .state = .workspace_setup,
         };
 
-        self.state.mutex.lock();
-        defer self.state.mutex.unlock();
         try self.state.running.put(self.allocator, key, running_task);
 
         log.info("started task {s} (pipeline={s}, role={s}, mode={s})", .{
@@ -522,11 +522,9 @@ pub const Tracker = struct {
         var task_ids: std.ArrayListUnmanaged([]const u8) = .empty;
         defer task_ids.deinit(tick_alloc);
 
-        self.state.mutex.lock();
         for (self.state.running.keys()) |key| {
             task_ids.append(tick_alloc, key) catch continue;
         }
-        self.state.mutex.unlock();
 
         for (task_ids.items) |task_id| {
             const task = self.state.running.getPtr(task_id) orelse continue;
@@ -551,14 +549,12 @@ pub const Tracker = struct {
             }
         }
 
-        self.state.mutex.lock();
         for (to_remove.items) |key| {
             if (self.state.running.fetchSwapRemove(key)) |entry| {
                 self.freeRunningTaskStrings(entry.value);
                 self.allocator.free(entry.key);
             }
         }
-        self.state.mutex.unlock();
     }
 
     /// Reconcile running tasks with NullTickets state.
@@ -583,9 +579,7 @@ pub const Tracker = struct {
                     }
                     self.releasePort(sub.port);
                 }
-                self.state.mutex.lock();
                 self.state.failed_count += 1;
-                self.state.mutex.unlock();
                 to_remove.append(tick_alloc, key) catch continue;
                 continue;
             }
@@ -610,9 +604,7 @@ pub const Tracker = struct {
                     }
                     self.releasePort(sub.port);
                 }
-                self.state.mutex.lock();
                 self.state.failed_count += 1;
-                self.state.mutex.unlock();
                 to_remove.append(tick_alloc, key) catch continue;
                 continue;
             }
@@ -632,14 +624,12 @@ pub const Tracker = struct {
             task.task_version = info.task_version;
         }
 
-        self.state.mutex.lock();
         for (to_remove.items) |key| {
             if (self.state.running.fetchSwapRemove(key)) |entry| {
                 self.freeRunningTaskStrings(entry.value);
                 self.allocator.free(entry.key);
             }
         }
-        self.state.mutex.unlock();
     }
 
     /// workspace_setup → spawning (subprocess) or running (dispatch).
@@ -853,9 +843,96 @@ pub const Tracker = struct {
             return;
         };
 
-        // TODO: Wire actual dispatch.zig call using workflow.dispatch.worker_tags and protocol
-        log.warn("dispatch execution not yet implemented for task {s} ({d} bytes rendered), failing", .{ task.task_id, rendered.len });
-        task.state = .failed;
+        const store = self.store orelse {
+            log.err("dispatch requested for task {s}, but tracker store is unavailable", .{task.task_id});
+            task.state = .failed;
+            return;
+        };
+
+        const workers = store.listWorkers(tick_alloc) catch |err| {
+            log.err("failed to list workers for dispatch task {s}: {}", .{ task.task_id, err });
+            task.state = .failed;
+            return;
+        };
+
+        var worker_infos: std.ArrayListUnmanaged(dispatch_mod.WorkerInfo) = .empty;
+        defer worker_infos.deinit(tick_alloc);
+
+        for (workers) |worker| {
+            if (workflow.dispatch.protocol.len > 0 and !std.mem.eql(u8, worker.protocol, workflow.dispatch.protocol)) {
+                continue;
+            }
+            const current_tasks = store.countRunningStepsByWorker(worker.id) catch 0;
+            worker_infos.append(tick_alloc, .{
+                .id = worker.id,
+                .url = worker.url,
+                .token = worker.token,
+                .protocol = worker.protocol,
+                .model = worker.model,
+                .tags_json = worker.tags_json,
+                .max_concurrent = worker.max_concurrent,
+                .status = worker.status,
+                .current_tasks = current_tasks,
+            }) catch {
+                task.state = .failed;
+                return;
+            };
+        }
+
+        const selected_worker = dispatch_mod.selectWorker(tick_alloc, worker_infos.items, workflow.dispatch.worker_tags) catch |err| {
+            log.err("worker selection failed for dispatch task {s}: {}", .{ task.task_id, err });
+            task.state = .failed;
+            return;
+        };
+        const worker = selected_worker orelse {
+            log.warn("no worker available for dispatch task {s} (pipeline={s}, protocol={s})", .{
+                task.task_id,
+                task.pipeline_id,
+                workflow.dispatch.protocol,
+            });
+            task.state = .failed;
+            return;
+        };
+
+        const step_id = if (workflow.id.len > 0) workflow.id else workflow.pipeline_id;
+        const result = dispatch_mod.dispatchStep(
+            tick_alloc,
+            worker.url,
+            worker.token,
+            worker.protocol,
+            worker.model,
+            task.run_id,
+            step_id,
+            rendered,
+        ) catch |err| {
+            log.err("dispatch failed for task {s}: {}", .{ task.task_id, err });
+            task.state = .failed;
+            return;
+        };
+
+        if (!result.success or result.async_pending) {
+            if (result.async_pending) {
+                log.warn("dispatch task {s} returned async_pending, which tracker mode does not support yet", .{task.task_id});
+            } else {
+                log.warn("dispatch task {s} failed: {s}", .{ task.task_id, result.error_text orelse "dispatch failed" });
+            }
+            task.state = .failed;
+            return;
+        }
+
+        task.current_turn += 1;
+        task.last_activity_ms = ids.nowMs();
+
+        var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
+        const event_data = std.fmt.allocPrint(
+            tick_alloc,
+            "{{\"worker_id\":\"{s}\",\"output_bytes\":{d}}}",
+            .{ worker.id, result.output.len },
+        ) catch "{}";
+        _ = client.postEvent(task.run_id, "dispatch_completed", event_data, task.lease_token) catch {};
+
+        task.state = .completing;
+        self.driveCompleting(tick_alloc, task);
     }
 
     /// completing: run after_run hook, call transition, kill subprocess
@@ -915,9 +992,7 @@ pub const Tracker = struct {
         };
         ws.remove();
 
-        self.state.mutex.lock();
         self.state.completed_count += 1;
-        self.state.mutex.unlock();
         task.state = .removing;
     }
 
@@ -945,14 +1020,14 @@ pub const Tracker = struct {
         };
         ws.remove();
 
-        self.state.mutex.lock();
         self.state.failed_count += 1;
-        self.state.mutex.unlock();
         task.state = .removing;
     }
 
     /// Kill all running subprocesses (called during shutdown).
     fn shutdownSubprocesses(self: *Tracker) void {
+        self.state.mutex.lock();
+        defer self.state.mutex.unlock();
         for (self.state.running.values()) |*task| {
             if (task.subprocess) |*sub| {
                 if (sub.child) |*child| {
@@ -1195,7 +1270,7 @@ test "Tracker allocatePort returns unique ports" {
     var shutdown = std.atomic.Value(bool).init(false);
     const workflows = workflow_loader.WorkflowMap{};
 
-    var tracker_inst = Tracker.init(allocator, config.TrackerConfig{}, workflows, &shutdown);
+    var tracker_inst = Tracker.init(allocator, config.TrackerConfig{}, workflows, null, &shutdown);
     defer tracker_inst.deinit();
 
     const port1 = tracker_inst.allocatePort();
