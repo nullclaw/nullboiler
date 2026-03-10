@@ -1,0 +1,26 @@
+{
+  "id": "feature-dev",
+  "pipeline_id": "pipeline-feature-dev",
+  "claim_roles": ["developer", "coder"],
+  "execution": "subprocess",
+  "subprocess": {
+    "command": "nullclaw",
+    "args": ["--single-task"],
+    "max_turns": 20,
+    "turn_timeout_ms": 600000,
+    "continuation_prompt": "{% if attempt %}The task is still in an active state (attempt #{{attempt}}).\n\nContinuation instructions:\n- Resume from the current workspace state instead of restarting from scratch.\n- Do not repeat already-completed investigation or validation unless needed for new code changes.\n- Check your previous work and continue from where you left off.\n- If blocked by missing permissions or secrets, report the blocker and stop.{% endif %}"
+  },
+  "prompt_template": "You are working on a NullTickets task `{{task.identifier}}`\n\n{% if attempt %}Continuation context:\n- This is retry attempt #{{attempt}} because the task is still in an active state.\n- Resume from the current workspace state instead of restarting from scratch.\n- Do not repeat already-completed investigation or validation unless needed for new code changes.\n{% endif %}\n\nTask context:\nIdentifier: {{task.identifier}}\nTitle: {{task.title}}\n\nDescription:\n{% if task.description %}{{task.description}}{% else %}No description provided.{% endif %}\n\nInstructions:\n\n1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.\n2. Only stop early for a true blocker (missing required auth/permissions/secrets).\n3. Final message must report completed actions and blockers only.\n\nWork only in the provided workspace. Do not touch any other path.\n\nWorkflow:\n\n1. Start by understanding the full scope of the task from the title and description.\n2. Plan your approach before writing code. Break the task into concrete steps.\n3. Reproduce the current behavior first (for bugs) or understand existing code (for features).\n4. Implement changes incrementally with tests.\n5. Run the project's test suite after each meaningful change.\n6. Commit changes with clear, conventional commit messages.\n7. Push to a feature branch and create a pull request.\n8. Verify all CI checks pass before considering the task complete.\n\nQuality bar:\n- Code follows existing project conventions and style.\n- Tests cover the changed behavior.\n- No unrelated changes included.\n- Commit history is clean and logical.",
+  "retry": {
+    "max_attempts": 3,
+    "backoff_base_ms": 10000,
+    "backoff_max_ms": 300000
+  },
+  "on_success": {
+    "transition_to": "human-review"
+  },
+  "on_failure": {
+    "transition_to": "failed",
+    "retry": true
+  }
+}
