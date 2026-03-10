@@ -251,6 +251,9 @@ pub const Tracker = struct {
             self.cfg.agent_id,
         });
 
+        // Startup cleanup: remove all stale workspaces from previous run
+        workspace_mod.cleanAll(self.cfg.workspace.root);
+
         const poll_ns: u64 = @as(u64, self.cfg.poll_interval_ms) * std.time.ns_per_ms;
 
         while (!self.shutdown.load(.acquire)) {
