@@ -21,6 +21,7 @@ pub const Context = struct {
     chat_history: ?[]const u8 = null, // formatted chat transcript for group_chat round_template
     role: ?[]const u8 = null, // participant role for group_chat round_template
     task_json: ?[]const u8 = null, // raw JSON string of NullTickets task data
+    attempt: ?u32 = null, // current retry attempt number
 
     pub const StepOutput = struct {
         step_id: []const u8,
@@ -106,6 +107,13 @@ fn resolveExpression(allocator: std.mem.Allocator, expr: []const u8, ctx: Contex
     if (std.mem.eql(u8, expr, "role")) {
         if (ctx.role) |r| {
             return allocator.dupe(u8, r) catch return error.OutOfMemory;
+        }
+        return allocator.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.eql(u8, expr, "attempt")) {
+        if (ctx.attempt) |a| {
+            return std.fmt.allocPrint(allocator, "{d}", .{a}) catch return error.OutOfMemory;
         }
         return allocator.dupe(u8, "") catch return error.OutOfMemory;
     }
@@ -506,4 +514,32 @@ test "render task.metadata.X nested variable" {
     });
     defer allocator.free(result);
     try std.testing.expectEqualStrings("Repo: https://github.com/org/repo", result);
+}
+
+test "render attempt variable" {
+    const allocator = std.testing.allocator;
+    const template = "Attempt: {{attempt}}";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .attempt = 3,
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Attempt: 3", result);
+}
+
+test "render attempt variable when null" {
+    const allocator = std.testing.allocator;
+    const template = "Attempt: {{attempt}}";
+    const ctx = Context{
+        .input_json = "{}",
+        .step_outputs = &.{},
+        .item = null,
+        .attempt = null,
+    };
+    const result = try render(allocator, template, ctx);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Attempt: ", result);
 }
