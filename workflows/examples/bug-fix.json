@@ -1,0 +1,26 @@
+{
+  "id": "bug-fix",
+  "pipeline_id": "pipeline-bug-fix",
+  "claim_roles": ["developer", "coder"],
+  "execution": "subprocess",
+  "subprocess": {
+    "command": "nullclaw",
+    "args": ["--single-task"],
+    "max_turns": 15,
+    "turn_timeout_ms": 600000,
+    "continuation_prompt": "{% if attempt %}Bug fix is still in progress (attempt #{{attempt}}).\nResume from the current workspace state. Your previous investigation context is preserved.\nDo not re-investigate issues you have already identified.\nFocus on completing the fix and verification.{% endif %}"
+  },
+  "prompt_template": "You are fixing a bug reported in NullTickets task `{{task.identifier}}`\n\n{% if attempt %}Continuation context:\n- This is retry attempt #{{attempt}}.\n- Resume from the current workspace state instead of restarting from scratch.\n- Your previous investigation results are preserved in the workspace.\n{% endif %}\n\nBug report:\nIdentifier: {{task.identifier}}\nTitle: {{task.title}}\n\nDescription:\n{% if task.description %}{{task.description}}{% else %}No description provided.{% endif %}\n\nBug fix workflow:\n\n1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.\n2. Only stop early for a true blocker (missing required auth/permissions/secrets).\n\nPhase 1 - Reproduce:\n- Read the bug report carefully. Identify the expected vs actual behavior.\n- Find the relevant code paths.\n- Write a failing test that reproduces the bug. Run it to confirm it fails.\n- If you cannot reproduce, document what you tried and why it did not reproduce.\n\nPhase 2 - Root cause:\n- Trace the execution path that leads to the bug.\n- Identify the root cause, not just the symptom.\n- Document your findings before making changes.\n\nPhase 3 - Fix:\n- Make the minimal change that fixes the root cause.\n- Avoid unrelated refactoring or cleanup.\n- Ensure the failing test now passes.\n- Run the full test suite to check for regressions.\n\nPhase 4 - Verify:\n- Confirm the fix addresses the original bug report.\n- Verify no new test failures were introduced.\n- Commit with a clear message referencing the bug.\n- Push to a feature branch and create a pull request.\n\nQuality bar:\n- The fix is minimal and targeted.\n- A regression test exists for the bug.\n- No unrelated changes.\n- All tests pass.",
+  "retry": {
+    "max_attempts": 3,
+    "backoff_base_ms": 15000,
+    "backoff_max_ms": 300000
+  },
+  "on_success": {
+    "transition_to": "human-review"
+  },
+  "on_failure": {
+    "transition_to": "failed",
+    "retry": true
+  }
+}
