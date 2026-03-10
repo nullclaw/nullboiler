@@ -45,6 +45,14 @@ pub const RunningTask = struct {
     max_turns: u32,
     state: types.TrackerTaskState,
     health_retries: u32 = 0,
+    attempt_count: u32 = 1,
+};
+
+// ── CooldownEntry ──────────────────────────────────────────────────
+
+pub const CooldownEntry = struct {
+    expires_at: i64,
+    attempt_count: u32,
 };
 
 // ── TrackerState ────────────────────────────────────────────────────
@@ -54,7 +62,7 @@ pub const TrackerState = struct {
     running: std.StringArrayHashMapUnmanaged(RunningTask),
     completed_count: u64,
     failed_count: u64,
-    cooldowns: std.StringArrayHashMapUnmanaged(i64),
+    cooldowns: std.StringArrayHashMapUnmanaged(CooldownEntry),
 
     pub fn init() TrackerState {
         return .{
@@ -125,8 +133,13 @@ pub const TrackerState = struct {
     }
 
     pub fn isInCooldown(self: *const TrackerState, task_id: []const u8) bool {
-        const until = self.cooldowns.get(task_id) orelse return false;
-        return ids.nowMs() < until;
+        const entry = self.cooldowns.get(task_id) orelse return false;
+        return ids.nowMs() < entry.expires_at;
+    }
+
+    pub fn getAttemptCount(self: *const TrackerState, task_id: []const u8) u32 {
+        const entry = self.cooldowns.get(task_id) orelse return 1;
+        return entry.attempt_count;
     }
 };
 
@@ -518,6 +531,7 @@ pub const Tracker = struct {
             .current_turn = 0,
             .max_turns = workflow.subprocess.max_turns,
             .state = .workspace_setup,
+            .attempt_count = self.state.getAttemptCount(claim.task.id),
         };
 
         try self.state.running.put(self.allocator, key, running_task);
@@ -537,8 +551,8 @@ pub const Tracker = struct {
         var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
         defer to_remove.deinit(self.allocator);
 
-        for (self.state.cooldowns.keys(), self.state.cooldowns.values()) |key, until| {
-            if (now >= until) {
+        for (self.state.cooldowns.keys(), self.state.cooldowns.values()) |key, entry| {
+            if (now >= entry.expires_at) {
                 to_remove.append(self.allocator, key) catch continue;
             }
         }
@@ -1045,8 +1059,56 @@ pub const Tracker = struct {
         task.state = .removing;
     }
 
-    /// failed: call failRun, run after_run hook, kill subprocess, remove workspace, mark for removal
+    /// failed: check retry config, either schedule retry with backoff or call failRun
     fn driveFailed(self: *Tracker, tick_alloc: std.mem.Allocator, task: *RunningTask) void {
+        const workflow = self.workflows.get(task.pipeline_id);
+
+        // Check if retry is configured
+        if (workflow) |wf| {
+            if (wf.on_failure.retry) {
+                const retry_cfg = wf.retry orelse workflow_loader.RetryConfig{};
+                if (task.attempt_count < retry_cfg.max_attempts) {
+                    // Calculate backoff: min(base * 2^(attempt-1), max)
+                    const shift_amount = @min(task.attempt_count - 1, 20);
+                    const shift: u5 = @intCast(shift_amount);
+                    const backoff: u32 = @min(retry_cfg.backoff_base_ms << shift, retry_cfg.backoff_max_ms);
+                    const cooldown_until = ids.nowMs() + @as(i64, backoff);
+
+                    // Kill subprocess and release port
+                    if (task.subprocess) |*sub| {
+                        if (sub.child) |*child| {
+                            subprocess_mod.killSubprocess(child);
+                        }
+                        self.releasePort(sub.port);
+                    }
+                    // Run after_run hook
+                    if (self.cfg.workspace.hooks.after_run) |hook| {
+                        _ = workspace_mod.runHook(tick_alloc, hook, task.workspace_path, @as(u64, self.cfg.workspace.hook_timeout_ms)) catch {};
+                    }
+                    // Remove workspace (will be recreated on next claim)
+                    std.fs.cwd().deleteTree(task.workspace_path) catch |err| {
+                        log.warn("workspace: failed to remove {s}: {}", .{ task.workspace_path, err });
+                    };
+
+                    // Add to cooldown with attempt tracking
+                    const key = self.allocator.dupe(u8, task.task_id) catch {
+                        task.state = .removing;
+                        return;
+                    };
+                    self.state.cooldowns.put(self.allocator, key, .{
+                        .expires_at = cooldown_until,
+                        .attempt_count = task.attempt_count + 1,
+                    }) catch {};
+
+                    log.info("task {s} failed, scheduling retry #{d} in {d}ms", .{ task.task_id, task.attempt_count + 1, backoff });
+                    self.state.failed_count += 1;
+                    task.state = .removing;
+                    return;
+                }
+            }
+        }
+
+        // Original failure path (no retry or max attempts reached)
         var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
         _ = client.failRun(task.run_id, "execution failed", task.lease_token, null) catch {};
 
@@ -1262,13 +1324,27 @@ test "TrackerState isInCooldown" {
 
     // Add a cooldown far in the future
     const future_key = try allocator.dupe(u8, "task-future");
-    try state.cooldowns.put(allocator, future_key, ids.nowMs() + 999_999);
+    try state.cooldowns.put(allocator, future_key, .{ .expires_at = ids.nowMs() + 999_999, .attempt_count = 2 });
     try std.testing.expect(state.isInCooldown("task-future"));
 
     // Add a cooldown in the past
     const past_key = try allocator.dupe(u8, "task-past");
-    try state.cooldowns.put(allocator, past_key, 0);
+    try state.cooldowns.put(allocator, past_key, .{ .expires_at = 0, .attempt_count = 1 });
     try std.testing.expect(!state.isInCooldown("task-past"));
+}
+
+test "TrackerState getAttemptCount" {
+    const allocator = std.testing.allocator;
+    var state = TrackerState.init();
+    defer state.deinit(allocator);
+
+    // Default attempt count for unknown task
+    try std.testing.expectEqual(@as(u32, 1), state.getAttemptCount("unknown-task"));
+
+    // Attempt count from cooldown entry
+    const key = try allocator.dupe(u8, "task-retry");
+    try state.cooldowns.put(allocator, key, .{ .expires_at = ids.nowMs() + 999_999, .attempt_count = 3 });
+    try std.testing.expectEqual(@as(u32, 3), state.getAttemptCount("task-retry"));
 }
 
 test "canClaimMore at global limit returns false" {
