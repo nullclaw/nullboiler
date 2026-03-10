@@ -122,15 +122,9 @@ On claim, check 4 axes: global + per_pipeline + per_role + per_state. `per_state
 
 ## 4. Dispatch Priority Sorting
 
-**File:** `src/tracker.zig`
+**Responsibility:** NullTickets server-side.
 
-Sort candidate tasks before claiming:
-
-1. Priority ascending (1 = urgent, 4 = low; null sorts last)
-2. Created date ascending (oldest first)
-3. Identifier lexicographic (tie-breaker)
-
-Requires NullTickets API to return `priority` and `created_at` in claim candidates response. Sorting done in-memory after fetch.
+The NullTickets claim API (`/leases/claim`) returns one task at a time — the server decides which task to assign based on priority, created date, and identifier. NullBoiler's `TaskInfo` already has a `priority` field for downstream use, but client-side sorting is not applicable to the claim-based architecture. No NullBoiler changes needed.
 
 ## 5. Startup Workspace Cleanup
 
