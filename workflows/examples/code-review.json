@@ -1,0 +1,20 @@
+{
+  "id": "code-review",
+  "pipeline_id": "pipeline-code-review",
+  "claim_roles": ["reviewer"],
+  "execution": "subprocess",
+  "subprocess": {
+    "command": "nullclaw",
+    "args": ["--single-task"],
+    "max_turns": 10,
+    "turn_timeout_ms": 300000,
+    "continuation_prompt": "{% if attempt %}Review is still in progress (attempt #{{attempt}}).\nCheck if there are remaining files or aspects you haven't reviewed yet.\nDo not repeat already-completed review steps.{% endif %}"
+  },
+  "prompt_template": "You are reviewing code for NullTickets task `{{task.identifier}}`\n\n{% if attempt %}Continuation: this is attempt #{{attempt}}. Resume from where you left off.{% endif %}\n\nTask context:\nIdentifier: {{task.identifier}}\nTitle: {{task.title}}\n\nDescription:\n{% if task.description %}{{task.description}}{% else %}No description provided.{% endif %}\n\nReview instructions:\n\n1. This is an unattended code review session.\n2. Examine all changed files in the workspace.\n3. Check for:\n   - Correctness: Does the code do what the task requires?\n   - Security: Are there injection, XSS, or other OWASP top 10 vulnerabilities?\n   - Performance: Any obvious N+1 queries, unbounded loops, or memory leaks?\n   - Style: Does the code follow existing project conventions?\n   - Tests: Are there adequate tests for the changes?\n   - Edge cases: Are error paths and boundary conditions handled?\n4. Run the project's test suite and report results.\n5. Provide a structured review with:\n   - Summary of changes\n   - Issues found (critical, major, minor)\n   - Suggestions for improvement\n   - Overall assessment (approve, request changes, or block)\n6. If changes are needed, describe them specifically with file paths and line numbers.\n7. Only stop early for a true blocker (missing required auth/permissions/secrets).\n\nWork only in the provided workspace. Do not modify code unless explicitly part of the review task.",
+  "on_success": {
+    "transition_to": "reviewed"
+  },
+  "on_failure": {
+    "transition_to": "review-failed"
+  }
+}
