@@ -535,7 +535,27 @@ pub const Engine = struct {
         }
 
         const required_tags = getNodeTags(alloc, node_json);
-        const selected_worker = try dispatch.selectWorker(alloc, worker_infos.items, required_tags);
+        const node_type = getNodeField(alloc, node_json, "type") orelse "task";
+        const is_agent_node = std.mem.eql(u8, node_type, "agent");
+
+        // For agent nodes, prefer A2A-protocol workers first, then fall back to any worker
+        var selected_worker: ?dispatch.WorkerInfo = null;
+        if (is_agent_node) {
+            // Filter to A2A workers only
+            var a2a_workers: std.ArrayListUnmanaged(dispatch.WorkerInfo) = .empty;
+            for (worker_infos.items) |w| {
+                if (std.mem.eql(u8, w.protocol, "a2a")) {
+                    try a2a_workers.append(alloc, w);
+                }
+            }
+            if (a2a_workers.items.len > 0) {
+                selected_worker = try dispatch.selectWorker(alloc, a2a_workers.items, required_tags);
+            }
+        }
+        // Fall back to any protocol if no A2A worker found (or not an agent node)
+        if (selected_worker == null) {
+            selected_worker = try dispatch.selectWorker(alloc, worker_infos.items, required_tags);
+        }
         if (selected_worker == null) {
             return TaskNodeResult{ .no_worker = {} };
         }
@@ -544,7 +564,6 @@ pub const Engine = struct {
         // 4. Create step record
         const step_id_buf = ids.generateId();
         const step_id = try alloc.dupe(u8, &step_id_buf);
-        const node_type = getNodeField(alloc, node_json, "type") orelse "task";
         try self.store.insertStep(step_id, run_row.id, node_name, node_type, "running", state_json, 1, null, null, null);
         try self.store.insertEvent(run_row.id, step_id, "step.running", "{}");
 
@@ -552,7 +571,11 @@ pub const Engine = struct {
             metrics_mod.Metrics.incr(&m.steps_claimed_total);
         }
 
-        // 5. Dispatch to worker
+        // 5. Dispatch to worker (A2A protocol for agent nodes with A2A workers,
+        //    or standard protocol dispatch for task nodes / fallback)
+        if (is_agent_node and std.mem.eql(u8, worker.protocol, "a2a")) {
+            log.info("agent node {s} dispatching via A2A to worker {s}", .{ node_name, worker.id });
+        }
         const result = try dispatch.dispatchStep(
             alloc,
             worker.url,

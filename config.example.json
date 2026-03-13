@@ -29,6 +29,14 @@
       "model": "anthropic/claude-sonnet-4-6",
       "tags": ["writer", "editor"],
       "max_concurrent": 2
+    },
+    {
+      "id": "nullclaw-a2a",
+      "url": "http://localhost:3000",
+      "token": "set_same_value_as_nullclaw_gateway_paired_tokens",
+      "protocol": "a2a",
+      "tags": ["coder", "agent"],
+      "max_concurrent": 3
     }
   ],
   "engine": {

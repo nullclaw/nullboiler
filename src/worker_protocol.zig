@@ -6,6 +6,7 @@ pub const Protocol = enum {
     openai_chat,
     mqtt,
     redis_stream,
+    a2a,
 };
 
 pub fn parse(raw: []const u8) ?Protocol {
@@ -14,26 +15,27 @@ pub fn parse(raw: []const u8) ?Protocol {
     if (std.mem.eql(u8, raw, "openai_chat")) return .openai_chat;
     if (std.mem.eql(u8, raw, "mqtt")) return .mqtt;
     if (std.mem.eql(u8, raw, "redis_stream")) return .redis_stream;
+    if (std.mem.eql(u8, raw, "a2a")) return .a2a;
     return null;
 }
 
 pub fn requiresModel(protocol: Protocol) bool {
     return switch (protocol) {
         .openai_chat => true,
-        .webhook, .api_chat, .mqtt, .redis_stream => false,
+        .webhook, .api_chat, .mqtt, .redis_stream, .a2a => false,
     };
 }
 
 pub fn requiresExplicitPath(protocol: Protocol) bool {
     return switch (protocol) {
         .webhook => true,
-        .api_chat, .openai_chat, .mqtt, .redis_stream => false,
+        .api_chat, .openai_chat, .mqtt, .redis_stream, .a2a => false,
     };
 }
 
 pub fn validateUrlForProtocol(url: []const u8, protocol: Protocol) bool {
-    // mqtt and redis_stream URLs are validated by their own parsers
-    if (protocol == .mqtt or protocol == .redis_stream) return true;
+    // mqtt, redis_stream, and a2a URLs are validated by their own parsers / have fixed paths
+    if (protocol == .mqtt or protocol == .redis_stream or protocol == .a2a) return true;
     if (!requiresExplicitPath(protocol)) return true;
     return hasExplicitPath(url);
 }
@@ -46,6 +48,9 @@ pub fn buildRequestUrl(
     const trimmed = std.mem.trimRight(u8, worker_url, "/");
     if (requiresExplicitPath(protocol) and !hasExplicitPath(trimmed)) {
         return error.WebhookUrlPathRequired;
+    }
+    if (protocol == .a2a) {
+        return try std.fmt.allocPrint(allocator, "{s}/a2a", .{trimmed});
     }
     return try allocator.dupe(u8, trimmed);
 }
@@ -140,6 +145,7 @@ test "parse protocol supports known values" {
     try std.testing.expectEqual(Protocol.webhook, parse("webhook").?);
     try std.testing.expectEqual(Protocol.api_chat, parse("api_chat").?);
     try std.testing.expectEqual(Protocol.openai_chat, parse("openai_chat").?);
+    try std.testing.expectEqual(Protocol.a2a, parse("a2a").?);
     try std.testing.expect(parse("unknown") == null);
 }
 
@@ -173,11 +179,25 @@ test "validateUrlForProtocol enforces protocol-specific constraints" {
     try std.testing.expect(validateUrlForProtocol("http://localhost:42617/api/chat", .api_chat));
     try std.testing.expect(validateUrlForProtocol("mqtt://broker:1883/topic", .mqtt));
     try std.testing.expect(validateUrlForProtocol("redis://redis:6379/stream", .redis_stream));
+    try std.testing.expect(validateUrlForProtocol("http://localhost:3000", .a2a));
 }
 
-test "parse supports mqtt and redis_stream" {
+test "buildRequestUrl appends /a2a for a2a protocol" {
+    const allocator = std.testing.allocator;
+    const url = try buildRequestUrl(allocator, "http://localhost:3000", .a2a);
+    defer allocator.free(url);
+    try std.testing.expectEqualStrings("http://localhost:3000/a2a", url);
+
+    // Trailing slash is trimmed before appending /a2a
+    const url2 = try buildRequestUrl(allocator, "http://localhost:3000/", .a2a);
+    defer allocator.free(url2);
+    try std.testing.expectEqualStrings("http://localhost:3000/a2a", url2);
+}
+
+test "parse supports mqtt, redis_stream, and a2a" {
     try std.testing.expectEqual(Protocol.mqtt, parse("mqtt").?);
     try std.testing.expectEqual(Protocol.redis_stream, parse("redis_stream").?);
+    try std.testing.expectEqual(Protocol.a2a, parse("a2a").?);
 }
 
 test "parseMqttUrl extracts host, port, topic" {
