@@ -403,7 +403,7 @@ pub const Store = struct {
     }
 
     pub fn getRun(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE id = ?";
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -426,11 +426,12 @@ pub const Store = struct {
             .updated_at_ms = colInt(stmt, 8),
             .started_at_ms = colIntOpt(stmt, 9),
             .ended_at_ms = colIntOpt(stmt, 10),
+            .state_json = try allocStrOpt(allocator, stmt, 11),
         };
     }
 
     pub fn getRunByIdempotencyKey(self: *Self, allocator: std.mem.Allocator, key: []const u8) !?types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE idempotency_key = ? ORDER BY created_at_ms DESC LIMIT 1";
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs WHERE idempotency_key = ? ORDER BY created_at_ms DESC LIMIT 1";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -452,13 +453,14 @@ pub const Store = struct {
             .updated_at_ms = colInt(stmt, 8),
             .started_at_ms = colIntOpt(stmt, 9),
             .ended_at_ms = colIntOpt(stmt, 10),
+            .state_json = try allocStrOpt(allocator, stmt, 11),
         };
     }
 
     pub fn listRuns(self: *Self, allocator: std.mem.Allocator, status_filter: ?[]const u8, limit: i64, offset: i64) ![]types.RunRow {
         var stmt: ?*c.sqlite3_stmt = null;
         if (status_filter != null) {
-            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status = ? ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
+            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs WHERE status = ? ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
             if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
                 return error.SqlitePrepareFailed;
             }
@@ -466,7 +468,7 @@ pub const Store = struct {
             _ = c.sqlite3_bind_int64(stmt, 2, limit);
             _ = c.sqlite3_bind_int64(stmt, 3, offset);
         } else {
-            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
+            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
             if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
                 return error.SqlitePrepareFailed;
             }
@@ -489,6 +491,7 @@ pub const Store = struct {
                 .updated_at_ms = colInt(stmt, 8),
                 .started_at_ms = colIntOpt(stmt, 9),
                 .ended_at_ms = colIntOpt(stmt, 10),
+                .state_json = try allocStrOpt(allocator, stmt, 11),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -513,7 +516,7 @@ pub const Store = struct {
     }
 
     pub fn getActiveRuns(self: *Self, allocator: std.mem.Allocator) ![]types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status IN ('running', 'paused') ORDER BY created_at_ms DESC";
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs WHERE status IN ('running', 'paused') ORDER BY created_at_ms DESC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -534,6 +537,7 @@ pub const Store = struct {
                 .updated_at_ms = colInt(stmt, 8),
                 .started_at_ms = colIntOpt(stmt, 9),
                 .ended_at_ms = colIntOpt(stmt, 10),
+                .state_json = try allocStrOpt(allocator, stmt, 11),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -2495,6 +2499,7 @@ test "run state management" {
         allocator.free(run.input_json);
         allocator.free(run.callbacks_json);
         if (run.error_text) |et| allocator.free(et);
+        if (run.state_json) |sj| allocator.free(sj);
     }
     try std.testing.expectEqualStrings("r1", run.id);
     try std.testing.expectEqualStrings("pending", run.status);
@@ -2512,6 +2517,7 @@ test "run state management" {
         allocator.free(run2.input_json);
         allocator.free(run2.callbacks_json);
         if (run2.error_text) |et| allocator.free(et);
+        if (run2.state_json) |sj| allocator.free(sj);
     }
     try std.testing.expectEqualStrings("r2", run2.id);
 
@@ -2534,6 +2540,7 @@ test "run state management" {
         allocator.free(forked.input_json);
         allocator.free(forked.callbacks_json);
         if (forked.error_text) |et| allocator.free(et);
+        if (forked.state_json) |sj| allocator.free(sj);
     }
     try std.testing.expectEqualStrings("r3", forked.id);
     try std.testing.expectEqualStrings("pending", forked.status);

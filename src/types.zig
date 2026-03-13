@@ -154,6 +154,7 @@ pub const RunRow = struct {
     updated_at_ms: i64,
     started_at_ms: ?i64,
     ended_at_ms: ?i64,
+    state_json: ?[]const u8 = null,
 };
 
 pub const StepRow = struct {
