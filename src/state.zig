@@ -60,6 +60,9 @@ pub fn applyReducer(alloc: Allocator, reducer: ReducerType, old_value_json: ?[]c
         .max => {
             return try applyMax(alloc, old_value_json, update_json);
         },
+        .add_messages => {
+            return try applyAddMessages(alloc, old_value_json, update_json);
+        },
     }
 }
 
@@ -456,6 +459,115 @@ fn applyMax(alloc: Allocator, old_json: ?[]const u8, update_json: []const u8) ![
     return try formatFloat(alloc, @max(old_val, update_val));
 }
 
+/// add_messages: merge message arrays by "id" field.
+/// - If old is null → wrap update in array
+/// - If update msg has "remove": true → remove matching id from old
+/// - If update msg "id" matches existing → replace in-place
+/// - If update msg "id" doesn't match → append
+/// - If update msg has no "id" → generate one and append
+fn applyAddMessages(alloc: Allocator, old_json: ?[]const u8, update_json: []const u8) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    // Parse update: single object or array of objects
+    const update_parsed = try json.parseFromSlice(json.Value, arena_alloc, update_json, .{});
+    var update_msgs = json.Array.init(arena_alloc);
+    if (update_parsed.value == .array) {
+        for (update_parsed.value.array.items) |item| {
+            try update_msgs.append(item);
+        }
+    } else if (update_parsed.value == .object) {
+        try update_msgs.append(update_parsed.value);
+    } else {
+        return try alloc.dupe(u8, update_json);
+    }
+
+    // Parse old array or start empty
+    var result_msgs = json.Array.init(arena_alloc);
+    if (old_json) |old| {
+        if (old.len > 0) {
+            const old_parsed = try json.parseFromSlice(json.Value, arena_alloc, old, .{});
+            if (old_parsed.value == .array) {
+                for (old_parsed.value.array.items) |item| {
+                    try result_msgs.append(item);
+                }
+            }
+        }
+    }
+
+    // Process each update message
+    for (update_msgs.items) |msg| {
+        if (msg != .object) continue;
+
+        const msg_id: ?[]const u8 = blk: {
+            if (msg.object.get("id")) |id_val| {
+                if (id_val == .string) break :blk id_val.string;
+            }
+            break :blk null;
+        };
+
+        // Check for remove flag
+        const is_remove = blk: {
+            if (msg.object.get("remove")) |rm_val| {
+                if (rm_val == .bool) break :blk rm_val.bool;
+            }
+            break :blk false;
+        };
+
+        if (is_remove) {
+            if (msg_id) |id| {
+                // Filter out the message with matching id
+                var filtered = json.Array.init(arena_alloc);
+                for (result_msgs.items) |existing| {
+                    if (existing == .object) {
+                        if (existing.object.get("id")) |eid| {
+                            if (eid == .string and std.mem.eql(u8, eid.string, id)) {
+                                continue; // skip — removing this message
+                            }
+                        }
+                    }
+                    try filtered.append(existing);
+                }
+                result_msgs = filtered;
+            }
+            continue;
+        }
+
+        if (msg_id) |id| {
+            // Try to find and replace existing message with same id
+            var replaced = false;
+            for (result_msgs.items, 0..) |existing, i| {
+                if (existing == .object) {
+                    if (existing.object.get("id")) |eid| {
+                        if (eid == .string and std.mem.eql(u8, eid.string, id)) {
+                            result_msgs.items[i] = msg;
+                            replaced = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!replaced) {
+                try result_msgs.append(msg);
+            }
+        } else {
+            // No id — generate one and append
+            var msg_copy = json.ObjectMap.init(arena_alloc);
+            var it = msg.object.iterator();
+            while (it.next()) |entry| {
+                try msg_copy.put(entry.key_ptr.*, entry.value_ptr.*);
+            }
+            const gen_id = try std.fmt.allocPrint(arena_alloc, "msg_{d}", .{result_msgs.items.len});
+            try msg_copy.put("id", json.Value{ .string = gen_id });
+            try result_msgs.append(json.Value{ .object = msg_copy });
+        }
+    }
+
+    const result = try serializeValue(arena_alloc, json.Value{ .array = result_msgs });
+    return try alloc.dupe(u8, result);
+}
+
 // ── Custom errors ─────────────────────────────────────────────────────
 
 const InvalidNumber = error{InvalidNumber};
@@ -671,4 +783,82 @@ test "stringifyForRoute string" {
     const result = try stringifyForRoute(alloc, "\"hello world\"");
     defer alloc.free(result);
     try std.testing.expectEqualStrings("hello world", result);
+}
+
+test "add_messages reducer - append new" {
+    const alloc = std.testing.allocator;
+    const result = try applyReducer(alloc, .add_messages,
+        \\[{"id":"1","text":"hello"}]
+    ,
+        \\{"id":"2","text":"world"}
+    );
+    defer alloc.free(result);
+    // Parse and verify: should be array with 2 messages
+    const parsed = try parseTestJson(alloc, result);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .array);
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
+    // First message id=1
+    const m0 = parsed.value.array.items[0];
+    try std.testing.expect(m0 == .object);
+    const id0 = m0.object.get("id") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("1", id0.string);
+    // Second message id=2
+    const m1 = parsed.value.array.items[1];
+    try std.testing.expect(m1 == .object);
+    const id1 = m1.object.get("id") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("2", id1.string);
+    const text1 = m1.object.get("text") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("world", text1.string);
+}
+
+test "add_messages reducer - replace by id" {
+    const alloc = std.testing.allocator;
+    const result = try applyReducer(alloc, .add_messages,
+        \\[{"id":"1","text":"old"}]
+    ,
+        \\{"id":"1","text":"new"}
+    );
+    defer alloc.free(result);
+    const parsed = try parseTestJson(alloc, result);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const m0 = parsed.value.array.items[0];
+    const text = m0.object.get("text") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("new", text.string);
+}
+
+test "add_messages reducer - remove by id" {
+    const alloc = std.testing.allocator;
+    const result = try applyReducer(alloc, .add_messages,
+        \\[{"id":"1","text":"hello"},{"id":"2","text":"world"}]
+    ,
+        \\{"id":"1","remove":true}
+    );
+    defer alloc.free(result);
+    const parsed = try parseTestJson(alloc, result);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const m0 = parsed.value.array.items[0];
+    const id0 = m0.object.get("id") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("2", id0.string);
+}
+
+test "add_messages reducer - null old" {
+    const alloc = std.testing.allocator;
+    const result = try applyReducer(alloc, .add_messages, null,
+        \\{"id":"1","text":"first"}
+    );
+    defer alloc.free(result);
+    const parsed = try parseTestJson(alloc, result);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const m0 = parsed.value.array.items[0];
+    const id0 = m0.object.get("id") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("1", id0.string);
+    const text0 = m0.object.get("text") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("first", text0.string);
 }

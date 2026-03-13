@@ -60,3 +60,7 @@ ALTER TABLE steps ADD COLUMN state_before_json TEXT;
 ALTER TABLE steps ADD COLUMN state_after_json TEXT;
 ALTER TABLE steps ADD COLUMN state_updates_json TEXT;
 -- NOTE: parent_step_id already exists from 001_init.sql — do NOT add it again
+
+-- Subgraph support: parent run linkage and per-run config
+ALTER TABLE runs ADD COLUMN parent_run_id TEXT REFERENCES runs(id);
+ALTER TABLE runs ADD COLUMN config_json TEXT;

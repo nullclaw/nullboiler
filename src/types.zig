@@ -53,6 +53,7 @@ pub const StepType = enum {
     agent,
     send,
     transform,
+    subgraph,
 
     pub fn toString(self: StepType) []const u8 {
         return @tagName(self);
@@ -287,6 +288,7 @@ pub const ReducerType = enum {
     add,
     min,
     max,
+    add_messages,
 
     pub fn toString(self: ReducerType) []const u8 {
         return @tagName(self);
