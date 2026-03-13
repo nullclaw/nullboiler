@@ -84,6 +84,23 @@ fn workerMatchesTags(
     return false;
 }
 
+// ── Agent Step Options ────────────────────────────────────────────────
+
+/// Extra fields included in the webhook body when step type is "agent".
+pub const AgentOpts = struct {
+    /// "autonomous" or "managed"
+    mode: ?[]const u8 = null,
+    /// Full callback URL for agent events; if null, omitted from body.
+    /// Typically constructed as: self_url + "/internal/agent-events/{run_id}/{step_id}"
+    callback_url: ?[]const u8 = null,
+    /// Maximum agent iterations; if null, omitted from body.
+    max_iterations: ?i64 = null,
+    /// JSON array of tool names, e.g. "[\"search\",\"code\"]"; if null, omitted from body.
+    tools_json: ?[]const u8 = null,
+    /// Current state JSON to pass to the agent; if null, omitted from body.
+    state_json: ?[]const u8 = null,
+};
+
 // ── HTTP Dispatch ─────────────────────────────────────────────────────
 
 pub fn dispatchStep(
@@ -95,6 +112,24 @@ pub fn dispatchStep(
     run_id: []const u8,
     step_id: []const u8,
     rendered_prompt: []const u8,
+) !DispatchResult {
+    return dispatchStepWithOpts(allocator, worker_url, worker_token, worker_protocol_raw, worker_model, run_id, step_id, rendered_prompt, null);
+}
+
+/// Like dispatchStep but also accepts optional agent-specific fields.
+/// When agent_opts is non-null and the protocol is webhook, the additional
+/// fields (mode, callback_url, max_iterations, tools, state) are merged
+/// into the request body.
+pub fn dispatchStepWithOpts(
+    allocator: std.mem.Allocator,
+    worker_url: []const u8,
+    worker_token: []const u8,
+    worker_protocol_raw: []const u8,
+    worker_model: ?[]const u8,
+    run_id: []const u8,
+    step_id: []const u8,
+    rendered_prompt: []const u8,
+    agent_opts: ?AgentOpts,
 ) !DispatchResult {
     const protocol = worker_protocol.parse(worker_protocol_raw) orelse {
         const err_msg = try std.fmt.allocPrint(allocator, "unsupported worker protocol: {s}", .{worker_protocol_raw});
@@ -131,6 +166,7 @@ pub fn dispatchStep(
         run_id,
         step_id,
         rendered_prompt,
+        agent_opts,
     ) catch |err| switch (err) {
         error.MissingWorkerModel => {
             return DispatchResult{
@@ -234,12 +270,18 @@ fn buildRequestBody(
     run_id: []const u8,
     step_id: []const u8,
     rendered_prompt: []const u8,
+    agent_opts: ?AgentOpts,
 ) ![]const u8 {
     const session_key = try std.fmt.allocPrint(allocator, "run_{s}_step_{s}", .{ run_id, step_id });
     defer allocator.free(session_key);
 
     switch (protocol) {
         .webhook => {
+            // For agent steps with opts, build an extended body that includes
+            // agent-specific fields alongside the standard webhook fields.
+            if (agent_opts) |opts| {
+                return buildWebhookAgentBody(allocator, session_key, rendered_prompt, opts);
+            }
             return std.json.Stringify.valueAlloc(allocator, .{
                 .message = rendered_prompt,
                 .text = rendered_prompt,
@@ -275,6 +317,79 @@ fn buildRequestBody(
             }, .{});
         },
     }
+}
+
+/// Build the webhook JSON body for an agent step, merging standard fields with
+/// agent-specific optional fields (mode, callback_url, max_iterations, tools, state).
+/// Only non-null fields from agent_opts are included in the output.
+fn buildWebhookAgentBody(
+    allocator: std.mem.Allocator,
+    session_key: []const u8,
+    rendered_prompt: []const u8,
+    opts: AgentOpts,
+) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    // Standard webhook fields
+    try buf.appendSlice(allocator, "{\"message\":");
+    try appendJsonString(&buf, allocator, rendered_prompt);
+    try buf.appendSlice(allocator, ",\"text\":");
+    try appendJsonString(&buf, allocator, rendered_prompt);
+    try buf.appendSlice(allocator, ",\"session_key\":");
+    try appendJsonString(&buf, allocator, session_key);
+    try buf.appendSlice(allocator, ",\"session_id\":");
+    try appendJsonString(&buf, allocator, session_key);
+
+    // Optional agent fields
+    if (opts.mode) |mode| {
+        try buf.appendSlice(allocator, ",\"mode\":");
+        try appendJsonString(&buf, allocator, mode);
+    }
+    if (opts.callback_url) |cb_url| {
+        try buf.appendSlice(allocator, ",\"callback_url\":");
+        try appendJsonString(&buf, allocator, cb_url);
+    }
+    if (opts.max_iterations) |max_iter| {
+        const field = try std.fmt.allocPrint(allocator, ",\"max_iterations\":{d}", .{max_iter});
+        defer allocator.free(field);
+        try buf.appendSlice(allocator, field);
+    }
+    if (opts.tools_json) |tools| {
+        // tools_json is already a JSON array string — embed it verbatim
+        try buf.appendSlice(allocator, ",\"tools\":");
+        try buf.appendSlice(allocator, tools);
+    }
+    if (opts.state_json) |state| {
+        // state_json is already a JSON object/value — embed it verbatim
+        try buf.appendSlice(allocator, ",\"state\":");
+        try buf.appendSlice(allocator, state);
+    }
+
+    try buf.append(allocator, '}');
+
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Append a JSON-encoded string (with surrounding quotes and escapes) to buf.
+fn appendJsonString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, s: []const u8) !void {
+    try buf.append(allocator, '"');
+    for (s) |byte| {
+        switch (byte) {
+            '"' => try buf.appendSlice(allocator, "\\\""),
+            '\\' => try buf.appendSlice(allocator, "\\\\"),
+            '\n' => try buf.appendSlice(allocator, "\\n"),
+            '\r' => try buf.appendSlice(allocator, "\\r"),
+            '\t' => try buf.appendSlice(allocator, "\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                const escaped = try std.fmt.allocPrint(allocator, "\\u{x:0>4}", .{byte});
+                defer allocator.free(escaped);
+                try buf.appendSlice(allocator, escaped);
+            },
+            else => try buf.append(allocator, byte),
+        }
+    }
+    try buf.append(allocator, '"');
 }
 
 /// Build the wire-format JSON body for async (MQTT/Redis) dispatch.
@@ -623,8 +738,54 @@ test "buildRequestBody: openai_chat requires model" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(
         error.MissingWorkerModel,
-        buildRequestBody(allocator, .openai_chat, null, "run-1", "step-1", "hello"),
+        buildRequestBody(allocator, .openai_chat, null, "run-1", "step-1", "hello", null),
     );
+}
+
+test "buildWebhookAgentBody: includes all agent fields when present" {
+    const allocator = std.testing.allocator;
+    const opts = AgentOpts{
+        .mode = "autonomous",
+        .callback_url = "http://localhost:8080/internal/agent-events/run-1/step-1",
+        .max_iterations = 25,
+        .tools_json = "[\"search\",\"code\"]",
+        .state_json = "{\"foo\":\"bar\"}",
+    };
+    const body = try buildRequestBody(allocator, .webhook, null, "run-1", "step-1", "do something", opts);
+    defer allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    try std.testing.expectEqualStrings("do something", obj.get("message").?.string);
+    try std.testing.expectEqualStrings("autonomous", obj.get("mode").?.string);
+    try std.testing.expectEqualStrings(
+        "http://localhost:8080/internal/agent-events/run-1/step-1",
+        obj.get("callback_url").?.string,
+    );
+    try std.testing.expectEqual(@as(i64, 25), obj.get("max_iterations").?.integer);
+    // tools and state are embedded JSON — check they round-trip
+    const tools_arr = obj.get("tools").?.array;
+    try std.testing.expectEqual(@as(usize, 2), tools_arr.items.len);
+    try std.testing.expectEqualStrings("search", tools_arr.items[0].string);
+}
+
+test "buildWebhookAgentBody: omits null agent fields" {
+    const allocator = std.testing.allocator;
+    const opts = AgentOpts{ .mode = "managed" };
+    const body = try buildRequestBody(allocator, .webhook, null, "run-1", "step-1", "hello", opts);
+    defer allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    try std.testing.expectEqualStrings("managed", obj.get("mode").?.string);
+    try std.testing.expect(obj.get("callback_url") == null);
+    try std.testing.expect(obj.get("max_iterations") == null);
+    try std.testing.expect(obj.get("tools") == null);
+    try std.testing.expect(obj.get("state") == null);
 }
 
 test "buildAsyncRequestBody: produces valid wire-format JSON with all fields" {

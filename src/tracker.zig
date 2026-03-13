@@ -378,6 +378,9 @@ pub const Tracker = struct {
     }
 
     /// Poll NullTickets for each workflow's claim_roles and claim available tasks.
+    // TODO(task14): When nulltickets schema changes are integrated, update WorkflowDef
+    // and pollAndClaim to handle the new workflow format (e.g. new claim fields, task
+    // shape, or execution modes introduced in the orchestration milestone).
     fn pollAndClaim(self: *Tracker, tick_alloc: std.mem.Allocator) void {
         const base_url = self.cfg.url orelse return;
 

@@ -12,6 +12,7 @@ const redis_client = @import("redis_client.zig");
 const mqtt_client = @import("mqtt_client.zig");
 const tracker_mod = @import("tracker.zig");
 const workflow_loader = @import("workflow_loader.zig");
+const sse_mod = @import("sse.zig");
 const c = @cImport({
     @cInclude("signal.h");
 });
@@ -147,6 +148,9 @@ pub fn main() !void {
     defer store.deinit();
     var metrics = metrics_mod.Metrics{};
     var drain_mode = std.atomic.Value(bool).init(false);
+
+    var sse_hub = sse_mod.SseHub.init(allocator);
+    defer sse_hub.deinit();
 
     var response_queue = async_dispatch.ResponseQueue.init(allocator);
     defer response_queue.deinit();
@@ -387,6 +391,7 @@ pub fn main() !void {
             .strategies = &strategy_map,
             .tracker_state = if (tracker_instance) |*ti| &ti.state else null,
             .tracker_cfg = if (cfg.tracker) |*tc| tc else null,
+            .sse_hub = &sse_hub,
         };
         const response = api.handleRequest(&ctx, request.method, request.target, request.body);
 
