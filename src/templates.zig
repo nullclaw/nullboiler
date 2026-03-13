@@ -403,7 +403,327 @@ fn jsonValueToString(allocator: std.mem.Allocator, val: std.json.Value) RenderEr
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
+// ── New state-based template engine ───────────────────────────────────
+
+const state_mod = @import("state.zig");
+const Allocator = std.mem.Allocator;
+
+/// Strip surrounding double quotes from a JSON string value.
+/// `"hello"` -> `hello`, `42` -> `42`, `[1,2]` -> `[1,2]`
+fn stripJsonQuotes(s: []const u8) []const u8 {
+    if (s.len >= 2 and s[0] == '"' and s[s.len - 1] == '"') {
+        return s[1 .. s.len - 1];
+    }
+    return s;
+}
+
+/// Look up a value from a JSON blob by dotted path (no prefix stripping).
+/// E.g. lookupJsonPath(alloc, '{"topic":"AI"}', "topic") -> "AI"
+fn lookupJsonPath(alloc: Allocator, json_bytes: []const u8, path: []const u8) !?[]const u8 {
+    // Reuse state_mod.getStateValue but without "state." prefix.
+    // getStateValue strips "state." if present, otherwise uses path as-is.
+    return try state_mod.getStateValue(alloc, json_bytes, path);
+}
+
+/// Resolve a template expression (the text inside `{{ }}`) to a string value.
+/// Handles state.X, input.X, item, item.X expressions.
+fn resolveNewExpression(
+    alloc: Allocator,
+    expr: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+) ![]const u8 {
+    if (std.mem.startsWith(u8, expr, "state.")) {
+        // Use getStateValue which handles "state." prefix, nested paths, [-1] indexing
+        const raw = try state_mod.getStateValue(alloc, state_json, expr);
+        if (raw) |r| {
+            // Strip quotes for strings; leave numbers/bools/arrays/objects as-is
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                // It was a quoted string — dupe the unquoted version and free the original
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.startsWith(u8, expr, "input.")) {
+        const ij = input_json orelse {
+            return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        };
+        const field = expr["input.".len..];
+        const raw = try lookupJsonPath(alloc, ij, field);
+        if (raw) |r| {
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.eql(u8, expr, "item")) {
+        if (item_json) |ij| {
+            const stripped = stripJsonQuotes(ij);
+            return alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.startsWith(u8, expr, "item.")) {
+        const ij = item_json orelse {
+            return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        };
+        const field = expr["item.".len..];
+        const raw = try lookupJsonPath(alloc, ij, field);
+        if (raw) |r| {
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    // Unknown expression — return empty
+    return alloc.dupe(u8, "") catch return error.OutOfMemory;
+}
+
+/// Check if a condition expression is truthy for the new template engine.
+/// Truthy: non-null, non-empty, not "false", not "0", not "null", not empty array "[]"
+fn isNewTruthy(
+    alloc: Allocator,
+    expr: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+) bool {
+    const value = resolveNewExpression(alloc, expr, state_json, input_json, item_json) catch return false;
+    defer alloc.free(value);
+
+    if (value.len == 0) return false;
+    if (std.mem.eql(u8, value, "false")) return false;
+    if (std.mem.eql(u8, value, "0")) return false;
+    if (std.mem.eql(u8, value, "null")) return false;
+    if (std.mem.eql(u8, value, "[]")) return false;
+    return true;
+}
+
+/// Process `{% if expr %}...{% endif %}` conditional blocks for the new engine.
+fn processNewConditionals(
+    alloc: Allocator,
+    template: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+) ![]const u8 {
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var pos: usize = 0;
+
+    while (pos < template.len) {
+        if (std.mem.indexOfPos(u8, template, pos, "{%")) |open| {
+            result.appendSlice(alloc, template[pos..open]) catch return error.OutOfMemory;
+
+            const after_open = open + 2;
+            const close = std.mem.indexOfPos(u8, template, after_open, "%}") orelse
+                return error.OutOfMemory;
+            const tag_content = std.mem.trim(u8, template[after_open..close], " \t\n\r");
+            const after_tag = close + 2;
+
+            if (std.mem.startsWith(u8, tag_content, "if ")) {
+                const expr = std.mem.trim(u8, tag_content["if ".len..], " \t\n\r");
+
+                // Find matching {% endif %} at this nesting level
+                var depth: usize = 0;
+                var scan: usize = after_tag;
+                var else_start: ?usize = null;
+                var else_end: ?usize = null;
+                var endif_start: ?usize = null;
+                var endif_end: ?usize = null;
+
+                while (scan < template.len) {
+                    if (std.mem.indexOfPos(u8, template, scan, "{%")) |inner_open| {
+                        const inner_after = inner_open + 2;
+                        const inner_close = std.mem.indexOfPos(u8, template, inner_after, "%}") orelse
+                            return error.OutOfMemory;
+                        const inner_tag = std.mem.trim(u8, template[inner_after..inner_close], " \t\n\r");
+                        const inner_after_tag = inner_close + 2;
+
+                        if (std.mem.startsWith(u8, inner_tag, "if ")) {
+                            depth += 1;
+                            scan = inner_after_tag;
+                        } else if (std.mem.eql(u8, inner_tag, "else") and depth == 0) {
+                            else_start = inner_open;
+                            else_end = inner_after_tag;
+                            scan = inner_after_tag;
+                        } else if (std.mem.eql(u8, inner_tag, "endif")) {
+                            if (depth == 0) {
+                                endif_start = inner_open;
+                                endif_end = inner_after_tag;
+                                break;
+                            }
+                            depth -= 1;
+                            scan = inner_after_tag;
+                        } else {
+                            scan = inner_after_tag;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                if (endif_end == null) {
+                    return error.OutOfMemory;
+                }
+
+                const truthy = isNewTruthy(alloc, expr, state_json, input_json, item_json);
+
+                if (truthy) {
+                    const branch_end = else_start orelse endif_start.?;
+                    const branch = template[after_tag..branch_end];
+                    const processed = try processNewConditionals(alloc, branch, state_json, input_json, item_json);
+                    defer alloc.free(processed);
+                    result.appendSlice(alloc, processed) catch return error.OutOfMemory;
+                } else {
+                    if (else_end) |ee| {
+                        const branch = template[ee..endif_start.?];
+                        const processed = try processNewConditionals(alloc, branch, state_json, input_json, item_json);
+                        defer alloc.free(processed);
+                        result.appendSlice(alloc, processed) catch return error.OutOfMemory;
+                    }
+                }
+
+                pos = endif_end.?;
+            } else {
+                result.appendSlice(alloc, template[open..after_tag]) catch return error.OutOfMemory;
+                pos = after_tag;
+            }
+        } else {
+            result.appendSlice(alloc, template[pos..]) catch return error.OutOfMemory;
+            break;
+        }
+    }
+
+    return result.toOwnedSlice(alloc) catch return error.OutOfMemory;
+}
+
+/// Render a template using the new state-based interpolation syntax.
+///
+/// Supported expressions:
+///   - `{{state.X}}` — state key value
+///   - `{{state.X.Y}}` — nested state access
+///   - `{{state.X[-1]}}` — last array element from state
+///   - `{{input.X}}` — original input (read-only)
+///   - `{{item}}` — current item in send context
+///   - `{{item.X}}` — nested access on item
+///   - `{% if state.X %}...{% endif %}` — conditionals
+///
+/// Processing order:
+///   1. Process `{% if ... %}...{% endif %}` blocks
+///   2. Process `{{...}}` interpolations
+pub fn renderTemplate(
+    alloc: Allocator,
+    template: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+) ![]const u8 {
+    // Phase 1: Process conditional blocks
+    const preprocessed = try processNewConditionals(alloc, template, state_json, input_json, item_json);
+    defer alloc.free(preprocessed);
+
+    // Phase 2: Resolve {{expression}} substitutions
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var pos: usize = 0;
+
+    while (pos < preprocessed.len) {
+        if (std.mem.indexOfPos(u8, preprocessed, pos, "{{")) |open| {
+            result.appendSlice(alloc, preprocessed[pos..open]) catch return error.OutOfMemory;
+
+            const after_open = open + 2;
+            if (std.mem.indexOfPos(u8, preprocessed, after_open, "}}")) |close| {
+                const raw_expr = preprocessed[after_open..close];
+                const expr = std.mem.trim(u8, raw_expr, " \t\n\r");
+
+                const value = try resolveNewExpression(alloc, expr, state_json, input_json, item_json);
+                defer alloc.free(value);
+
+                result.appendSlice(alloc, value) catch return error.OutOfMemory;
+                pos = close + 2;
+            } else {
+                // Unterminated — just append the rest as literal
+                result.appendSlice(alloc, preprocessed[pos..]) catch return error.OutOfMemory;
+                break;
+            }
+        } else {
+            result.appendSlice(alloc, preprocessed[pos..]) catch return error.OutOfMemory;
+            break;
+        }
+    }
+
+    return result.toOwnedSlice(alloc) catch return error.OutOfMemory;
+}
+
+// ── New template engine tests ─────────────────────────────────────────
+
+test "template state interpolation" {
+    const alloc = std.testing.allocator;
+    const s = "{\"name\":\"test\",\"count\":42}";
+    const result = try renderTemplate(alloc, "Hello {{state.name}}, count={{state.count}}", s, null, null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("Hello test, count=42", result);
+}
+
+test "template input interpolation" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "Topic: {{input.topic}}", "{}", "{\"topic\":\"AI\"}", null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("Topic: AI", result);
+}
+
+test "template item interpolation" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "File: {{item.path}}", "{}", null, "{\"path\":\"main.py\"}");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("File: main.py", result);
+}
+
+test "template conditional true" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "{% if state.name %}Hi {{state.name}}{% endif %}", "{\"name\":\"Bob\"}", null, null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("Hi Bob", result);
+}
+
+test "template conditional false" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "{% if state.missing %}hidden{% endif %}visible", "{}", null, null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("visible", result);
+}
+
+test "template no interpolation" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "plain text", "{}", null, null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("plain text", result);
+}
+
+// ── Old template engine tests ─────────────────────────────────────────
 
 test "render literal text unchanged" {
     const allocator = std.testing.allocator;
