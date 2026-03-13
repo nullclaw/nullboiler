@@ -495,6 +495,23 @@ fn resolveNewExpression(
         return alloc.dupe(u8, "") catch return error.OutOfMemory;
     }
 
+    // {{config.X}} — alias for {{state.__config.X}}
+    if (std.mem.startsWith(u8, expr, "config.")) {
+        const config_path = try std.fmt.allocPrint(alloc, "state.__config.{s}", .{expr["config.".len..]});
+        defer alloc.free(config_path);
+        const raw = try state_mod.getStateValue(alloc, state_json, config_path);
+        if (raw) |r| {
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
     // Unknown expression — return empty
     return alloc.dupe(u8, "") catch return error.OutOfMemory;
 }
