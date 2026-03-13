@@ -403,7 +403,7 @@ pub const Store = struct {
     }
 
     pub fn getRun(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs WHERE id = ?";
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -427,11 +427,13 @@ pub const Store = struct {
             .started_at_ms = colIntOpt(stmt, 9),
             .ended_at_ms = colIntOpt(stmt, 10),
             .state_json = try allocStrOpt(allocator, stmt, 11),
+            .config_json = try allocStrOpt(allocator, stmt, 12),
+            .parent_run_id = try allocStrOpt(allocator, stmt, 13),
         };
     }
 
     pub fn getRunByIdempotencyKey(self: *Self, allocator: std.mem.Allocator, key: []const u8) !?types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs WHERE idempotency_key = ? ORDER BY created_at_ms DESC LIMIT 1";
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE idempotency_key = ? ORDER BY created_at_ms DESC LIMIT 1";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -454,13 +456,15 @@ pub const Store = struct {
             .started_at_ms = colIntOpt(stmt, 9),
             .ended_at_ms = colIntOpt(stmt, 10),
             .state_json = try allocStrOpt(allocator, stmt, 11),
+            .config_json = try allocStrOpt(allocator, stmt, 12),
+            .parent_run_id = try allocStrOpt(allocator, stmt, 13),
         };
     }
 
     pub fn listRuns(self: *Self, allocator: std.mem.Allocator, status_filter: ?[]const u8, limit: i64, offset: i64) ![]types.RunRow {
         var stmt: ?*c.sqlite3_stmt = null;
         if (status_filter != null) {
-            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs WHERE status = ? ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
+            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE status = ? ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
             if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
                 return error.SqlitePrepareFailed;
             }
@@ -468,7 +472,7 @@ pub const Store = struct {
             _ = c.sqlite3_bind_int64(stmt, 2, limit);
             _ = c.sqlite3_bind_int64(stmt, 3, offset);
         } else {
-            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
+            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
             if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
                 return error.SqlitePrepareFailed;
             }
@@ -492,6 +496,8 @@ pub const Store = struct {
                 .started_at_ms = colIntOpt(stmt, 9),
                 .ended_at_ms = colIntOpt(stmt, 10),
                 .state_json = try allocStrOpt(allocator, stmt, 11),
+                .config_json = try allocStrOpt(allocator, stmt, 12),
+                .parent_run_id = try allocStrOpt(allocator, stmt, 13),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -516,7 +522,7 @@ pub const Store = struct {
     }
 
     pub fn getActiveRuns(self: *Self, allocator: std.mem.Allocator) ![]types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json FROM runs WHERE status IN ('running', 'paused') ORDER BY created_at_ms DESC";
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE status IN ('running', 'paused') ORDER BY created_at_ms DESC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -538,6 +544,8 @@ pub const Store = struct {
                 .started_at_ms = colIntOpt(stmt, 9),
                 .ended_at_ms = colIntOpt(stmt, 10),
                 .state_json = try allocStrOpt(allocator, stmt, 11),
+                .config_json = try allocStrOpt(allocator, stmt, 12),
+                .parent_run_id = try allocStrOpt(allocator, stmt, 13),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -1569,6 +1577,40 @@ pub const Store = struct {
         _ = c.sqlite3_bind_text(stmt, 5, state_json.ptr, @intCast(state_json.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_int64(stmt, 6, now);
         _ = c.sqlite3_bind_int64(stmt, 7, now);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn setParentRunId(self: *Self, run_id: []const u8, parent_run_id: []const u8) !void {
+        const sql = "UPDATE runs SET parent_run_id = ?, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, parent_run_id.ptr, @intCast(parent_run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 3, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn setConfigJson(self: *Self, run_id: []const u8, config_json: []const u8) !void {
+        const sql = "UPDATE runs SET config_json = ?, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, config_json.ptr, @intCast(config_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 3, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
 
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
             return error.SqliteStepFailed;

@@ -1,8 +1,8 @@
 /// DAG Engine — Unified State Model Scheduler
 ///
 /// The engine runs on its own thread, polling the database for active runs
-/// and processing them using a graph-based state model with 6 node types:
-///   task, route, interrupt, agent, send, transform
+/// and processing them using a graph-based state model with 7 node types:
+///   task, route, interrupt, agent, send, transform, subgraph
 ///
 /// Each tick:
 ///   1. Get active runs (status = running)
@@ -14,6 +14,14 @@
 ///      e. Execute ready nodes in sequence
 ///      f. Apply state updates via reducers, save checkpoint
 ///      g. Check termination / deadlock
+///
+/// Features:
+///   - Command primitive (goto): worker responses can contain "goto" to override routing
+///   - Breakpoints: interrupt_before / interrupt_after arrays in workflow definition
+///   - Subgraph: inline execution of child workflows with input/output mapping
+///   - Multi-turn: agent nodes can loop with continuation_prompt up to max_turns
+///   - Configurable runs: config stored as state.__config, accessible via templates
+///   - Reconciliation: check nulltickets task status between steps
 const std = @import("std");
 const log = std.log.scoped(.engine);
 const json = std.json;
@@ -145,11 +153,45 @@ pub const Engine = struct {
     // ── processRun — state-based graph execution ─────────────────────
 
     fn processRun(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow) !void {
+        return self.processRunWithDepth(alloc, run_row, 0);
+    }
+
+    /// Wrapper for inline subgraph execution. Uses anyerror to break
+    /// the recursive inferred-error-set cycle.
+    fn processRunInline(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, recursion_depth: u32) void {
+        self.processRunWithDepth(alloc, run_row, recursion_depth) catch |err| {
+            log.err("inline subgraph run {s} failed: {}", .{ run_row.id, err });
+        };
+    }
+
+    fn processRunWithDepth(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, recursion_depth: u32) !void {
         // 1. Load current state
-        const current_state = run_row.state_json orelse "{}";
+        var current_state = run_row.state_json orelse "{}";
+
+        // 1b. Inject __config into state (configurable runs)
+        if (run_row.config_json) |config_str| {
+            if (config_str.len > 0) {
+                const config_update = std.fmt.allocPrint(alloc, "{{\"__config\":{s}}}", .{config_str}) catch null;
+                if (config_update) |cu| {
+                    // Simple merge: parse state, add __config key
+                    const merged = state_mod.applyUpdates(alloc, current_state, cu, "{}") catch null;
+                    if (merged) |m| {
+                        current_state = m;
+                    }
+                }
+            }
+        }
 
         // 2. Load workflow definition
         const workflow_json = run_row.workflow_json;
+
+        // 2b. Parse breakpoint lists from workflow definition
+        const interrupt_before = parseBreakpointList(alloc, workflow_json, "interrupt_before");
+        const interrupt_after = parseBreakpointList(alloc, workflow_json, "interrupt_after");
+
+        // 2c. Get tracker URL for reconciliation
+        const tracker_url = getWorkflowField(alloc, workflow_json, "tracker_url");
+        const task_id = getWorkflowField(alloc, workflow_json, "task_id");
 
         // 3. Get completed nodes from latest checkpoint
         var completed_nodes = std.StringHashMap(void).init(alloc);
@@ -195,9 +237,14 @@ pub const Engine = struct {
         // 4. Main execution loop: find ready nodes, execute, repeat
         var running_state: []const u8 = try alloc.dupe(u8, current_state);
         var max_iterations: u32 = 1000; // safety guard against infinite loops
+        var goto_ready: ?[]const []const u8 = null; // goto override from command primitive
 
         while (max_iterations > 0) : (max_iterations -= 1) {
-            const ready_nodes = try findReadyNodes(alloc, workflow_json, &completed_nodes, &route_results);
+            // Use goto override if set, otherwise find ready nodes normally
+            const ready_nodes = if (goto_ready) |gr| blk: {
+                goto_ready = null;
+                break :blk gr;
+            } else try findReadyNodes(alloc, workflow_json, &completed_nodes, &route_results);
             if (ready_nodes.len == 0) {
                 // Check termination: if all paths reached __end__
                 if (completed_nodes.get("__end__") != null) {
@@ -242,6 +289,7 @@ pub const Engine = struct {
 
             // 5. Execute ready nodes sequentially
             var made_progress = false;
+            var goto_override: ?[]const []const u8 = null;
 
             for (ready_nodes) |node_name| {
             if (std.mem.eql(u8, node_name, "__end__")) {
@@ -264,6 +312,25 @@ pub const Engine = struct {
                 try self.store.insertEvent(run_row.id, null, "run.completed", "{}");
                 callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.completed", run_row.id, null, "{}", self.metrics);
                 log.info("run {s} completed", .{run_row.id});
+                return;
+            }
+
+            // Breakpoint: interrupt_before check
+            if (isInBreakpointList(node_name, interrupt_before)) {
+                log.info("breakpoint interrupt_before at node {s} for run {s}", .{ node_name, run_row.id });
+                version += 1;
+                const cp_id_buf = ids.generateId();
+                const cp_id = try alloc.dupe(u8, &cp_id_buf);
+                const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
+                const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                const meta_json = try serializeRouteResults(alloc, &route_results);
+                try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
+                try self.store.incrementCheckpointCount(run_row.id);
+                try self.store.updateRunState(run_row.id, running_state);
+
+                try self.store.updateRunStatus(run_row.id, "interrupted", null);
+                try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
                 return;
             }
 
@@ -374,6 +441,24 @@ pub const Engine = struct {
                         }
 
                         try completed_nodes.put(try alloc.dupe(u8, node_name), {});
+
+                        // Handle goto command: override next ready nodes
+                        if (cr.goto_targets) |targets| {
+                            // Validate goto targets exist in workflow
+                            var valid_targets: std.ArrayListUnmanaged([]const u8) = .empty;
+                            for (targets) |target| {
+                                if (std.mem.eql(u8, target, "__end__") or getNodeJson(alloc, workflow_json, target) != null) {
+                                    try valid_targets.append(alloc, target);
+                                } else {
+                                    log.warn("goto target {s} not found in workflow, skipping", .{target});
+                                }
+                            }
+                            if (valid_targets.items.len > 0) {
+                                goto_override = try valid_targets.toOwnedSlice(alloc);
+                                log.info("task node {s} goto: {d} targets", .{ node_name, goto_override.?.len });
+                            }
+                        }
+
                         log.info("task node {s} completed for run {s}", .{ node_name, run_row.id });
                     },
                     .async_pending => {
@@ -416,6 +501,33 @@ pub const Engine = struct {
                         return;
                     },
                 }
+            } else if (std.mem.eql(u8, node_type, "subgraph")) {
+                // Subgraph: execute child workflow inline
+                const result = try self.executeSubgraphNode(alloc, run_row, node_name, node_json, running_state, recursion_depth);
+
+                switch (result) {
+                    .completed => |cr| {
+                        if (cr.state_updates) |updates| {
+                            const schema_json = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+                            const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
+                                log.err("subgraph node {s} failed to apply updates: {}", .{ node_name, err });
+                                try self.store.updateRunStatus(run_row.id, "failed", "subgraph state update failed");
+                                return;
+                            };
+                            running_state = new_state;
+                        }
+                        try completed_nodes.put(try alloc.dupe(u8, node_name), {});
+                        log.info("subgraph node {s} completed for run {s}", .{ node_name, run_row.id });
+                    },
+                    .failed => |err_text| {
+                        log.err("subgraph node {s} failed: {s}", .{ node_name, err_text });
+                        try self.store.updateRunStatus(run_row.id, "failed", err_text);
+                        try self.store.insertEvent(run_row.id, null, "run.failed", "{}");
+                        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_row.id, null, "{}", self.metrics);
+                        return;
+                    },
+                    else => {},
+                }
             } else if (std.mem.eql(u8, node_type, "send")) {
                 // Send: read items from state, dispatch target_node per item
                 const result = try self.executeSendNode(alloc, run_row, node_name, node_json, running_state);
@@ -436,6 +548,37 @@ pub const Engine = struct {
                 return;
             }
 
+            // Breakpoint: interrupt_after check
+            if (isInBreakpointList(node_name, interrupt_after)) {
+                log.info("breakpoint interrupt_after at node {s} for run {s}", .{ node_name, run_row.id });
+                // Save checkpoint with updated state first
+                version += 1;
+                const bp_cp_id_buf = ids.generateId();
+                const bp_cp_id = try alloc.dupe(u8, &bp_cp_id_buf);
+                const bp_cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
+                const bp_parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                const bp_meta_json = try serializeRouteResults(alloc, &route_results);
+                try self.store.createCheckpoint(bp_cp_id, run_row.id, node_name, bp_parent_id, running_state, bp_cn_json, version, bp_meta_json);
+                try self.store.incrementCheckpointCount(run_row.id);
+                try self.store.updateRunState(run_row.id, running_state);
+
+                try self.store.updateRunStatus(run_row.id, "interrupted", null);
+                try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
+                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
+                return;
+            }
+
+            // Reconciliation: check tracker task status between steps
+            if (tracker_url != null and task_id != null) {
+                if (!reconcileWithTracker(alloc, tracker_url.?, task_id.?)) {
+                    log.info("run {s} cancelled by reconciliation", .{run_row.id});
+                    try self.store.updateRunStatus(run_row.id, "failed", "cancelled by tracker reconciliation");
+                    try self.store.insertEvent(run_row.id, null, "run.failed", "{\"reason\":\"tracker_cancelled\"}");
+                    callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_row.id, null, "{}", self.metrics);
+                    return;
+                }
+            }
+
             // Save checkpoint after each node
             made_progress = true;
             version += 1;
@@ -449,6 +592,11 @@ pub const Engine = struct {
             try self.store.updateRunState(run_row.id, running_state);
         }
 
+            // If goto override is set, use it for next iteration instead of findReadyNodes
+            if (goto_override) |targets| {
+                goto_ready = targets;
+            }
+
             // If no progress was made in this iteration, break
             if (!made_progress) break;
         } // end while loop
@@ -459,6 +607,7 @@ pub const Engine = struct {
     const TaskNodeResult = union(enum) {
         completed: struct {
             state_updates: ?[]const u8,
+            goto_targets: ?[]const []const u8 = null,
         },
         async_pending: void,
         no_worker: void,
@@ -597,8 +746,46 @@ pub const Engine = struct {
 
         // 7. Handle result
         if (result.success) {
-            const output = result.output;
-            const output_json = try wrapOutput(alloc, output);
+            var final_output = result.output;
+
+            // 7a. Multi-turn continuation for agent nodes
+            if (is_agent_node) {
+                const max_turns_val = getNodeFieldInt(alloc, node_json, "max_turns");
+                const continuation_prompt = getNodeField(alloc, node_json, "continuation_prompt");
+
+                if (max_turns_val != null and continuation_prompt != null) {
+                    const mt = max_turns_val.?;
+                    const max_turns: u32 = @intCast(@min(@max(mt, 1), 100));
+                    if (max_turns > 1) {
+                        var turn: u32 = 1;
+                        while (turn < max_turns) : (turn += 1) {
+                            // Consume pending injections between turns
+                            const injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
+                            _ = injections;
+
+                            // Render continuation prompt
+                            const cont_rendered = templates.renderTemplate(alloc, continuation_prompt.?, state_json, run_row.input_json, null) catch break;
+
+                            const cont_result = try dispatch.dispatchStep(
+                                alloc,
+                                worker.url,
+                                worker.token,
+                                worker.protocol,
+                                worker.model,
+                                run_row.id,
+                                step_id,
+                                cont_rendered,
+                            );
+
+                            if (!cont_result.success) break;
+                            final_output = cont_result.output;
+                        }
+                        log.info("agent node {s} completed {d} turns", .{ node_name, turn });
+                    }
+                }
+            }
+
+            const output_json = try wrapOutput(alloc, final_output);
             try self.store.updateStepStatus(step_id, "completed", worker.id, output_json, null, 1);
             try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
             try self.store.markWorkerSuccess(worker.id, ids.nowMs());
@@ -610,10 +797,13 @@ pub const Engine = struct {
 
             // Build state_updates from output
             // Try parsing as JSON with "state_updates" field, otherwise wrap output in "output" key
-            const state_updates = extractStateUpdates(alloc, output) orelse
-                try std.fmt.allocPrint(alloc, "{{\"output\":{s}}}", .{try jsonStringify(alloc, output)});
+            const state_updates = extractStateUpdates(alloc, final_output) orelse
+                try std.fmt.allocPrint(alloc, "{{\"output\":{s}}}", .{try jsonStringify(alloc, final_output)});
 
-            return TaskNodeResult{ .completed = .{ .state_updates = state_updates } };
+            // Extract goto targets from output (command primitive)
+            const goto_targets = extractGotoTargets(alloc, final_output);
+
+            return TaskNodeResult{ .completed = .{ .state_updates = state_updates, .goto_targets = goto_targets } };
         } else {
             const err_text = result.error_text orelse "dispatch failed";
             try self.store.updateStepStatus(step_id, "failed", worker.id, null, err_text, 1);
@@ -636,6 +826,82 @@ pub const Engine = struct {
 
             return TaskNodeResult{ .failed = err_text };
         }
+    }
+
+    // ── executeSubgraphNode ─────────────────────────────────────────
+
+    fn executeSubgraphNode(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, node_name: []const u8, node_json: []const u8, state_json: []const u8, recursion_depth: u32) !TaskNodeResult {
+        if (recursion_depth >= 10) {
+            log.err("subgraph node {s}: max recursion depth (10) exceeded", .{node_name});
+            return TaskNodeResult{ .failed = "subgraph max recursion depth exceeded" };
+        }
+
+        // Get workflow_id
+        const workflow_id = getNodeField(alloc, node_json, "workflow_id") orelse {
+            log.err("subgraph node {s}: missing workflow_id", .{node_name});
+            return TaskNodeResult{ .failed = "subgraph missing workflow_id" };
+        };
+
+        // Load workflow definition from store
+        const workflow_row = try self.store.getWorkflow(alloc, workflow_id);
+        if (workflow_row == null) {
+            log.err("subgraph node {s}: workflow {s} not found", .{ node_name, workflow_id });
+            return TaskNodeResult{ .failed = "subgraph workflow not found" };
+        }
+        const definition = workflow_row.?.definition_json;
+
+        // Build input state from parent state using input_mapping
+        const input_mapping_json = getNodeField(alloc, node_json, "input_mapping") orelse "{}";
+        const child_input = buildSubgraphInput(alloc, state_json, input_mapping_json) catch "{}";
+
+        // Get schema from child workflow for initState
+        const child_schema = getWorkflowField(alloc, definition, "schema") orelse "{}";
+        const child_state = state_mod.initState(alloc, child_input, child_schema) catch try alloc.dupe(u8, child_input);
+
+        // Create child run
+        const child_id_buf = ids.generateId();
+        const child_id = try alloc.dupe(u8, &child_id_buf);
+        try self.store.createRunWithState(child_id, workflow_id, definition, child_input, child_state);
+        try self.store.setParentRunId(child_id, run_row.id);
+        try self.store.updateRunStatus(child_id, "running", null);
+
+        // Create step record for the subgraph node
+        const step_id_buf = ids.generateId();
+        const step_id = try alloc.dupe(u8, &step_id_buf);
+        try self.store.insertStep(step_id, run_row.id, node_name, "subgraph", "running", "{}", 1, null, null, null);
+        try self.store.insertEvent(run_row.id, step_id, "step.running", "{}");
+
+        // Execute child run inline (recursive call to processRunWithDepth)
+        const child_run = (try self.store.getRun(alloc, child_id)).?;
+        self.processRunInline(alloc, child_run, recursion_depth + 1);
+
+        // Check child run result
+        const completed_child = (try self.store.getRun(alloc, child_id)).?;
+        if (!std.mem.eql(u8, completed_child.status, "completed")) {
+            const child_error = completed_child.error_text orelse "subgraph did not complete";
+            try self.store.updateStepStatus(step_id, "failed", null, null, child_error, 1);
+            return TaskNodeResult{ .failed = child_error };
+        }
+
+        // Extract output_key from child's final state
+        const output_key = getNodeField(alloc, node_json, "output_key") orelse "output";
+        const child_final_state = completed_child.state_json orelse "{}";
+
+        // Get the value at output_key from child state
+        const output_path = try std.fmt.allocPrint(alloc, "state.{s}", .{output_key});
+        const output_value = state_mod.getStateValue(alloc, child_final_state, output_path) catch null;
+
+        // Build state_updates: {output_key: value}
+        const state_updates = if (output_value) |val|
+            try std.fmt.allocPrint(alloc, "{{\"{s}\":{s}}}", .{ output_key, val })
+        else
+            try std.fmt.allocPrint(alloc, "{{\"{s}\":null}}", .{output_key});
+
+        try self.store.updateStepStatus(step_id, "completed", null, state_updates, null, 1);
+        try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
+
+        log.info("subgraph node {s} completed (child run {s})", .{ node_name, child_id });
+        return TaskNodeResult{ .completed = .{ .state_updates = state_updates } };
     }
 
     // ── executeSendNode ──────────────────────────────────────────────
@@ -1129,6 +1395,127 @@ fn extractStateUpdates(alloc: std.mem.Allocator, output: []const u8) ?[]const u8
     return serializeJsonValue(alloc, su) catch null;
 }
 
+/// Extract "goto" field from worker output JSON.
+/// Returns array of target node names. Supports:
+///   - "goto": "node_name" -> ["node_name"]
+///   - "goto": ["node_a", "node_b"] -> ["node_a", "node_b"]
+fn extractGotoTargets(alloc: std.mem.Allocator, output: []const u8) ?[]const []const u8 {
+    const parsed = json.parseFromSlice(json.Value, alloc, output, .{}) catch return null;
+    if (parsed.value != .object) return null;
+    const goto_val = parsed.value.object.get("goto") orelse return null;
+
+    var targets: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (goto_val == .string) {
+        targets.append(alloc, goto_val.string) catch return null;
+    } else if (goto_val == .array) {
+        for (goto_val.array.items) |item| {
+            if (item == .string) {
+                targets.append(alloc, item.string) catch continue;
+            }
+        }
+    } else {
+        return null;
+    }
+
+    if (targets.items.len == 0) return null;
+    return targets.toOwnedSlice(alloc) catch null;
+}
+
+/// Parse interrupt_before / interrupt_after arrays from workflow definition.
+fn parseBreakpointList(alloc: std.mem.Allocator, workflow_json: []const u8, field: []const u8) []const []const u8 {
+    const parsed = json.parseFromSlice(json.Value, alloc, workflow_json, .{}) catch return &.{};
+    if (parsed.value != .object) return &.{};
+    const arr_val = parsed.value.object.get(field) orelse return &.{};
+    if (arr_val != .array) return &.{};
+
+    var result: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (arr_val.array.items) |item| {
+        if (item == .string) {
+            result.append(alloc, item.string) catch continue;
+        }
+    }
+    return result.toOwnedSlice(alloc) catch &.{};
+}
+
+/// Check if a node name is in a breakpoint list.
+fn isInBreakpointList(name: []const u8, list: []const []const u8) bool {
+    for (list) |item| {
+        if (std.mem.eql(u8, name, item)) return true;
+    }
+    return false;
+}
+
+/// Get an integer field from a node's JSON.
+fn getNodeFieldInt(alloc: std.mem.Allocator, node_json: []const u8, field: []const u8) ?i64 {
+    const parsed = json.parseFromSlice(json.Value, alloc, node_json, .{}) catch return null;
+    if (parsed.value != .object) return null;
+    const val = parsed.value.object.get(field) orelse return null;
+    if (val == .integer) return val.integer;
+    return null;
+}
+
+/// Build subgraph input state from parent state using input_mapping.
+/// input_mapping is {"child_key": "state.parent_key", ...}
+fn buildSubgraphInput(alloc: std.mem.Allocator, parent_state: []const u8, input_mapping_json: []const u8) ![]const u8 {
+    const mapping_parsed = json.parseFromSlice(json.Value, alloc, input_mapping_json, .{}) catch return try alloc.dupe(u8, "{}");
+    if (mapping_parsed.value != .object) return try alloc.dupe(u8, "{}");
+
+    var result = json.ObjectMap.init(alloc);
+    var it = mapping_parsed.value.object.iterator();
+    while (it.next()) |entry| {
+        const child_key = entry.key_ptr.*;
+        const parent_path = if (entry.value_ptr.* == .string) entry.value_ptr.string else continue;
+
+        // Resolve the value from parent state
+        if (state_mod.getStateValue(alloc, parent_state, parent_path) catch null) |value_str| {
+            const val_parsed = json.parseFromSlice(json.Value, alloc, value_str, .{}) catch continue;
+            try result.put(child_key, val_parsed.value);
+        }
+    }
+
+    return serializeJsonValue(alloc, .{ .object = result });
+}
+
+/// Reconcile with nulltickets: check if associated task has been cancelled.
+/// Returns true if the run should continue, false if it should be cancelled.
+fn reconcileWithTracker(alloc: std.mem.Allocator, tracker_url: []const u8, task_id: []const u8) bool {
+    const url = std.fmt.allocPrint(alloc, "{s}/tasks/{s}", .{ tracker_url, task_id }) catch return true;
+    defer alloc.free(url);
+
+    var client: std.http.Client = .{ .allocator = alloc };
+    defer client.deinit();
+
+    var response_body: std.io.Writer.Allocating = .init(alloc);
+    defer response_body.deinit();
+
+    const result = client.fetch(.{
+        .location = .{ .url = url },
+        .method = .GET,
+        .response_writer = &response_body.writer,
+    }) catch return true; // network errors -> continue
+
+    const status_code = @intFromEnum(result.status);
+    if (status_code < 200 or status_code >= 300) return true;
+
+    const body = response_body.written();
+    const parsed = json.parseFromSlice(json.Value, alloc, body, .{}) catch return true;
+    if (parsed.value != .object) return true;
+
+    const stage = parsed.value.object.get("stage") orelse return true;
+    if (stage != .string) return true;
+
+    // Terminal states -> cancel
+    if (std.mem.eql(u8, stage.string, "done") or
+        std.mem.eql(u8, stage.string, "cancelled") or
+        std.mem.eql(u8, stage.string, "canceled"))
+    {
+        log.info("reconciliation: task {s} is in terminal state '{s}', cancelling run", .{ task_id, stage.string });
+        return false;
+    }
+
+    return true;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 test "Engine: init and stop" {
@@ -1484,4 +1871,241 @@ test "extractStateUpdates returns null for plain text" {
 
     const result = extractStateUpdates(arena.allocator(), "just plain text");
     try std.testing.expect(result == null);
+}
+
+test "extractGotoTargets: string target" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const output =
+        \\{"state_updates":{"x":1},"goto":"merge_step"}
+    ;
+    const targets = extractGotoTargets(arena.allocator(), output);
+    try std.testing.expect(targets != null);
+    try std.testing.expectEqual(@as(usize, 1), targets.?.len);
+    try std.testing.expectEqualStrings("merge_step", targets.?[0]);
+}
+
+test "extractGotoTargets: array targets" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const output =
+        \\{"goto":["step_a","step_b"]}
+    ;
+    const targets = extractGotoTargets(arena.allocator(), output);
+    try std.testing.expect(targets != null);
+    try std.testing.expectEqual(@as(usize, 2), targets.?.len);
+    try std.testing.expectEqualStrings("step_a", targets.?[0]);
+    try std.testing.expectEqualStrings("step_b", targets.?[1]);
+}
+
+test "extractGotoTargets: no goto field" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const targets = extractGotoTargets(arena.allocator(), "{\"state_updates\":{}}");
+    try std.testing.expect(targets == null);
+}
+
+test "extractGotoTargets: not JSON" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const targets = extractGotoTargets(arena.allocator(), "plain text");
+    try std.testing.expect(targets == null);
+}
+
+test "parseBreakpointList: valid list" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const wf =
+        \\{"interrupt_before":["review","merge"],"interrupt_after":["generate"],"nodes":{},"edges":[]}
+    ;
+    const before = parseBreakpointList(arena.allocator(), wf, "interrupt_before");
+    try std.testing.expectEqual(@as(usize, 2), before.len);
+    try std.testing.expectEqualStrings("review", before[0]);
+    try std.testing.expectEqualStrings("merge", before[1]);
+
+    const after = parseBreakpointList(arena.allocator(), wf, "interrupt_after");
+    try std.testing.expectEqual(@as(usize, 1), after.len);
+    try std.testing.expectEqualStrings("generate", after[0]);
+}
+
+test "parseBreakpointList: missing field" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const wf =
+        \\{"nodes":{},"edges":[]}
+    ;
+    const result = parseBreakpointList(arena.allocator(), wf, "interrupt_before");
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "isInBreakpointList" {
+    const list = [_][]const u8{ "review", "merge" };
+    try std.testing.expect(isInBreakpointList("review", &list));
+    try std.testing.expect(isInBreakpointList("merge", &list));
+    try std.testing.expect(!isInBreakpointList("build", &list));
+}
+
+test "getNodeFieldInt: valid integer" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const node =
+        \\{"type":"agent","max_turns":10}
+    ;
+    const result = getNodeFieldInt(arena.allocator(), node, "max_turns");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(i64, 10), result.?);
+}
+
+test "getNodeFieldInt: missing field" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const node =
+        \\{"type":"task"}
+    ;
+    const result = getNodeFieldInt(arena.allocator(), node, "max_turns");
+    try std.testing.expect(result == null);
+}
+
+test "getNodeFieldInt: string field returns null" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const node =
+        \\{"type":"task","max_turns":"five"}
+    ;
+    const result = getNodeFieldInt(arena.allocator(), node, "max_turns");
+    try std.testing.expect(result == null);
+}
+
+test "buildSubgraphInput: maps values from parent state" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const parent_state =
+        \\{"fix_result":"patched code","count":42}
+    ;
+    const mapping =
+        \\{"code":"state.fix_result"}
+    ;
+
+    const result = try buildSubgraphInput(alloc, parent_state, mapping);
+    const parsed = try json.parseFromSlice(json.Value, alloc, result, .{});
+    try std.testing.expect(parsed.value == .object);
+    const code = parsed.value.object.get("code") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("patched code", code.string);
+}
+
+test "buildSubgraphInput: empty mapping" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const result = try buildSubgraphInput(arena.allocator(), "{\"x\":1}", "{}");
+    try std.testing.expectEqualStrings("{}", result);
+}
+
+test "engine: breakpoint interrupt_before stops run" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    // Workflow with interrupt_before on t1
+    const wf =
+        \\{"interrupt_before":["t1"],"nodes":{"t1":{"type":"transform","updates":"{\"result\":\"done\"}"}},"edges":[["__start__","t1"],["t1","__end__"]],"schema":{"result":{"type":"string","reducer":"last_value"}}}
+    ;
+
+    try store.createRunWithState("r1", null, wf, "{}", "{}");
+    try store.updateRunStatus("r1", "running", null);
+
+    var engine = Engine.init(&store, allocator, 500);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const run_row = (try store.getRun(arena.allocator(), "r1")).?;
+    try engine.processRun(arena.allocator(), run_row);
+
+    const updated_run = (try store.getRun(arena.allocator(), "r1")).?;
+    // Should be interrupted, not completed, because interrupt_before fires before t1
+    try std.testing.expectEqualStrings("interrupted", updated_run.status);
+}
+
+test "engine: breakpoint interrupt_after stops run after node" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    // Workflow with interrupt_after on t1; there's a t2 after t1
+    const wf =
+        \\{"interrupt_after":["t1"],"nodes":{"t1":{"type":"transform","updates":"{\"x\":\"done\"}"},"t2":{"type":"transform","updates":"{\"y\":\"also\"}"}},"edges":[["__start__","t1"],["t1","t2"],["t2","__end__"]],"schema":{"x":{"type":"string","reducer":"last_value"},"y":{"type":"string","reducer":"last_value"}}}
+    ;
+
+    try store.createRunWithState("r1", null, wf, "{}", "{}");
+    try store.updateRunStatus("r1", "running", null);
+
+    var engine = Engine.init(&store, allocator, 500);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const run_row = (try store.getRun(arena.allocator(), "r1")).?;
+    try engine.processRun(arena.allocator(), run_row);
+
+    const updated_run = (try store.getRun(arena.allocator(), "r1")).?;
+    // t1 should have executed (state contains x), but run is interrupted
+    try std.testing.expectEqualStrings("interrupted", updated_run.status);
+    // Verify t1's state was saved
+    if (updated_run.state_json) |sj| {
+        try std.testing.expect(std.mem.indexOf(u8, sj, "done") != null);
+    }
+}
+
+test "engine: configurable runs inject __config" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    // Workflow with a transform that sets result
+    const wf =
+        \\{"nodes":{"t1":{"type":"transform","updates":"{\"result\":\"ok\"}"}},"edges":[["__start__","t1"],["t1","__end__"]],"schema":{"result":{"type":"string","reducer":"last_value"},"__config":{"type":"object","reducer":"last_value"}}}
+    ;
+
+    try store.createRunWithState("r1", null, wf, "{}", "{}");
+    try store.setConfigJson("r1", "{\"model\":\"gpt-4\"}");
+    try store.updateRunStatus("r1", "running", null);
+
+    var engine = Engine.init(&store, allocator, 500);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const run_row = (try store.getRun(arena.allocator(), "r1")).?;
+    try engine.processRun(arena.allocator(), run_row);
+
+    const updated_run = (try store.getRun(arena.allocator(), "r1")).?;
+    try std.testing.expectEqualStrings("completed", updated_run.status);
+    // Verify __config was injected into state
+    if (updated_run.state_json) |sj| {
+        try std.testing.expect(std.mem.indexOf(u8, sj, "__config") != null);
+        try std.testing.expect(std.mem.indexOf(u8, sj, "gpt-4") != null);
+    }
 }
