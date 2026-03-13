@@ -2519,3 +2519,137 @@ test "engine: configurable runs inject __config" {
         try std.testing.expect(std.mem.indexOf(u8, sj, "gpt-4") != null);
     }
 }
+
+test "getWorkflowVersion: extracts version" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try std.testing.expectEqual(@as(i64, 2), getWorkflowVersion(arena.allocator(), "{\"version\":2,\"nodes\":{}}"));
+    try std.testing.expectEqual(@as(i64, 1), getWorkflowVersion(arena.allocator(), "{\"nodes\":{}}"));
+    try std.testing.expectEqual(@as(i64, 1), getWorkflowVersion(arena.allocator(), "invalid"));
+}
+
+test "getCheckpointWorkflowVersion: extracts from metadata" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try std.testing.expectEqual(@as(i64, 3), getCheckpointWorkflowVersion(arena.allocator(), "{\"workflow_version\":3}"));
+    try std.testing.expectEqual(@as(i64, 1), getCheckpointWorkflowVersion(arena.allocator(), "{\"route_results\":{}}"));
+    try std.testing.expectEqual(@as(i64, 1), getCheckpointWorkflowVersion(arena.allocator(), null));
+}
+
+test "migrateCompletedNodes: filters removed nodes" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const alloc = arena.allocator();
+    var completed = std.StringHashMap(void).init(alloc);
+    try completed.put("analyze", {});
+    try completed.put("old_node", {});
+    try completed.put("__start__", {});
+
+    const wf =
+        \\{"nodes":{"analyze":{"type":"task"},"new_node":{"type":"task"}},"edges":[]}
+    ;
+
+    const migrated = migrateCompletedNodes(alloc, &completed, wf);
+    try std.testing.expect(migrated);
+    try std.testing.expect(completed.get("analyze") != null);
+    try std.testing.expect(completed.get("__start__") != null);
+    try std.testing.expect(completed.get("old_node") == null);
+}
+
+test "migrateCompletedNodes: no changes needed" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const alloc = arena.allocator();
+    var completed = std.StringHashMap(void).init(alloc);
+    try completed.put("analyze", {});
+
+    const wf =
+        \\{"nodes":{"analyze":{"type":"task"}},"edges":[]}
+    ;
+
+    const migrated = migrateCompletedNodes(alloc, &completed, wf);
+    try std.testing.expect(!migrated);
+}
+
+test "mergeWorkflowVersionIntoMeta: new metadata" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const result = mergeWorkflowVersionIntoMeta(arena.allocator(), null, 2);
+    try std.testing.expect(result != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.?, "workflow_version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.?, "2") != null);
+}
+
+test "mergeWorkflowVersionIntoMeta: existing metadata" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const result = mergeWorkflowVersionIntoMeta(arena.allocator(), "{\"route_results\":{}}", 3);
+    try std.testing.expect(result != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.?, "workflow_version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.?, "route_results") != null);
+}
+
+test "serializeRouteResultsWithVersion: includes version" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const alloc = arena.allocator();
+    var route_results = std.StringHashMap([]const u8).init(alloc);
+
+    const result = try serializeRouteResultsWithVersion(alloc, &route_results, 5);
+    try std.testing.expect(result != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.?, "workflow_version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.?, "5") != null);
+}
+
+test "serializeRouteResultsWithVersion: null version, empty routes" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const alloc = arena.allocator();
+    var route_results = std.StringHashMap([]const u8).init(alloc);
+
+    const result = try serializeRouteResultsWithVersion(alloc, &route_results, null);
+    try std.testing.expect(result == null);
+}
+
+test "engine: workflow version stored in checkpoint metadata" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    const wf =
+        \\{"version":2,"nodes":{"t1":{"type":"transform","updates":"{\"result\":\"done\"}"}},"edges":[["__start__","t1"],["t1","__end__"]],"schema":{"result":{"type":"string","reducer":"last_value"}}}
+    ;
+
+    try store.createRunWithState("r1", null, wf, "{}", "{}");
+    try store.updateRunStatus("r1", "running", null);
+
+    var engine = Engine.init(&store, allocator, 500);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const run_row = (try store.getRun(arena.allocator(), "r1")).?;
+    try engine.processRun(arena.allocator(), run_row);
+
+    // Check that checkpoint has workflow_version in metadata
+    const latest_cp = (try store.getLatestCheckpoint(arena.allocator(), "r1")).?;
+    try std.testing.expect(latest_cp.metadata_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest_cp.metadata_json.?, "workflow_version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest_cp.metadata_json.?, "2") != null);
+}

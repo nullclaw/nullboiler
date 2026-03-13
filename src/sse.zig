@@ -1,9 +1,29 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+pub const StreamMode = enum {
+    values, // Full state after each step
+    updates, // Only node name + updates
+    tasks, // Task start/finish with metadata
+    debug, // Everything with step number + timestamp
+    custom, // User-defined via node output
+
+    pub fn toString(self: StreamMode) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn fromString(s: []const u8) ?StreamMode {
+        inline for (@typeInfo(StreamMode).@"enum".fields) |f| {
+            if (std.mem.eql(u8, s, f.name)) return @enumFromInt(f.value);
+        }
+        return null;
+    }
+};
+
 pub const SseEvent = struct {
     event_type: []const u8, // "state_update", "step_started", etc.
     data: []const u8, // JSON string
+    mode: StreamMode = .updates, // default mode
 };
 
 /// Per-run event queue. Thread-safe via mutex.
@@ -157,4 +177,45 @@ test "sse queue close" {
     try std.testing.expect(!queue.isClosed());
     queue.close();
     try std.testing.expect(queue.isClosed());
+}
+
+test "stream mode toString and fromString" {
+    try std.testing.expectEqualStrings("values", StreamMode.values.toString());
+    try std.testing.expectEqualStrings("updates", StreamMode.updates.toString());
+    try std.testing.expectEqualStrings("tasks", StreamMode.tasks.toString());
+    try std.testing.expectEqualStrings("debug", StreamMode.debug.toString());
+    try std.testing.expectEqualStrings("custom", StreamMode.custom.toString());
+
+    try std.testing.expectEqual(StreamMode.values, StreamMode.fromString("values").?);
+    try std.testing.expectEqual(StreamMode.debug, StreamMode.fromString("debug").?);
+    try std.testing.expect(StreamMode.fromString("invalid") == null);
+}
+
+test "sse event default mode is updates" {
+    const ev = SseEvent{ .event_type = "test", .data = "{}" };
+    try std.testing.expectEqual(StreamMode.updates, ev.mode);
+}
+
+test "sse event with explicit mode" {
+    const ev = SseEvent{ .event_type = "values", .data = "{\"state\":{}}", .mode = .values };
+    try std.testing.expectEqual(StreamMode.values, ev.mode);
+    try std.testing.expectEqualStrings("values", ev.event_type);
+}
+
+test "sse hub broadcast with mode" {
+    const alloc = std.testing.allocator;
+    var hub = SseHub.init(alloc);
+    defer hub.deinit();
+
+    const queue = hub.getOrCreateQueue("run1");
+    queue.push(.{ .event_type = "values", .data = "{\"full\":true}", .mode = .values });
+    queue.push(.{ .event_type = "task_start", .data = "{}", .mode = .tasks });
+    queue.push(.{ .event_type = "debug", .data = "{}", .mode = .debug });
+
+    const events = queue.drain(alloc);
+    defer alloc.free(events);
+    try std.testing.expectEqual(@as(usize, 3), events.len);
+    try std.testing.expectEqual(StreamMode.values, events[0].mode);
+    try std.testing.expectEqual(StreamMode.tasks, events[1].mode);
+    try std.testing.expectEqual(StreamMode.debug, events[2].mode);
 }

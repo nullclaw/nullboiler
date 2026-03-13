@@ -2734,3 +2734,62 @@ test "run state management" {
     try std.testing.expectEqualStrings("r3", forked.id);
     try std.testing.expectEqualStrings("pending", forked.status);
 }
+
+test "workflow version CRUD" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    // Create workflow with default version (1)
+    try s.createWorkflow("wf1", "Test Workflow", "{\"nodes\":{}}");
+    const wf1 = (try s.getWorkflow(allocator, "wf1")).?;
+    defer {
+        allocator.free(wf1.id);
+        allocator.free(wf1.name);
+        allocator.free(wf1.definition_json);
+    }
+    try std.testing.expectEqual(@as(i64, 1), wf1.version);
+
+    // Create workflow with explicit version
+    try s.createWorkflowWithVersion("wf2", "Versioned Workflow", "{\"nodes\":{}}", 5);
+    const wf2 = (try s.getWorkflow(allocator, "wf2")).?;
+    defer {
+        allocator.free(wf2.id);
+        allocator.free(wf2.name);
+        allocator.free(wf2.definition_json);
+    }
+    try std.testing.expectEqual(@as(i64, 5), wf2.version);
+
+    // Update workflow with new version
+    try s.updateWorkflowWithVersion("wf2", "Updated", "{\"nodes\":{\"a\":{}}}", 6);
+    const wf3 = (try s.getWorkflow(allocator, "wf2")).?;
+    defer {
+        allocator.free(wf3.id);
+        allocator.free(wf3.name);
+        allocator.free(wf3.definition_json);
+    }
+    try std.testing.expectEqual(@as(i64, 6), wf3.version);
+    try std.testing.expectEqualStrings("Updated", wf3.name);
+
+    // Update without changing version
+    try s.updateWorkflow("wf1", "Still v1", "{\"nodes\":{\"b\":{}}}");
+    const wf4 = (try s.getWorkflow(allocator, "wf1")).?;
+    defer {
+        allocator.free(wf4.id);
+        allocator.free(wf4.name);
+        allocator.free(wf4.definition_json);
+    }
+    try std.testing.expectEqual(@as(i64, 1), wf4.version);
+
+    // List workflows should include version
+    const workflows = try s.listWorkflows(allocator);
+    defer {
+        for (workflows) |w| {
+            allocator.free(w.id);
+            allocator.free(w.name);
+            allocator.free(w.definition_json);
+        }
+        allocator.free(workflows);
+    }
+    try std.testing.expectEqual(@as(usize, 2), workflows.len);
+}
