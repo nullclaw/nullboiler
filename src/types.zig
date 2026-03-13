@@ -271,6 +271,14 @@ pub const AgentEventRow = struct {
     created_at_ms: i64,
 };
 
+pub const PendingInjectionRow = struct {
+    id: i64,
+    run_id: []const u8,
+    updates_json: []const u8,
+    apply_after_step: ?[]const u8,
+    created_at_ms: i64,
+};
+
 pub const ReducerType = enum {
     last_value,
     append,

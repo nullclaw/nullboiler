@@ -1,7 +1,5 @@
--- Drop deprecated tables
-DROP TABLE IF EXISTS step_deps;
-DROP TABLE IF EXISTS cycle_state;
-DROP TABLE IF EXISTS saga_state;
+-- Note: step_deps, cycle_state, saga_state kept for backward compatibility
+-- until engine.zig is rewritten (Task 8). They will be removed then.
 
 -- Saved workflow definitions
 CREATE TABLE IF NOT EXISTS workflows (
