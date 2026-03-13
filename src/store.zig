@@ -140,6 +140,17 @@ pub const Store = struct {
             }
             return error.MigrationFailed;
         }
+
+        // Migration 004 — orchestration schema (workflows, checkpoints, agent_events)
+        const sql_004 = @embedFile("migrations/004_orchestration.sql");
+        prc = c.sqlite3_exec(self.db, sql_004.ptr, null, null, &err_msg);
+        if (prc != c.SQLITE_OK) {
+            if (err_msg) |msg| {
+                log.err("migration 004 failed (rc={d}): {s}", .{ prc, std.mem.span(msg) });
+                c.sqlite3_free(msg);
+            }
+            return error.MigrationFailed;
+        }
     }
 
     pub fn beginTransaction(self: *Self) !void {
