@@ -638,4 +638,5 @@ comptime {
     _ = @import("subprocess.zig");
     _ = @import("tracker_client.zig");
     _ = @import("tracker.zig");
+    _ = @import("state.zig");
 }
