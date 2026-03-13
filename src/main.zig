@@ -639,4 +639,5 @@ comptime {
     _ = @import("tracker_client.zig");
     _ = @import("tracker.zig");
     _ = @import("state.zig");
+    _ = @import("sse.zig");
 }
