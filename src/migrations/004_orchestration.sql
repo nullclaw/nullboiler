@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS workflows (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     definition_json TEXT NOT NULL,
+    version INTEGER DEFAULT 1,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL
 );
@@ -64,3 +65,23 @@ ALTER TABLE steps ADD COLUMN state_updates_json TEXT;
 -- Subgraph support: parent run linkage and per-run config
 ALTER TABLE runs ADD COLUMN parent_run_id TEXT REFERENCES runs(id);
 ALTER TABLE runs ADD COLUMN config_json TEXT;
+
+-- Node-level cache (Gap 3)
+CREATE TABLE IF NOT EXISTS node_cache (
+    cache_key TEXT PRIMARY KEY,
+    node_name TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    ttl_ms INTEGER
+);
+
+-- Pending writes from parallel node execution (Gap 4)
+CREATE TABLE IF NOT EXISTS pending_writes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_writes_run ON pending_writes(run_id);

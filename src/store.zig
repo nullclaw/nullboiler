@@ -1294,7 +1294,11 @@ pub const Store = struct {
     // ── Workflow CRUD ─────────────────────────────────────────────────
 
     pub fn createWorkflow(self: *Self, id: []const u8, name: []const u8, definition_json: []const u8) !void {
-        const sql = "INSERT INTO workflows (id, name, definition_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?)";
+        return self.createWorkflowWithVersion(id, name, definition_json, 1);
+    }
+
+    pub fn createWorkflowWithVersion(self: *Self, id: []const u8, name: []const u8, definition_json: []const u8, version: i64) !void {
+        const sql = "INSERT INTO workflows (id, name, definition_json, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -1305,8 +1309,9 @@ pub const Store = struct {
         _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 2, name.ptr, @intCast(name.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 3, definition_json.ptr, @intCast(definition_json.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 4, now);
+        _ = c.sqlite3_bind_int64(stmt, 4, version);
         _ = c.sqlite3_bind_int64(stmt, 5, now);
+        _ = c.sqlite3_bind_int64(stmt, 6, now);
 
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
             return error.SqliteStepFailed;
@@ -1314,7 +1319,7 @@ pub const Store = struct {
     }
 
     pub fn getWorkflow(self: *Self, alloc: std.mem.Allocator, id: []const u8) !?types.WorkflowRow {
-        const sql = "SELECT id, name, definition_json, created_at_ms, updated_at_ms FROM workflows WHERE id = ?";
+        const sql = "SELECT id, name, definition_json, version, created_at_ms, updated_at_ms FROM workflows WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -1329,13 +1334,14 @@ pub const Store = struct {
             .id = try allocStr(alloc, stmt, 0),
             .name = try allocStr(alloc, stmt, 1),
             .definition_json = try allocStr(alloc, stmt, 2),
-            .created_at_ms = colInt(stmt, 3),
-            .updated_at_ms = colInt(stmt, 4),
+            .version = colInt(stmt, 3),
+            .created_at_ms = colInt(stmt, 4),
+            .updated_at_ms = colInt(stmt, 5),
         };
     }
 
     pub fn listWorkflows(self: *Self, alloc: std.mem.Allocator) ![]types.WorkflowRow {
-        const sql = "SELECT id, name, definition_json, created_at_ms, updated_at_ms FROM workflows ORDER BY created_at_ms DESC";
+        const sql = "SELECT id, name, definition_json, version, created_at_ms, updated_at_ms FROM workflows ORDER BY created_at_ms DESC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -1348,28 +1354,52 @@ pub const Store = struct {
                 .id = try allocStr(alloc, stmt, 0),
                 .name = try allocStr(alloc, stmt, 1),
                 .definition_json = try allocStr(alloc, stmt, 2),
-                .created_at_ms = colInt(stmt, 3),
-                .updated_at_ms = colInt(stmt, 4),
+                .version = colInt(stmt, 3),
+                .created_at_ms = colInt(stmt, 4),
+                .updated_at_ms = colInt(stmt, 5),
             });
         }
         return list.toOwnedSlice(alloc);
     }
 
     pub fn updateWorkflow(self: *Self, id: []const u8, name: []const u8, definition_json: []const u8) !void {
-        const sql = "UPDATE workflows SET name = ?, definition_json = ?, updated_at_ms = ? WHERE id = ?";
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-            return error.SqlitePrepareFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
+        return self.updateWorkflowWithVersion(id, name, definition_json, null);
+    }
 
-        _ = c.sqlite3_bind_text(stmt, 1, name.ptr, @intCast(name.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 2, definition_json.ptr, @intCast(definition_json.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 3, ids.nowMs());
-        _ = c.sqlite3_bind_text(stmt, 4, id.ptr, @intCast(id.len), SQLITE_STATIC);
+    pub fn updateWorkflowWithVersion(self: *Self, id: []const u8, name: []const u8, definition_json: []const u8, version: ?i64) !void {
+        if (version) |v| {
+            const sql = "UPDATE workflows SET name = ?, definition_json = ?, version = ?, updated_at_ms = ? WHERE id = ?";
+            var stmt: ?*c.sqlite3_stmt = null;
+            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+                return error.SqlitePrepareFailed;
+            }
+            defer _ = c.sqlite3_finalize(stmt);
 
-        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
-            return error.SqliteStepFailed;
+            _ = c.sqlite3_bind_text(stmt, 1, name.ptr, @intCast(name.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_text(stmt, 2, definition_json.ptr, @intCast(definition_json.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_int64(stmt, 3, v);
+            _ = c.sqlite3_bind_int64(stmt, 4, ids.nowMs());
+            _ = c.sqlite3_bind_text(stmt, 5, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+            if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+                return error.SqliteStepFailed;
+            }
+        } else {
+            const sql = "UPDATE workflows SET name = ?, definition_json = ?, updated_at_ms = ? WHERE id = ?";
+            var stmt: ?*c.sqlite3_stmt = null;
+            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+                return error.SqlitePrepareFailed;
+            }
+            defer _ = c.sqlite3_finalize(stmt);
+
+            _ = c.sqlite3_bind_text(stmt, 1, name.ptr, @intCast(name.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_text(stmt, 2, definition_json.ptr, @intCast(definition_json.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_int64(stmt, 3, ids.nowMs());
+            _ = c.sqlite3_bind_text(stmt, 4, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+            if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+                return error.SqliteStepFailed;
+            }
         }
     }
 
@@ -1706,6 +1736,123 @@ pub const Store = struct {
 
     pub fn discardPendingInjections(self: *Self, run_id: []const u8) !void {
         const sql = "DELETE FROM pending_state_injections WHERE run_id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    // ── Node Cache (Gap 3) ───────────────────────────────────────────
+
+    pub fn getCachedResult(self: *Self, alloc: std.mem.Allocator, cache_key: []const u8) !?[]const u8 {
+        const sql = "SELECT result_json, created_at_ms, ttl_ms FROM node_cache WHERE cache_key = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, cache_key.ptr, @intCast(cache_key.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        const result_json = try allocStr(alloc, stmt, 0);
+        const created_at_ms = colInt(stmt, 1);
+        const ttl_ms = colIntOpt(stmt, 2);
+
+        // Check expiration
+        if (ttl_ms) |ttl| {
+            const now_ms = ids.nowMs();
+            if (now_ms - created_at_ms > ttl) {
+                // Expired — delete and return null
+                const del_sql = "DELETE FROM node_cache WHERE cache_key = ?";
+                var del_stmt: ?*c.sqlite3_stmt = null;
+                if (c.sqlite3_prepare_v2(self.db, del_sql, -1, &del_stmt, null) == c.SQLITE_OK) {
+                    _ = c.sqlite3_bind_text(del_stmt, 1, cache_key.ptr, @intCast(cache_key.len), SQLITE_STATIC);
+                    _ = c.sqlite3_step(del_stmt);
+                    _ = c.sqlite3_finalize(del_stmt);
+                }
+                alloc.free(result_json);
+                return null;
+            }
+        }
+
+        return result_json;
+    }
+
+    pub fn setCachedResult(self: *Self, cache_key: []const u8, node_name: []const u8, result_json: []const u8, ttl_ms: ?i64) !void {
+        const sql = "INSERT OR REPLACE INTO node_cache (cache_key, node_name, result_json, created_at_ms, ttl_ms) VALUES (?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, cache_key.ptr, @intCast(cache_key.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, node_name.ptr, @intCast(node_name.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, result_json.ptr, @intCast(result_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 4, ids.nowMs());
+        bindIntOpt(stmt, 5, ttl_ms);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    // ── Pending Writes (Gap 4) ───────────────────────────────────────
+
+    pub fn savePendingWrite(self: *Self, run_id: []const u8, step_id: []const u8, channel: []const u8, value_json: []const u8) !void {
+        const sql = "INSERT INTO pending_writes (run_id, step_id, channel, value_json, created_at_ms) VALUES (?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, channel.ptr, @intCast(channel.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, value_json.ptr, @intCast(value_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 5, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getPendingWrites(self: *Self, alloc: std.mem.Allocator, run_id: []const u8) ![]types.PendingWriteRow {
+        const sql = "SELECT id, run_id, step_id, channel, value_json, created_at_ms FROM pending_writes WHERE run_id = ? ORDER BY id ASC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.PendingWriteRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(alloc, .{
+                .id = colInt(stmt, 0),
+                .run_id = try allocStr(alloc, stmt, 1),
+                .step_id = try allocStr(alloc, stmt, 2),
+                .channel = try allocStr(alloc, stmt, 3),
+                .value_json = try allocStr(alloc, stmt, 4),
+                .created_at_ms = colInt(stmt, 5),
+            });
+        }
+        return list.toOwnedSlice(alloc);
+    }
+
+    pub fn clearPendingWrites(self: *Self, run_id: []const u8) !void {
+        const sql = "DELETE FROM pending_writes WHERE run_id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;

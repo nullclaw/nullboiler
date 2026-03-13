@@ -247,6 +247,7 @@ pub const WorkflowRow = struct {
     id: []const u8,
     name: []const u8,
     definition_json: []const u8,
+    version: i64 = 1,
     created_at_ms: i64,
     updated_at_ms: i64,
 };
@@ -280,6 +281,15 @@ pub const PendingInjectionRow = struct {
     run_id: []const u8,
     updates_json: []const u8,
     apply_after_step: ?[]const u8,
+    created_at_ms: i64,
+};
+
+pub const PendingWriteRow = struct {
+    id: i64,
+    run_id: []const u8,
+    step_id: []const u8,
+    channel: []const u8,
+    value_json: []const u8,
     created_at_ms: i64,
 };
 

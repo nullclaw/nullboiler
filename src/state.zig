@@ -36,6 +36,23 @@ fn formatFloat(alloc: Allocator, f: f64) ![]const u8 {
     return try std.fmt.allocPrint(alloc, "{d}", .{f});
 }
 
+// ── Overwrite Bypass (Gap 5) ──────────────────────────────────────────
+
+/// Check if a JSON value is wrapped in {"__overwrite": true, "value": ...}.
+fn isOverwrite(value: json.Value) bool {
+    if (value != .object) return false;
+    const ow = value.object.get("__overwrite") orelse return false;
+    if (ow != .bool) return false;
+    return ow.bool;
+}
+
+/// Extract the "value" field from an overwrite wrapper.
+/// Returns the unwrapped json.Value, or .null if "value" key is missing.
+fn extractOverwriteValue(value: json.Value) json.Value {
+    if (value != .object) return value;
+    return value.object.get("value") orelse .null;
+}
+
 // ── Public API ────────────────────────────────────────────────────────
 
 /// Apply a single reducer to merge old_value + update into new_value.
@@ -93,11 +110,18 @@ pub fn applyUpdates(alloc: Allocator, state_json: []const u8, updates_json: []co
         try result_obj.put(entry.key_ptr.*, entry.value_ptr.*);
     }
 
-    // For each update key, apply the reducer
+    // For each update key, apply the reducer (with overwrite bypass, Gap 5)
     var updates_it = updates_parsed.value.object.iterator();
     while (updates_it.next()) |entry| {
         const key = entry.key_ptr.*;
         const update_value = entry.value_ptr.*;
+
+        // Gap 5: Check for overwrite bypass
+        if (isOverwrite(update_value)) {
+            const raw_val = extractOverwriteValue(update_value);
+            try result_obj.put(key, raw_val);
+            continue;
+        }
 
         // Serialize the update value
         const update_str = try serializeValue(arena_alloc, update_value);
@@ -861,4 +885,52 @@ test "add_messages reducer - null old" {
     try std.testing.expectEqualStrings("1", id0.string);
     const text0 = m0.object.get("text") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("first", text0.string);
+}
+
+test "overwrite bypasses reducer" {
+    const alloc = std.testing.allocator;
+    // count has "add" reducer, but __overwrite should bypass it
+    const state =
+        \\{"count":10}
+    ;
+    const updates =
+        \\{"count":{"__overwrite":true,"value":42}}
+    ;
+    const schema =
+        \\{"count":{"type":"number","reducer":"add"}}
+    ;
+
+    const result = try applyUpdates(alloc, state, updates, schema);
+    defer alloc.free(result);
+
+    const parsed = try parseTestJson(alloc, result);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const count = parsed.value.object.get("count") orelse return error.TestUnexpectedResult;
+    // Should be 42 (overwritten), not 52 (10 + 42 via add reducer)
+    try std.testing.expectEqual(@as(i64, 42), count.integer);
+}
+
+test "overwrite with array value" {
+    const alloc = std.testing.allocator;
+    const state =
+        \\{"items":[1,2,3]}
+    ;
+    const updates =
+        \\{"items":{"__overwrite":true,"value":[99]}}
+    ;
+    const schema =
+        \\{"items":{"type":"array","reducer":"append"}}
+    ;
+
+    const result = try applyUpdates(alloc, state, updates, schema);
+    defer alloc.free(result);
+
+    const parsed = try parseTestJson(alloc, result);
+    defer parsed.deinit();
+    const items = parsed.value.object.get("items") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(items == .array);
+    // Should be [99] (overwritten), not [1,2,3,99] (appended)
+    try std.testing.expectEqual(@as(usize, 1), items.array.items.len);
+    try std.testing.expectEqual(@as(i64, 99), items.array.items[0].integer);
 }
