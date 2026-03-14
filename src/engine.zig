@@ -473,304 +473,289 @@ pub const Engine = struct {
             var goto_override: ?[]const []const u8 = null;
 
             for (ready_nodes) |node_name| {
-            if (std.mem.eql(u8, node_name, "__end__")) {
-                // Gap 6: Execute deferred nodes before completing
-                for (deferred_nodes) |deferred_name| {
-                    if (completed_nodes.get(deferred_name) != null) continue;
-
-                    const def_node_json = getNodeJson(alloc, workflow_json, deferred_name) orelse continue;
-                    const def_node_type = getNodeField(alloc, def_node_json, "type") orelse "task";
-
-                    if (std.mem.eql(u8, def_node_type, "transform")) {
-                        const def_updates = getNodeField(alloc, def_node_json, "updates") orelse "{}";
-                        const def_schema = getSchemaJson(alloc, workflow_json);
-                        const def_new_state = state_mod.applyUpdates(alloc, running_state, def_updates, def_schema) catch running_state;
-                        running_state = def_new_state;
-                    } else if (std.mem.eql(u8, def_node_type, "task") or std.mem.eql(u8, def_node_type, "agent")) {
-                        const def_result = self.executeTaskNode(alloc, run_row, deferred_name, def_node_json, running_state) catch continue;
-                        switch (def_result) {
-                            .completed => |cr| {
-                                if (cr.state_updates) |updates| {
-                                    const def_schema = getSchemaJson(alloc, workflow_json);
-                                    const def_new_state = state_mod.applyUpdates(alloc, running_state, updates, def_schema) catch running_state;
-                                    running_state = def_new_state;
-                                }
-                            },
-                            else => {},
+                if (std.mem.eql(u8, node_name, "__end__")) {
+                    // Gap 6: Execute deferred nodes before completing
+                    for (deferred_nodes) |deferred_name| {
+                        if (completed_nodes.get(deferred_name) != null) continue;
+    
+                        const def_node_json = getNodeJson(alloc, workflow_json, deferred_name) orelse continue;
+                        const def_node_type = getNodeField(alloc, def_node_json, "type") orelse "task";
+    
+                        if (std.mem.eql(u8, def_node_type, "transform")) {
+                            const def_updates = getNodeField(alloc, def_node_json, "updates") orelse "{}";
+                            const def_schema = getSchemaJson(alloc, workflow_json);
+                            const def_new_state = state_mod.applyUpdates(alloc, running_state, def_updates, def_schema) catch running_state;
+                            running_state = def_new_state;
+                        } else if (std.mem.eql(u8, def_node_type, "task") or std.mem.eql(u8, def_node_type, "agent")) {
+                            const def_result = self.executeTaskNode(alloc, run_row, deferred_name, def_node_json, running_state) catch continue;
+                            switch (def_result) {
+                                .completed => |cr| {
+                                    if (cr.state_updates) |updates| {
+                                        const def_schema = getSchemaJson(alloc, workflow_json);
+                                        const def_new_state = state_mod.applyUpdates(alloc, running_state, updates, def_schema) catch running_state;
+                                        running_state = def_new_state;
+                                    }
+                                },
+                                else => {},
+                            }
                         }
+    
+                        try completed_nodes.put(try alloc.dupe(u8, deferred_name), {});
+                        log.info("deferred node {s} completed for run {s}", .{ deferred_name, run_row.id });
                     }
-
-                    try completed_nodes.put(try alloc.dupe(u8, deferred_name), {});
-                    log.info("deferred node {s} completed for run {s}", .{ deferred_name, run_row.id });
+    
+                    // Mark __end__ as completed
+                    try completed_nodes.put("__end__", {});
+                    version += 1;
+    
+                    // Save checkpoint
+                    const cp_id_buf = ids.generateId();
+                    const cp_id = try alloc.dupe(u8, &cp_id_buf);
+                    const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
+                    const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                    const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
+                    try self.store.createCheckpoint(cp_id, run_row.id, "__end__", parent_id, running_state, cn_json, version, meta_json);
+                    try self.store.incrementCheckpointCount(run_row.id);
+                    try self.store.updateRunState(run_row.id, running_state);
+    
+                    // Run is completed
+                    try self.store.updateRunStatus(run_row.id, "completed", null);
+                    try self.store.insertEvent(run_row.id, null, "run.completed", "{}");
+                    callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.completed", run_row.id, null, "{}", self.metrics);
+                    log.info("run {s} completed", .{run_row.id});
+                    return;
                 }
-
-                // Mark __end__ as completed
-                try completed_nodes.put("__end__", {});
-                version += 1;
-
-                // Save checkpoint
-                const cp_id_buf = ids.generateId();
-                const cp_id = try alloc.dupe(u8, &cp_id_buf);
-                const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
-                const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
-                try self.store.createCheckpoint(cp_id, run_row.id, "__end__", parent_id, running_state, cn_json, version, meta_json);
-                try self.store.incrementCheckpointCount(run_row.id);
-                try self.store.updateRunState(run_row.id, running_state);
-
-                // Run is completed
-                try self.store.updateRunStatus(run_row.id, "completed", null);
-                try self.store.insertEvent(run_row.id, null, "run.completed", "{}");
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.completed", run_row.id, null, "{}", self.metrics);
-                log.info("run {s} completed", .{run_row.id});
-                return;
-            }
-
-            // Breakpoint: interrupt_before check
-            if (isInBreakpointList(node_name, interrupt_before)) {
-                log.info("breakpoint interrupt_before at node {s} for run {s}", .{ node_name, run_row.id });
-                version += 1;
-                const cp_id_buf = ids.generateId();
-                const cp_id = try alloc.dupe(u8, &cp_id_buf);
-                const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
-                const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
-                try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
-                try self.store.incrementCheckpointCount(run_row.id);
-                try self.store.updateRunState(run_row.id, running_state);
-
-                try self.store.updateRunStatus(run_row.id, "interrupted", null);
-                try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
-                return;
-            }
-
-            // Get node definition from workflow
-            const node_json = getNodeJson(alloc, workflow_json, node_name) orelse {
-                log.err("node {s} not found in workflow for run {s}", .{ node_name, run_row.id });
-                try self.store.updateRunStatus(run_row.id, "failed", "node not found in workflow");
-                return;
-            };
-
-            // Get node type
-            const node_type = getNodeField(alloc, node_json, "type") orelse "task";
-
-            // Execute based on type
-            if (std.mem.eql(u8, node_type, "route")) {
-                // Route: evaluate routing logic, no worker dispatch
-                const result = try self.executeRouteNode(alloc, node_name, node_json, running_state);
-                if (result.route_value) |rv| {
-                    try route_results.put(try alloc.dupe(u8, node_name), rv);
+    
+                // Breakpoint: interrupt_before check
+                if (isInBreakpointList(node_name, interrupt_before)) {
+                    log.info("breakpoint interrupt_before at node {s} for run {s}", .{ node_name, run_row.id });
+                    version += 1;
+                    const cp_id_buf = ids.generateId();
+                    const cp_id = try alloc.dupe(u8, &cp_id_buf);
+                    const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
+                    const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                    const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
+                    try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
+                    try self.store.incrementCheckpointCount(run_row.id);
+                    try self.store.updateRunState(run_row.id, running_state);
+    
+                    try self.store.updateRunStatus(run_row.id, "interrupted", null);
+                    try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
+                    callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
+                    return;
                 }
-                try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-
-                // Create step record
-                const step_id_buf = ids.generateId();
-                const step_id = try alloc.dupe(u8, &step_id_buf);
-                try self.store.insertStep(step_id, run_row.id, node_name, "route", "completed", "{}", 1, null, null, null);
-                const route_output = try std.fmt.allocPrint(alloc, "{{\"route\":\"{s}\"}}", .{result.route_value orelse "default"});
-                try self.store.updateStepStatus(step_id, "completed", null, route_output, null, 1);
-                try self.store.insertEvent(run_row.id, step_id, "step.completed", route_output);
-
-                log.info("route node {s} -> {s}", .{ node_name, result.route_value orelse "default" });
-            } else if (std.mem.eql(u8, node_type, "interrupt")) {
-                // Interrupt: save checkpoint, set run to interrupted
-                try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-                version += 1;
-
-                const step_id_buf = ids.generateId();
-                const step_id = try alloc.dupe(u8, &step_id_buf);
-                try self.store.insertStep(step_id, run_row.id, node_name, "interrupt", "completed", "{}", 1, null, null, null);
-                try self.store.updateStepStatus(step_id, "completed", null, "{\"interrupted\":true}", null, 1);
-                try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
-
-                const cp_id_buf = ids.generateId();
-                const cp_id = try alloc.dupe(u8, &cp_id_buf);
-                const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
-                const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
-                try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
-                try self.store.incrementCheckpointCount(run_row.id);
-                try self.store.updateRunState(run_row.id, running_state);
-
-                try self.store.updateRunStatus(run_row.id, "interrupted", null);
-                try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
-                log.info("run {s} interrupted at node {s}", .{ run_row.id, node_name });
-                return;
-            } else if (std.mem.eql(u8, node_type, "transform")) {
-                // Transform: apply static updates, no worker dispatch
-                const state_updates = getNodeField(alloc, node_json, "updates") orelse "{}";
-
-                // Get schema from workflow
-                const schema_json = getSchemaJson(alloc, workflow_json);
-
-                // Apply updates via reducers
-                const new_state = state_mod.applyUpdates(alloc, running_state, state_updates, schema_json) catch |err| {
-                    log.err("transform node {s} failed to apply updates: {}", .{ node_name, err });
-                    try self.store.updateRunStatus(run_row.id, "failed", "transform failed");
+    
+                // Get node definition from workflow
+                const node_json = getNodeJson(alloc, workflow_json, node_name) orelse {
+                    log.err("node {s} not found in workflow for run {s}", .{ node_name, run_row.id });
+                    try self.store.updateRunStatus(run_row.id, "failed", "node not found in workflow");
                     return;
                 };
-                running_state = new_state;
-
-                try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-
-                // Create step record
-                const step_id_buf = ids.generateId();
-                const step_id = try alloc.dupe(u8, &step_id_buf);
-                try self.store.insertStep(step_id, run_row.id, node_name, "transform", "completed", "{}", 1, null, null, null);
-                try self.store.updateStepStatus(step_id, "completed", null, state_updates, null, 1);
-                try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
-
-                log.info("transform node {s} completed", .{node_name});
-            } else if (std.mem.eql(u8, node_type, "task") or std.mem.eql(u8, node_type, "agent")) {
-                // Gap 7: Inject __meta managed values
-                const state_with_meta = injectMeta(alloc, running_state, run_row.id, node_name, version, @as(i64, @intCast(max_iterations))) catch running_state;
-
-                // Gap 3: Check cache before executing
-                const cache_ttl = parseCacheTtlMs(alloc, node_json);
-                if (cache_ttl != null) cache_check: {
-                    const pt_c = getNodeField(alloc, node_json, "prompt_template") orelse break :cache_check;
-                    const rnd_c = templates.renderTemplate(alloc, pt_c, state_with_meta, run_row.input_json, null) catch break :cache_check;
-                    const ck_c = computeCacheKey(alloc, node_name, rnd_c) catch break :cache_check;
-                    const cached = self.store.getCachedResult(alloc, ck_c) catch break :cache_check;
-                    if (cached) |cached_upd| {
-                        const cs = getSchemaJson(alloc, workflow_json);
-                        running_state = state_mod.applyUpdates(alloc, running_state, cached_upd, cs) catch running_state;
-                        try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-                        log.info("task node {s} cache hit for run {s}", .{ node_name, run_row.id });
-                        made_progress = true;
-                        version += 1;
-                        const ccb = ids.generateId();
-                        const cci = try alloc.dupe(u8, &ccb);
-                        const ccn = try serializeCompletedNodes(alloc, &completed_nodes);
-                        const cpi: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
-                        const cmj = try serializeRouteResults(alloc, &route_results);
-                        try self.store.createCheckpoint(cci, run_row.id, node_name, cpi, running_state, ccn, version, cmj);
-                        try self.store.incrementCheckpointCount(run_row.id);
-                        try self.store.updateRunState(run_row.id, running_state);
-                        continue;
+    
+                // Get node type
+                const node_type = getNodeField(alloc, node_json, "type") orelse "task";
+    
+                // Execute based on type
+                if (std.mem.eql(u8, node_type, "route")) {
+                    // Route: evaluate routing logic, no worker dispatch
+                    const result = try self.executeRouteNode(alloc, node_name, node_json, running_state);
+                    if (result.route_value) |rv| {
+                        try route_results.put(try alloc.dupe(u8, node_name), rv);
                     }
-                }
-
-                // Gap 2: Retry loop
-                const max_attempts = parseRetryMaxAttempts(alloc, node_json) orelse 1;
-                const retry_init_ms = parseRetryInitialMs(alloc, node_json) orelse 500;
-                const retry_bf = parseRetryBackoff(alloc, node_json) orelse 2.0;
-                const retry_max_ms = parseRetryMaxMs(alloc, node_json) orelse 30000;
-                var result: TaskNodeResult = undefined;
-                var attempt: u32 = 0;
-                while (attempt < max_attempts) : (attempt += 1) {
-                    result = try self.executeTaskNode(alloc, run_row, node_name, node_json, state_with_meta);
-                    switch (result) {
-                        .failed => {
-                            if (attempt + 1 < max_attempts) {
-                                var dms: u64 = retry_init_ms;
-                                var ei: u32 = 0;
-                                while (ei < attempt) : (ei += 1) {
-                                    const nd = @as(f64, @floatFromInt(dms)) * retry_bf;
-                                    dms = @intFromFloat(@min(nd, @as(f64, @floatFromInt(retry_max_ms))));
+                    try completed_nodes.put(try alloc.dupe(u8, node_name), {});
+    
+                    // Create step record
+                    const step_id_buf = ids.generateId();
+                    const step_id = try alloc.dupe(u8, &step_id_buf);
+                    try self.store.insertStep(step_id, run_row.id, node_name, "route", "completed", "{}", 1, null, null, null);
+                    const route_output = try std.fmt.allocPrint(alloc, "{{\"route\":\"{s}\"}}", .{result.route_value orelse "default"});
+                    try self.store.updateStepStatus(step_id, "completed", null, route_output, null, 1);
+                    try self.store.insertEvent(run_row.id, step_id, "step.completed", route_output);
+    
+                    log.info("route node {s} -> {s}", .{ node_name, result.route_value orelse "default" });
+                } else if (std.mem.eql(u8, node_type, "interrupt")) {
+                    // Interrupt: save checkpoint, set run to interrupted
+                    try completed_nodes.put(try alloc.dupe(u8, node_name), {});
+                    version += 1;
+    
+                    const step_id_buf = ids.generateId();
+                    const step_id = try alloc.dupe(u8, &step_id_buf);
+                    try self.store.insertStep(step_id, run_row.id, node_name, "interrupt", "completed", "{}", 1, null, null, null);
+                    try self.store.updateStepStatus(step_id, "completed", null, "{\"interrupted\":true}", null, 1);
+                    try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
+    
+                    const cp_id_buf = ids.generateId();
+                    const cp_id = try alloc.dupe(u8, &cp_id_buf);
+                    const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
+                    const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                    const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
+                    try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
+                    try self.store.incrementCheckpointCount(run_row.id);
+                    try self.store.updateRunState(run_row.id, running_state);
+    
+                    try self.store.updateRunStatus(run_row.id, "interrupted", null);
+                    try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
+                    callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
+                    log.info("run {s} interrupted at node {s}", .{ run_row.id, node_name });
+                    return;
+                } else if (std.mem.eql(u8, node_type, "transform")) {
+                    // Transform: apply static updates, no worker dispatch
+                    const state_updates = getNodeField(alloc, node_json, "updates") orelse "{}";
+    
+                    // Get schema from workflow
+                    const schema_json = getSchemaJson(alloc, workflow_json);
+    
+                    // Apply updates via reducers
+                    const new_state = state_mod.applyUpdates(alloc, running_state, state_updates, schema_json) catch |err| {
+                        log.err("transform node {s} failed to apply updates: {}", .{ node_name, err });
+                        try self.store.updateRunStatus(run_row.id, "failed", "transform failed");
+                        return;
+                    };
+                    running_state = new_state;
+    
+                    try completed_nodes.put(try alloc.dupe(u8, node_name), {});
+    
+                    // Create step record
+                    const step_id_buf = ids.generateId();
+                    const step_id = try alloc.dupe(u8, &step_id_buf);
+                    try self.store.insertStep(step_id, run_row.id, node_name, "transform", "completed", "{}", 1, null, null, null);
+                    try self.store.updateStepStatus(step_id, "completed", null, state_updates, null, 1);
+                    try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
+    
+                    log.info("transform node {s} completed", .{node_name});
+                } else if (std.mem.eql(u8, node_type, "task") or std.mem.eql(u8, node_type, "agent")) {
+                    // Gap 7: Inject __meta managed values
+                    const state_with_meta = injectMeta(alloc, running_state, run_row.id, node_name, version, @as(i64, @intCast(max_iterations))) catch running_state;
+    
+                    // Gap 3: Check cache before executing
+                    const cache_ttl = parseCacheTtlMs(alloc, node_json);
+                    if (cache_ttl != null) cache_check: {
+                        const pt_c = getNodeField(alloc, node_json, "prompt_template") orelse break :cache_check;
+                        const rnd_c = templates.renderTemplate(alloc, pt_c, state_with_meta, run_row.input_json, null) catch break :cache_check;
+                        const ck_c = computeCacheKey(alloc, node_name, rnd_c) catch break :cache_check;
+                        const cached = self.store.getCachedResult(alloc, ck_c) catch break :cache_check;
+                        if (cached) |cached_upd| {
+                            const cs = getSchemaJson(alloc, workflow_json);
+                            running_state = state_mod.applyUpdates(alloc, running_state, cached_upd, cs) catch running_state;
+                            try completed_nodes.put(try alloc.dupe(u8, node_name), {});
+                            log.info("task node {s} cache hit for run {s}", .{ node_name, run_row.id });
+                            made_progress = true;
+                            version += 1;
+                            const ccb = ids.generateId();
+                            const cci = try alloc.dupe(u8, &ccb);
+                            const ccn = try serializeCompletedNodes(alloc, &completed_nodes);
+                            const cpi: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                            const cmj = try serializeRouteResults(alloc, &route_results);
+                            try self.store.createCheckpoint(cci, run_row.id, node_name, cpi, running_state, ccn, version, cmj);
+                            try self.store.incrementCheckpointCount(run_row.id);
+                            try self.store.updateRunState(run_row.id, running_state);
+                            continue;
+                        }
+                    }
+    
+                    // Gap 2: Retry loop
+                    const max_attempts = parseRetryMaxAttempts(alloc, node_json) orelse 1;
+                    const retry_init_ms = parseRetryInitialMs(alloc, node_json) orelse 500;
+                    const retry_bf = parseRetryBackoff(alloc, node_json) orelse 2.0;
+                    const retry_max_ms = parseRetryMaxMs(alloc, node_json) orelse 30000;
+                    var result: TaskNodeResult = undefined;
+                    var attempt: u32 = 0;
+                    while (attempt < max_attempts) : (attempt += 1) {
+                        result = try self.executeTaskNode(alloc, run_row, node_name, node_json, state_with_meta);
+                        switch (result) {
+                            .failed => {
+                                if (attempt + 1 < max_attempts) {
+                                    var dms: u64 = retry_init_ms;
+                                    var ei: u32 = 0;
+                                    while (ei < attempt) : (ei += 1) {
+                                        const nd = @as(f64, @floatFromInt(dms)) * retry_bf;
+                                        dms = @intFromFloat(@min(nd, @as(f64, @floatFromInt(retry_max_ms))));
+                                    }
+                                    if (dms > retry_max_ms) dms = retry_max_ms;
+                                    log.info("task node {s} attempt {d}/{d} failed, retrying in {d}ms", .{ node_name, attempt + 1, max_attempts, dms });
+                                    self.emitEvent(alloc, .step_retrying, run_row.id, null, node_name, null);
+                                    std.Thread.sleep(dms * std.time.ns_per_ms);
+                                    continue;
                                 }
-                                if (dms > retry_max_ms) dms = retry_max_ms;
-                                log.info("task node {s} attempt {d}/{d} failed, retrying in {d}ms", .{ node_name, attempt + 1, max_attempts, dms });
-                                self.emitEvent(alloc, .step_retrying, run_row.id, null, node_name, null);
-                                std.Thread.sleep(dms * std.time.ns_per_ms);
-                                continue;
-                            }
-                        },
-                        else => break,
+                            },
+                            else => break,
+                        }
                     }
-                }
-
-                switch (result) {
-                    .completed => |cr| {
-                        // Gap 7: Strip __meta (don't persist)
-                        running_state = stripMeta(alloc, running_state) catch running_state;
-
-                        if (cr.state_updates) |updates| {
-                            const schema_json = getSchemaJson(alloc, workflow_json);
-                            const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
-                                log.err("task node {s} failed to apply updates: {}", .{ node_name, err });
-                                try self.store.updateRunStatus(run_row.id, "failed", "state update failed");
-                                return;
-                            };
-                            running_state = new_state;
-
-                            // Gap 3: Store result in cache
-                            if (cache_ttl) |ttl| cache_store: {
-                                const pt_s = getNodeField(alloc, node_json, "prompt_template") orelse break :cache_store;
-                                const rnd_s = templates.renderTemplate(alloc, pt_s, state_with_meta, run_row.input_json, null) catch break :cache_store;
-                                const ck_s = computeCacheKey(alloc, node_name, rnd_s) catch break :cache_store;
-                                self.store.setCachedResult(ck_s, node_name, updates, ttl) catch |cerr| {
-                                    log.warn("failed to cache result for node {s}: {}", .{ node_name, cerr });
+    
+                    switch (result) {
+                        .completed => |cr| {
+                            // Gap 7: Strip __meta (don't persist)
+                            running_state = stripMeta(alloc, running_state) catch running_state;
+    
+                            if (cr.state_updates) |updates| {
+                                const schema_json = getSchemaJson(alloc, workflow_json);
+                                const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
+                                    log.err("task node {s} failed to apply updates: {}", .{ node_name, err });
+                                    try self.store.updateRunStatus(run_row.id, "failed", "state update failed");
+                                    return;
+                                };
+                                running_state = new_state;
+    
+                                // Gap 3: Store result in cache
+                                if (cache_ttl) |ttl| cache_store: {
+                                    const pt_s = getNodeField(alloc, node_json, "prompt_template") orelse break :cache_store;
+                                    const rnd_s = templates.renderTemplate(alloc, pt_s, state_with_meta, run_row.input_json, null) catch break :cache_store;
+                                    const ck_s = computeCacheKey(alloc, node_name, rnd_s) catch break :cache_store;
+                                    self.store.setCachedResult(ck_s, node_name, updates, ttl) catch |cerr| {
+                                        log.warn("failed to cache result for node {s}: {}", .{ node_name, cerr });
+                                    };
+                                }
+    
+                                // Gap 4: Save as pending write
+                                self.store.savePendingWrite(run_row.id, node_name, node_name, updates) catch |perr| {
+                                    log.warn("failed to save pending write for node {s}: {}", .{ node_name, perr });
                                 };
                             }
-
-                            // Gap 4: Save as pending write
-                            self.store.savePendingWrite(run_row.id, node_name, node_name, updates) catch |perr| {
-                                log.warn("failed to save pending write for node {s}: {}", .{ node_name, perr });
-                            };
-                        }
-
-                        // Apply UI messages to state (__ui_messages key)
-                        if (cr.raw_output) |raw_out| {
-                            running_state = applyUiMessagesToState(alloc, running_state, raw_out) catch running_state;
-                        }
-
-                        // Consume pending injections
-                        const injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
-                        for (injections) |injection| {
-                            const schema_json = getSchemaJson(alloc, workflow_json);
-                            const new_state = state_mod.applyUpdates(alloc, running_state, injection.updates_json, schema_json) catch |err| {
-                                log.warn("failed to apply injection for run {s}: {}", .{ run_row.id, err });
-                                continue;
-                            };
-                            running_state = new_state;
-                        }
-
-                        try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-
-                        if (cr.goto_targets) |targets| {
-                            var valid_targets: std.ArrayListUnmanaged([]const u8) = .empty;
-                            for (targets) |target| {
-                                if (std.mem.eql(u8, target, "__end__") or getNodeJson(alloc, workflow_json, target) != null) {
-                                    try valid_targets.append(alloc, target);
-                                } else {
-                                    log.warn("goto target {s} not found in workflow, skipping", .{target});
+    
+                            // Apply UI messages to state (__ui_messages key)
+                            if (cr.raw_output) |raw_out| {
+                                running_state = applyUiMessagesToState(alloc, running_state, raw_out) catch running_state;
+                            }
+    
+                            // Consume pending injections
+                            const injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
+                            for (injections) |injection| {
+                                const schema_json = getSchemaJson(alloc, workflow_json);
+                                const new_state = state_mod.applyUpdates(alloc, running_state, injection.updates_json, schema_json) catch |err| {
+                                    log.warn("failed to apply injection for run {s}: {}", .{ run_row.id, err });
+                                    continue;
+                                };
+                                running_state = new_state;
+                            }
+    
+                            try completed_nodes.put(try alloc.dupe(u8, node_name), {});
+    
+                            if (cr.goto_targets) |targets| {
+                                var valid_targets: std.ArrayListUnmanaged([]const u8) = .empty;
+                                for (targets) |target| {
+                                    if (std.mem.eql(u8, target, "__end__") or getNodeJson(alloc, workflow_json, target) != null) {
+                                        try valid_targets.append(alloc, target);
+                                    } else {
+                                        log.warn("goto target {s} not found in workflow, skipping", .{target});
+                                    }
+                                }
+                                if (valid_targets.items.len > 0) {
+                                    goto_override = try valid_targets.toOwnedSlice(alloc);
+                                    log.info("task node {s} goto: {d} targets", .{ node_name, goto_override.?.len });
                                 }
                             }
-                            if (valid_targets.items.len > 0) {
-                                goto_override = try valid_targets.toOwnedSlice(alloc);
-                                log.info("task node {s} goto: {d} targets", .{ node_name, goto_override.?.len });
-                            }
-                        }
-
-                        // Gap 4: Clear pending writes
-                        self.store.clearPendingWrites(run_row.id) catch {};
-
-                        log.info("task node {s} completed for run {s}", .{ node_name, run_row.id });
-                    },
-                    .async_pending => {
-                        // Step is dispatched async, don't mark as completed yet
-                        // Will be polled on next tick
-                        log.info("task node {s} dispatched async for run {s}", .{ node_name, run_row.id });
-                        // Save checkpoint with current progress before returning
-                        version += 1;
-                        const cp_id_buf = ids.generateId();
-                        const cp_id = try alloc.dupe(u8, &cp_id_buf);
-                        const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                        const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
-                        const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
-                        try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
-                        try self.store.incrementCheckpointCount(run_row.id);
-                        try self.store.updateRunState(run_row.id, running_state);
-                        return;
-                    },
-                    .no_worker => {
-                        // No worker available, will retry next tick
-                        log.debug("no worker for task node {s}, will retry", .{node_name});
-                        // Save progress so far
-                        if (version > initial_version) {
+    
+                            // Gap 4: Clear pending writes
+                            self.store.clearPendingWrites(run_row.id) catch {};
+    
+                            log.info("task node {s} completed for run {s}", .{ node_name, run_row.id });
+                        },
+                        .async_pending => {
+                            // Step is dispatched async, don't mark as completed yet
+                            // Will be polled on next tick
+                            log.info("task node {s} dispatched async for run {s}", .{ node_name, run_row.id });
+                            // Save checkpoint with current progress before returning
+                            version += 1;
                             const cp_id_buf = ids.generateId();
                             const cp_id = try alloc.dupe(u8, &cp_id_buf);
                             const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
@@ -779,121 +764,136 @@ pub const Engine = struct {
                             try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
                             try self.store.incrementCheckpointCount(run_row.id);
                             try self.store.updateRunState(run_row.id, running_state);
-                        }
-                        return;
-                    },
-                    .failed => |err_text| {
-                        log.err("task node {s} failed: {s}", .{ node_name, err_text });
-                        try self.store.updateRunStatus(run_row.id, "failed", err_text);
-                        try self.store.insertEvent(run_row.id, null, "run.failed", "{}");
-                        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_row.id, null, "{}", self.metrics);
-                        return;
-                    },
-                }
-            } else if (std.mem.eql(u8, node_type, "subgraph")) {
-                // Subgraph: execute child workflow inline
-                const result = try self.executeSubgraphNode(alloc, run_row, node_name, node_json, running_state, recursion_depth);
-
-                switch (result) {
-                    .completed => |cr| {
-                        if (cr.state_updates) |updates| {
-                            const schema_json = getSchemaJson(alloc, workflow_json);
-                            const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
-                                log.err("subgraph node {s} failed to apply updates: {}", .{ node_name, err });
-                                try self.store.updateRunStatus(run_row.id, "failed", "subgraph state update failed");
-                                return;
-                            };
-                            running_state = new_state;
-                        }
-                        try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-                        log.info("subgraph node {s} completed for run {s}", .{ node_name, run_row.id });
-                    },
-                    .failed => |err_text| {
-                        log.err("subgraph node {s} failed: {s}", .{ node_name, err_text });
-                        try self.store.updateRunStatus(run_row.id, "failed", err_text);
-                        try self.store.insertEvent(run_row.id, null, "run.failed", "{}");
-                        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_row.id, null, "{}", self.metrics);
-                        return;
-                    },
-                    else => {},
-                }
-            } else if (std.mem.eql(u8, node_type, "send")) {
-                // Send: read items from state, dispatch target_node per item
-                const result = try self.executeSendNode(alloc, run_row, node_name, node_json, running_state);
-                if (result.state_updates) |updates| {
-                    const schema_json = getSchemaJson(alloc, workflow_json);
-                    const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
-                        log.err("send node {s} failed to apply updates: {}", .{ node_name, err });
-                        try self.store.updateRunStatus(run_row.id, "failed", "send state update failed");
-                        return;
-                    };
-                    running_state = new_state;
-                }
-                try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-                log.info("send node {s} completed for run {s}", .{ node_name, run_row.id });
-            } else {
-                log.warn("unknown node type {s} for node {s}", .{ node_type, node_name });
-                try self.store.updateRunStatus(run_row.id, "failed", "unknown node type");
-                return;
-            }
-
-            // Breakpoint: interrupt_after check
-            if (isInBreakpointList(node_name, interrupt_after)) {
-                log.info("breakpoint interrupt_after at node {s} for run {s}", .{ node_name, run_row.id });
-                // Save checkpoint with updated state first
-                version += 1;
-                const bp_cp_id_buf = ids.generateId();
-                const bp_cp_id = try alloc.dupe(u8, &bp_cp_id_buf);
-                const bp_cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                const bp_parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
-                const bp_meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
-                try self.store.createCheckpoint(bp_cp_id, run_row.id, node_name, bp_parent_id, running_state, bp_cn_json, version, bp_meta_json);
-                try self.store.incrementCheckpointCount(run_row.id);
-                try self.store.updateRunState(run_row.id, running_state);
-
-                try self.store.updateRunStatus(run_row.id, "interrupted", null);
-                try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
-                callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
-                return;
-            }
-
-            // Reconciliation: check tracker task status between steps
-            if (tracker_url != null and task_id != null) {
-                if (!reconcileWithTracker(alloc, tracker_url.?, task_id.?)) {
-                    log.info("run {s} cancelled by reconciliation", .{run_row.id});
-                    try self.store.updateRunStatus(run_row.id, "failed", "cancelled by tracker reconciliation");
-                    try self.store.insertEvent(run_row.id, null, "run.failed", "{\"reason\":\"tracker_cancelled\"}");
-                    callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_row.id, null, "{}", self.metrics);
+                            return;
+                        },
+                        .no_worker => {
+                            // No worker available, will retry next tick
+                            log.debug("no worker for task node {s}, will retry", .{node_name});
+                            // Save progress so far
+                            if (version > initial_version) {
+                                const cp_id_buf = ids.generateId();
+                                const cp_id = try alloc.dupe(u8, &cp_id_buf);
+                                const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
+                                const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                                const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
+                                try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
+                                try self.store.incrementCheckpointCount(run_row.id);
+                                try self.store.updateRunState(run_row.id, running_state);
+                            }
+                            return;
+                        },
+                        .failed => |err_text| {
+                            log.err("task node {s} failed: {s}", .{ node_name, err_text });
+                            try self.store.updateRunStatus(run_row.id, "failed", err_text);
+                            try self.store.insertEvent(run_row.id, null, "run.failed", "{}");
+                            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_row.id, null, "{}", self.metrics);
+                            return;
+                        },
+                    }
+                } else if (std.mem.eql(u8, node_type, "subgraph")) {
+                    // Subgraph: execute child workflow inline
+                    const result = try self.executeSubgraphNode(alloc, run_row, node_name, node_json, running_state, recursion_depth);
+    
+                    switch (result) {
+                        .completed => |cr| {
+                            if (cr.state_updates) |updates| {
+                                const schema_json = getSchemaJson(alloc, workflow_json);
+                                const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
+                                    log.err("subgraph node {s} failed to apply updates: {}", .{ node_name, err });
+                                    try self.store.updateRunStatus(run_row.id, "failed", "subgraph state update failed");
+                                    return;
+                                };
+                                running_state = new_state;
+                            }
+                            try completed_nodes.put(try alloc.dupe(u8, node_name), {});
+                            log.info("subgraph node {s} completed for run {s}", .{ node_name, run_row.id });
+                        },
+                        .failed => |err_text| {
+                            log.err("subgraph node {s} failed: {s}", .{ node_name, err_text });
+                            try self.store.updateRunStatus(run_row.id, "failed", err_text);
+                            try self.store.insertEvent(run_row.id, null, "run.failed", "{}");
+                            callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_row.id, null, "{}", self.metrics);
+                            return;
+                        },
+                        else => {},
+                    }
+                } else if (std.mem.eql(u8, node_type, "send")) {
+                    // Send: read items from state, dispatch target_node per item
+                    const result = try self.executeSendNode(alloc, run_row, node_name, node_json, running_state);
+                    if (result.state_updates) |updates| {
+                        const schema_json = getSchemaJson(alloc, workflow_json);
+                        const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
+                            log.err("send node {s} failed to apply updates: {}", .{ node_name, err });
+                            try self.store.updateRunStatus(run_row.id, "failed", "send state update failed");
+                            return;
+                        };
+                        running_state = new_state;
+                    }
+                    try completed_nodes.put(try alloc.dupe(u8, node_name), {});
+                    log.info("send node {s} completed for run {s}", .{ node_name, run_row.id });
+                } else {
+                    log.warn("unknown node type {s} for node {s}", .{ node_type, node_name });
+                    try self.store.updateRunStatus(run_row.id, "failed", "unknown node type");
                     return;
                 }
+    
+                // Breakpoint: interrupt_after check
+                if (isInBreakpointList(node_name, interrupt_after)) {
+                    log.info("breakpoint interrupt_after at node {s} for run {s}", .{ node_name, run_row.id });
+                    // Save checkpoint with updated state first
+                    version += 1;
+                    const bp_cp_id_buf = ids.generateId();
+                    const bp_cp_id = try alloc.dupe(u8, &bp_cp_id_buf);
+                    const bp_cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
+                    const bp_parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                    const bp_meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
+                    try self.store.createCheckpoint(bp_cp_id, run_row.id, node_name, bp_parent_id, running_state, bp_cn_json, version, bp_meta_json);
+                    try self.store.incrementCheckpointCount(run_row.id);
+                    try self.store.updateRunState(run_row.id, running_state);
+    
+                    try self.store.updateRunStatus(run_row.id, "interrupted", null);
+                    try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
+                    callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
+                    return;
+                }
+    
+                // Reconciliation: check tracker task status between steps
+                if (tracker_url != null and task_id != null) {
+                    if (!reconcileWithTracker(alloc, tracker_url.?, task_id.?)) {
+                        log.info("run {s} cancelled by reconciliation", .{run_row.id});
+                        try self.store.updateRunStatus(run_row.id, "failed", "cancelled by tracker reconciliation");
+                        try self.store.insertEvent(run_row.id, null, "run.failed", "{\"reason\":\"tracker_cancelled\"}");
+                        callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.failed", run_row.id, null, "{}", self.metrics);
+                        return;
+                    }
+                }
+    
+                // Strip ephemeral keys before checkpoint persistence
+                const schema_for_eph = getSchemaJson(alloc, workflow_json);
+                running_state = state_mod.stripEphemeralKeys(alloc, running_state, schema_for_eph) catch running_state;
+    
+                // Save checkpoint after each node
+                made_progress = true;
+                version += 1;
+                const cp_id_buf = ids.generateId();
+                const cp_id = try alloc.dupe(u8, &cp_id_buf);
+                const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
+                const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
+                try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
+                try self.store.incrementCheckpointCount(run_row.id);
+                try self.store.updateRunState(run_row.id, running_state);
+    
+                // Emit structured checkpoint event
+                self.emitEvent(alloc, .checkpoint_created, run_row.id, null, node_name, null);
+    
+                // Broadcast rich SSE events for all modes
+                if (self.sse_hub) |hub| {
+                    const node_json_for_sse = getNodeJson(alloc, workflow_json, node_name);
+                    const nt = if (node_json_for_sse) |nj| (getNodeField(alloc, nj, "type") orelse "task") else "task";
+                    broadcastNodeEvents(hub, alloc, run_row.id, node_name, nt, running_state, null, version, 0);
+                }
             }
-
-            // Strip ephemeral keys before checkpoint persistence
-            const schema_for_eph = getSchemaJson(alloc, workflow_json);
-            running_state = state_mod.stripEphemeralKeys(alloc, running_state, schema_for_eph) catch running_state;
-
-            // Save checkpoint after each node
-            made_progress = true;
-            version += 1;
-            const cp_id_buf = ids.generateId();
-            const cp_id = try alloc.dupe(u8, &cp_id_buf);
-            const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-            const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
-            const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
-            try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
-            try self.store.incrementCheckpointCount(run_row.id);
-            try self.store.updateRunState(run_row.id, running_state);
-
-            // Emit structured checkpoint event
-            self.emitEvent(alloc, .checkpoint_created, run_row.id, null, node_name, null);
-
-            // Broadcast rich SSE events for all modes
-            if (self.sse_hub) |hub| {
-                const node_json_for_sse = getNodeJson(alloc, workflow_json, node_name);
-                const nt = if (node_json_for_sse) |nj| (getNodeField(alloc, nj, "type") orelse "task") else "task";
-                broadcastNodeEvents(hub, alloc, run_row.id, node_name, nt, running_state, null, version, 0);
-            }
-        }
 
             // If goto override is set, use it for next iteration instead of findReadyNodes
             if (goto_override) |targets| {
