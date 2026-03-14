@@ -1398,6 +1398,25 @@ pub const Engine = struct {
             return SendNodeResult{ .state_updates = null };
         }
 
+        // Build worker list once before iterating items
+        const workers = try self.store.listWorkers(alloc);
+        var worker_infos: std.ArrayListUnmanaged(dispatch.WorkerInfo) = .empty;
+        for (workers) |w| {
+            const current_tasks = self.store.countRunningStepsByWorker(w.id) catch 0;
+            try worker_infos.append(alloc, .{
+                .id = w.id,
+                .url = w.url,
+                .token = w.token,
+                .protocol = w.protocol,
+                .model = w.model,
+                .tags_json = w.tags_json,
+                .max_concurrent = w.max_concurrent,
+                .status = w.status,
+                .current_tasks = current_tasks,
+            });
+        }
+        const required_tags = getNodeTags(alloc, target_json);
+
         // For each item, execute the target node
         var results: std.ArrayListUnmanaged([]const u8) = .empty;
         for (items_parsed.value.array.items, 0..) |item, idx| {
@@ -1410,25 +1429,6 @@ pub const Engine = struct {
             // Render with item
             const rendered = templates.renderTemplate(alloc, prompt_template, state_json, run_row.input_json, item_str) catch continue;
 
-            // Select worker and dispatch
-            const workers = try self.store.listWorkers(alloc);
-            var worker_infos: std.ArrayListUnmanaged(dispatch.WorkerInfo) = .empty;
-            for (workers) |w| {
-                const current_tasks = self.store.countRunningStepsByWorker(w.id) catch 0;
-                try worker_infos.append(alloc, .{
-                    .id = w.id,
-                    .url = w.url,
-                    .token = w.token,
-                    .protocol = w.protocol,
-                    .model = w.model,
-                    .tags_json = w.tags_json,
-                    .max_concurrent = w.max_concurrent,
-                    .status = w.status,
-                    .current_tasks = current_tasks,
-                });
-            }
-
-            const required_tags = getNodeTags(alloc, target_json);
             const selected_worker = try dispatch.selectWorker(alloc, worker_infos.items, required_tags);
             if (selected_worker == null) {
                 try results.append(alloc, "null");
