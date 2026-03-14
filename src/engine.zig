@@ -137,6 +137,11 @@ pub const Engine = struct {
     sse_hub: ?*sse_mod.SseHub = null,
     workflow_watcher: ?*workflow_loader.WorkflowWatcher = null,
     rate_limits: std.StringHashMap(RateLimitInfo),
+    config_valid: bool = false,
+    last_config_check_ms: i64 = 0,
+
+    /// How often to re-run config validation (default 30s).
+    const config_check_interval_ms: i64 = 30_000;
 
     pub fn init(store: *Store, allocator: std.mem.Allocator, poll_interval_ms: u64) Engine {
         return .{
@@ -151,6 +156,8 @@ pub const Engine = struct {
             .sse_hub = null,
             .workflow_watcher = null,
             .rate_limits = std.StringHashMap(RateLimitInfo).init(allocator),
+            .config_valid = false,
+            .last_config_check_ms = 0,
         };
     }
 
@@ -178,7 +185,14 @@ pub const Engine = struct {
 
     /// Validate that the engine configuration is healthy before dispatching
     /// new work. Returns true if workers exist and the store is reachable.
+    /// Results are cached for config_check_interval_ms to avoid running
+    /// 2 DB queries (listWorkers + getActiveRuns) on every tick.
     fn validateConfig(self: *Engine) bool {
+        const now_ms = ids.nowMs();
+        if (self.config_valid and (now_ms - self.last_config_check_ms) < config_check_interval_ms) {
+            return true;
+        }
+
         // Check: at least one worker registered and active
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -186,20 +200,25 @@ pub const Engine = struct {
 
         const workers = self.store.listWorkers(alloc) catch {
             log.warn("config validation: store query failed (listWorkers)", .{});
+            self.config_valid = false;
             return false;
         };
 
         if (workers.len == 0) {
             log.warn("config validation: no workers registered", .{});
+            self.config_valid = false;
             return false;
         }
 
         // Check: store connection healthy (simple query)
         _ = self.store.getActiveRuns(alloc) catch {
             log.warn("config validation: store connection unhealthy", .{});
+            self.config_valid = false;
             return false;
         };
 
+        self.config_valid = true;
+        self.last_config_check_ms = now_ms;
         return true;
     }
 
