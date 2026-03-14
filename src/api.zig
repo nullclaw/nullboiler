@@ -1689,7 +1689,10 @@ fn handleStream(ctx: *Context, run_id: []const u8, target: []const u8) HttpRespo
             }
             sse_buf.append(ctx.allocator, ']') catch {};
             sse_events_json = sse_buf.toOwnedSlice(ctx.allocator) catch "[]";
-            ctx.allocator.free(sse_events);
+            // Note: sse_events slice is allocated via ctx.allocator which is a
+            // per-request arena — no explicit free needed. The inner strings
+            // (event_type, data) are not owned by this allocator either (they
+            // originate from the engine's per-tick arena), so we must not free them.
         }
     }
 
