@@ -1461,7 +1461,13 @@ pub const Store = struct {
     }
 
     pub fn createRunWithState(self: *Self, id: []const u8, workflow_id: ?[]const u8, workflow_json: []const u8, input_json: []const u8, state_json: []const u8) !void {
-        const sql = "INSERT INTO runs (id, status, workflow_id, workflow_json, input_json, callbacks_json, state_json, created_at_ms, updated_at_ms) VALUES (?, 'pending', ?, ?, ?, '[]', ?, ?, ?)";
+        return self.createRunWithStateAndStatus(id, workflow_id, workflow_json, input_json, state_json, "pending");
+    }
+
+    /// Create a run with explicit initial status. Use "running" to avoid the
+    /// race window between creating with "pending" and updating to "running".
+    pub fn createRunWithStateAndStatus(self: *Self, id: []const u8, workflow_id: ?[]const u8, workflow_json: []const u8, input_json: []const u8, state_json: []const u8, status: []const u8) !void {
+        const sql = "INSERT INTO runs (id, status, workflow_id, workflow_json, input_json, callbacks_json, state_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?)";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -1470,12 +1476,13 @@ pub const Store = struct {
 
         const now = ids.nowMs();
         _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
-        bindTextOpt(stmt, 2, workflow_id);
-        _ = c.sqlite3_bind_text(stmt, 3, workflow_json.ptr, @intCast(workflow_json.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 4, input_json.ptr, @intCast(input_json.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 5, state_json.ptr, @intCast(state_json.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 6, now);
+        _ = c.sqlite3_bind_text(stmt, 2, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 3, workflow_id);
+        _ = c.sqlite3_bind_text(stmt, 4, workflow_json.ptr, @intCast(workflow_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 5, input_json.ptr, @intCast(input_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 6, state_json.ptr, @intCast(state_json.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_int64(stmt, 7, now);
+        _ = c.sqlite3_bind_int64(stmt, 8, now);
 
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
             return error.SqliteStepFailed;

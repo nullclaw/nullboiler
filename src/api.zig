@@ -1268,8 +1268,9 @@ fn handleRunWorkflow(ctx: *Context, workflow_id: []const u8, body: []const u8) H
     const run_id_buf = ids.generateId();
     const run_id = ctx.allocator.dupe(u8, &run_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
 
-    // Create run with state
-    ctx.store.createRunWithState(run_id, workflow_id, wf.definition_json, input_json, initial_state) catch {
+    // Create run directly with "running" status to avoid race window where
+    // engine could miss a run created as "pending" then updated to "running".
+    ctx.store.createRunWithStateAndStatus(run_id, workflow_id, wf.definition_json, input_json, initial_state, "running") catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to create run\"}}");
     };
 
@@ -1278,11 +1279,6 @@ fn handleRunWorkflow(ctx: *Context, workflow_id: []const u8, body: []const u8) H
     const cp_id = ctx.allocator.dupe(u8, &cp_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     ctx.store.createCheckpoint(cp_id, run_id, "__init__", null, initial_state, "[]", 0, null) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to create checkpoint\"}}");
-    };
-
-    // Set run status to running
-    ctx.store.updateRunStatus(run_id, "running", null) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update run status\"}}");
     };
 
     const run_id_json = jsonQuoted(ctx.allocator, run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
