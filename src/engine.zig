@@ -115,6 +115,12 @@ const StoreWriter = *const fn (
     value_json: []const u8,
 ) anyerror!void;
 
+const RuntimeBindings = struct {
+    input_json: ?[]const u8,
+    task_id: ?[]const u8,
+    store_access: ?templates.StoreAccess,
+};
+
 // ── Engine ───────────────────────────────────────────────────────────
 
 pub const RuntimeConfig = struct {
@@ -415,7 +421,8 @@ pub const Engine = struct {
         const deferred_nodes = collectDeferredNodesFromRoot(alloc, wf_root);
 
         // 2c. Get task id for reconciliation.
-        const task_id = getRuntimeStringSetting(alloc, current_state, workflow_json, &.{"task_id"});
+        const runtime = self.buildRuntimeBindings(alloc, workflow_json, current_state, run_row.input_json);
+        const task_id = runtime.task_id;
 
         // 3. Get completed nodes from latest checkpoint
         var completed_nodes = std.StringHashMap(void).init(alloc);
@@ -560,7 +567,7 @@ pub const Engine = struct {
                             const def_new_state = state_mod.applyUpdates(alloc, running_state, def_updates, def_schema) catch running_state;
                             running_state = def_new_state;
                         } else if (std.mem.eql(u8, def_node_type, "task") or std.mem.eql(u8, def_node_type, "agent")) {
-                            const def_result = self.executeTaskNode(alloc, run_row, deferred_name, def_node_json, running_state) catch continue;
+                            const def_result = self.executeTaskNode(alloc, run_row, runtime, deferred_name, def_node_json, running_state) catch continue;
                             switch (def_result) {
                                 .completed => |cr| {
                                     if (cr.state_updates) |updates| {
@@ -690,7 +697,7 @@ pub const Engine = struct {
                     running_state = new_state;
 
                     if (getNodeField(alloc, node_json, "store_updates")) |store_updates_json| {
-                        self.applyStoreUpdates(alloc, workflow_json, running_state, store_updates_json) catch |err| {
+                        self.applyStoreUpdates(alloc, running_state, store_updates_json, runtime.store_access) catch |err| {
                             log.err("transform node {s} failed to write store updates: {}", .{ node_name, err });
                             try self.store.updateRunStatus(run_row.id, "failed", "transform store update failed");
                             return;
@@ -715,7 +722,7 @@ pub const Engine = struct {
                     const cache_ttl = parseCacheTtlMs(alloc, node_json);
                     if (cache_ttl != null) cache_check: {
                         const pt_c = getNodeField(alloc, node_json, "prompt_template") orelse break :cache_check;
-                        const rnd_c = self.renderWorkflowTemplate(alloc, workflow_json, pt_c, state_with_meta, run_row.input_json, null) catch break :cache_check;
+                        const rnd_c = self.renderWorkflowTemplate(alloc, pt_c, state_with_meta, runtime, null) catch break :cache_check;
                         const ck_c = computeCacheKey(alloc, node_name, rnd_c) catch break :cache_check;
                         const cached = self.store.getCachedResult(alloc, ck_c) catch break :cache_check;
                         if (cached) |cached_upd| {
@@ -759,7 +766,7 @@ pub const Engine = struct {
                     }
 
                     const current_attempt: u32 = if (retrying_step) |rs| @intCast(rs.attempt) else 0;
-                    const result = try self.executeTaskNode(alloc, run_row, node_name, node_json, state_with_meta);
+                    const result = try self.executeTaskNode(alloc, run_row, runtime, node_name, node_json, state_with_meta);
 
                     // Handle retry scheduling for failed results (non-blocking)
                     const result_after_retry: TaskNodeResult = switch (result) {
@@ -837,7 +844,7 @@ pub const Engine = struct {
                                 // Gap 3: Store result in cache
                                 if (cache_ttl) |ttl| cache_store: {
                                     const pt_s = getNodeField(alloc, node_json, "prompt_template") orelse break :cache_store;
-                                    const rnd_s = self.renderWorkflowTemplate(alloc, workflow_json, pt_s, state_with_meta, run_row.input_json, null) catch break :cache_store;
+                                    const rnd_s = self.renderWorkflowTemplate(alloc, pt_s, state_with_meta, runtime, null) catch break :cache_store;
                                     const ck_s = computeCacheKey(alloc, node_name, rnd_s) catch break :cache_store;
                                     self.store.setCachedResult(ck_s, node_name, updates, ttl) catch |cerr| {
                                         log.warn("failed to cache result for node {s}: {}", .{ node_name, cerr });
@@ -959,7 +966,7 @@ pub const Engine = struct {
                     }
                 } else if (std.mem.eql(u8, node_type, "send")) {
                     // Send: read items from state, dispatch target_node per item
-                    const result = try self.executeSendNode(alloc, run_row, node_name, node_json, running_state);
+                    const result = try self.executeSendNode(alloc, run_row, runtime, node_name, node_json, running_state);
                     if (result.state_updates) |updates| {
                         const schema_json = cached_schema_json;
                         const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
@@ -1111,7 +1118,7 @@ pub const Engine = struct {
 
     // ── executeTaskNode ──────────────────────────────────────────────
 
-    fn executeTaskNode(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, node_name: []const u8, node_json: []const u8, state_json: []const u8) !TaskNodeResult {
+    fn executeTaskNode(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, runtime: RuntimeBindings, node_name: []const u8, node_json: []const u8, state_json: []const u8) !TaskNodeResult {
         // 1. Get prompt template from node definition
         const prompt_template = getNodeField(alloc, node_json, "prompt_template") orelse {
             // No prompt template — mark as completed with no state updates
@@ -1119,7 +1126,7 @@ pub const Engine = struct {
         };
 
         // 2. Render prompt with graph template interpolation and optional store access.
-        const rendered_prompt = self.renderWorkflowTemplate(alloc, run_row.workflow_json, prompt_template, state_json, run_row.input_json, null) catch |err| {
+        const rendered_prompt = self.renderWorkflowTemplate(alloc, prompt_template, state_json, runtime, null) catch |err| {
             log.err("template render failed for node {s}: {}", .{ node_name, err });
             return TaskNodeResult{ .failed = "template render failed" };
         };
@@ -1232,7 +1239,7 @@ pub const Engine = struct {
                             }
 
                             // Render continuation prompt
-                            const cont_rendered = self.renderWorkflowTemplate(alloc, run_row.workflow_json, continuation_prompt.?, state_json, run_row.input_json, null) catch break;
+                            const cont_rendered = self.renderWorkflowTemplate(alloc, continuation_prompt.?, state_json, runtime, null) catch break;
 
                             const cont_result = try dispatch.dispatchStep(
                                 alloc,
@@ -1409,7 +1416,7 @@ pub const Engine = struct {
 
     // ── executeSendNode ──────────────────────────────────────────────
 
-    fn executeSendNode(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, node_name: []const u8, node_json: []const u8, state_json: []const u8) !SendNodeResult {
+    fn executeSendNode(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, runtime: RuntimeBindings, node_name: []const u8, node_json: []const u8, state_json: []const u8) !SendNodeResult {
         // Read items_key state path, with items_from kept as a legacy alias.
         const items_path = getSendItemsPath(alloc, node_json) orelse {
             log.warn("send node {s} missing items_key/items_from", .{node_name});
@@ -1459,7 +1466,7 @@ pub const Engine = struct {
             const prompt_template = getNodeField(alloc, target_json, "prompt_template") orelse continue;
 
             // Render with item
-            const rendered = self.renderWorkflowTemplate(alloc, run_row.workflow_json, prompt_template, state_json, run_row.input_json, item_str) catch continue;
+            const rendered = self.renderWorkflowTemplate(alloc, prompt_template, state_json, runtime, item_str) catch continue;
 
             const selected_worker = try dispatch.selectWorker(alloc, worker_infos, required_tags);
             if (selected_worker == null) {
@@ -1515,20 +1522,16 @@ pub const Engine = struct {
     fn renderWorkflowTemplate(
         self: *Engine,
         alloc: std.mem.Allocator,
-        workflow_json: []const u8,
         template: []const u8,
         state_json: []const u8,
-        input_json: ?[]const u8,
+        runtime: RuntimeBindings,
         item_json: ?[]const u8,
     ) ![]const u8 {
-        const store_access = self.resolveRuntimeStoreAccess(alloc, workflow_json, state_json);
-        return templates.renderTemplateWithStore(alloc, template, state_json, input_json, item_json, store_access);
+        _ = self;
+        return templates.renderTemplateWithStore(alloc, template, state_json, runtime.input_json, item_json, runtime.store_access);
     }
 
-    fn resolveRuntimeStoreAccess(self: *Engine, alloc: std.mem.Allocator, workflow_json: []const u8, state_json: []const u8) ?templates.StoreAccess {
-        _ = alloc;
-        _ = workflow_json;
-        _ = state_json;
+    fn runtimeStoreAccess(self: *Engine) ?templates.StoreAccess {
         const base_url = self.trusted_tracker_url orelse return null;
         return .{
             .base_url = base_url,
@@ -1537,8 +1540,16 @@ pub const Engine = struct {
         };
     }
 
-    fn applyStoreUpdates(self: *Engine, alloc: std.mem.Allocator, workflow_json: []const u8, state_json: []const u8, store_updates_json: []const u8) !void {
-        const access = self.resolveRuntimeStoreAccess(alloc, workflow_json, state_json) orelse return error.StoreNotConfigured;
+    fn buildRuntimeBindings(self: *Engine, alloc: std.mem.Allocator, workflow_json: []const u8, state_json: []const u8, input_json: ?[]const u8) RuntimeBindings {
+        return .{
+            .input_json = input_json,
+            .task_id = getRuntimeStringSetting(alloc, state_json, workflow_json, &.{"task_id"}),
+            .store_access = self.runtimeStoreAccess(),
+        };
+    }
+
+    fn applyStoreUpdates(self: *Engine, alloc: std.mem.Allocator, state_json: []const u8, store_updates_json: []const u8, store_access: ?templates.StoreAccess) !void {
+        const access = store_access orelse return error.StoreNotConfigured;
         const parsed = try json.parseFromSlice(json.Value, alloc, store_updates_json, .{});
 
         switch (parsed.value) {
