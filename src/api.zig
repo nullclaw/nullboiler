@@ -1538,6 +1538,15 @@ fn handleReplayRun(ctx: *Context, run_id: []const u8, body: []const u8) HttpResp
         return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
     };
 
+    // Delete steps and checkpoints created after the replay checkpoint
+    // so the engine re-executes from a clean slate.
+    ctx.store.deleteStepsAfterTimestamp(run_id, cp.created_at_ms) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to clear old steps\"}}");
+    };
+    ctx.store.deleteCheckpointsAfterVersion(run_id, cp.version) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to clear old checkpoints\"}}");
+    };
+
     // Reset run state to checkpoint's state
     ctx.store.updateRunState(run_id, cp.state_json) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update run state\"}}");

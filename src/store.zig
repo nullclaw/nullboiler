@@ -766,6 +766,42 @@ pub const Store = struct {
         return list.toOwnedSlice(allocator);
     }
 
+    /// Delete steps for a run that were created after a given timestamp.
+    /// Used during replay to remove steps that will be re-executed.
+    pub fn deleteStepsAfterTimestamp(self: *Self, run_id: []const u8, after_ms: i64) !void {
+        const sql = "DELETE FROM steps WHERE run_id = ? AND created_at_ms > ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, after_ms);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    /// Delete checkpoints for a run with version greater than a given version.
+    /// Used during replay to remove checkpoints that will be superseded.
+    pub fn deleteCheckpointsAfterVersion(self: *Self, run_id: []const u8, after_version: i64) !void {
+        const sql = "DELETE FROM checkpoints WHERE run_id = ? AND version > ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, after_version);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
     /// Count how many running tasks a worker currently has.
     pub fn countRunningStepsByWorker(self: *Self, worker_id: []const u8) !i64 {
         const sql = "SELECT COUNT(*) FROM steps WHERE worker_id = ? AND status = 'running'";
