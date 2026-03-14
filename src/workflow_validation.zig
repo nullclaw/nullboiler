@@ -427,11 +427,11 @@ pub fn validate(alloc: Allocator, definition_json: []const u8) ![]ValidationErro
 
             // Check prompt field
             if (getJsonStringFromObj(nobj, "prompt")) |prompt| {
-                try checkStateRefs(alloc, &errors, schema, nname, "prompt", prompt);
+                try checkStateRefs(alloc, &errors, schema, nname, prompt);
             }
             // Check message field (interrupt)
             if (getJsonStringFromObj(nobj, "message")) |msg| {
-                try checkStateRefs(alloc, &errors, schema, nname, "message", msg);
+                try checkStateRefs(alloc, &errors, schema, nname, msg);
             }
         }
     }
@@ -518,10 +518,8 @@ fn checkStateRefs(
     errors: *std.ArrayListUnmanaged(ValidationError),
     schema: std.json.ObjectMap,
     node_name: []const u8,
-    _field_name: []const u8,
     text: []const u8,
 ) !void {
-    _ = _field_name;
     var pos: usize = 0;
     while (pos < text.len) {
         // Find "{{"

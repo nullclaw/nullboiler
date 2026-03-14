@@ -481,7 +481,7 @@ pub const Engine = struct {
 
                     if (std.mem.eql(u8, def_node_type, "transform")) {
                         const def_updates = getNodeField(alloc, def_node_json, "updates") orelse "{}";
-                        const def_schema = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+                        const def_schema = getSchemaJson(alloc, workflow_json);
                         const def_new_state = state_mod.applyUpdates(alloc, running_state, def_updates, def_schema) catch running_state;
                         running_state = def_new_state;
                     } else if (std.mem.eql(u8, def_node_type, "task") or std.mem.eql(u8, def_node_type, "agent")) {
@@ -489,7 +489,7 @@ pub const Engine = struct {
                         switch (def_result) {
                             .completed => |cr| {
                                 if (cr.state_updates) |updates| {
-                                    const def_schema = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+                                    const def_schema = getSchemaJson(alloc, workflow_json);
                                     const def_new_state = state_mod.applyUpdates(alloc, running_state, updates, def_schema) catch running_state;
                                     running_state = def_new_state;
                                 }
@@ -601,7 +601,7 @@ pub const Engine = struct {
                 const state_updates = getNodeField(alloc, node_json, "updates") orelse "{}";
 
                 // Get schema from workflow
-                const schema_json = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+                const schema_json = getSchemaJson(alloc, workflow_json);
 
                 // Apply updates via reducers
                 const new_state = state_mod.applyUpdates(alloc, running_state, state_updates, schema_json) catch |err| {
@@ -633,7 +633,7 @@ pub const Engine = struct {
                     const ck_c = computeCacheKey(alloc, node_name, rnd_c) catch break :cache_check;
                     const cached = self.store.getCachedResult(alloc, ck_c) catch break :cache_check;
                     if (cached) |cached_upd| {
-                        const cs = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+                        const cs = getSchemaJson(alloc, workflow_json);
                         running_state = state_mod.applyUpdates(alloc, running_state, cached_upd, cs) catch running_state;
                         try completed_nodes.put(try alloc.dupe(u8, node_name), {});
                         log.info("task node {s} cache hit for run {s}", .{ node_name, run_row.id });
@@ -686,7 +686,7 @@ pub const Engine = struct {
                         running_state = stripMeta(alloc, running_state) catch running_state;
 
                         if (cr.state_updates) |updates| {
-                            const schema_json = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+                            const schema_json = getSchemaJson(alloc, workflow_json);
                             const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
                                 log.err("task node {s} failed to apply updates: {}", .{ node_name, err });
                                 try self.store.updateRunStatus(run_row.id, "failed", "state update failed");
@@ -718,7 +718,7 @@ pub const Engine = struct {
                         // Consume pending injections
                         const injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
                         for (injections) |injection| {
-                            const schema_json = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+                            const schema_json = getSchemaJson(alloc, workflow_json);
                             const new_state = state_mod.applyUpdates(alloc, running_state, injection.updates_json, schema_json) catch |err| {
                                 log.warn("failed to apply injection for run {s}: {}", .{ run_row.id, err });
                                 continue;
@@ -795,7 +795,7 @@ pub const Engine = struct {
                 switch (result) {
                     .completed => |cr| {
                         if (cr.state_updates) |updates| {
-                            const schema_json = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+                            const schema_json = getSchemaJson(alloc, workflow_json);
                             const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
                                 log.err("subgraph node {s} failed to apply updates: {}", .{ node_name, err });
                                 try self.store.updateRunStatus(run_row.id, "failed", "subgraph state update failed");
@@ -819,7 +819,7 @@ pub const Engine = struct {
                 // Send: read items from state, dispatch target_node per item
                 const result = try self.executeSendNode(alloc, run_row, node_name, node_json, running_state);
                 if (result.state_updates) |updates| {
-                    const schema_json = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+                    const schema_json = getSchemaJson(alloc, workflow_json);
                     const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
                         log.err("send node {s} failed to apply updates: {}", .{ node_name, err });
                         try self.store.updateRunStatus(run_row.id, "failed", "send state update failed");
@@ -867,7 +867,7 @@ pub const Engine = struct {
             }
 
             // Strip ephemeral keys before checkpoint persistence
-            const schema_for_eph = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+            const schema_for_eph = getSchemaJson(alloc, workflow_json);
             running_state = state_mod.stripEphemeralKeys(alloc, running_state, schema_for_eph) catch running_state;
 
             // Save checkpoint after each node
@@ -1212,7 +1212,7 @@ pub const Engine = struct {
         const child_input = buildSubgraphInput(alloc, state_json, input_mapping_json) catch "{}";
 
         // Get schema from child workflow for initState
-        const child_schema = getWorkflowField(alloc, definition, "schema") orelse "{}";
+        const child_schema = getSchemaJson(alloc, definition);
         const child_state = state_mod.initState(alloc, child_input, child_schema) catch try alloc.dupe(u8, child_input);
 
         // Create child run
@@ -1666,6 +1666,15 @@ fn getNodeField(alloc: std.mem.Allocator, node_json: []const u8, field: []const 
     return serializeJsonValue(alloc, val) catch null;
 }
 
+/// Get the state schema JSON from a workflow definition.
+/// Looks up "state_schema" first (canonical key used by API/validation),
+/// then falls back to "schema" for inline workflow definitions in tests.
+fn getSchemaJson(alloc: std.mem.Allocator, workflow_json: []const u8) []const u8 {
+    return getWorkflowField(alloc, workflow_json, "state_schema") orelse
+        getWorkflowField(alloc, workflow_json, "schema") orelse
+        "{}";
+}
+
 /// Get a top-level field from workflow_json.
 fn getWorkflowField(alloc: std.mem.Allocator, workflow_json: []const u8, field: []const u8) ?[]const u8 {
     const parsed = json.parseFromSlice(json.Value, alloc, workflow_json, .{}) catch return null;
@@ -1831,15 +1840,6 @@ fn getNodeFieldFloat(alloc: std.mem.Allocator, node_json: []const u8, field: []c
     return null;
 }
 
-/// Get a boolean field from a node's JSON.
-fn getNodeFieldBool(alloc: std.mem.Allocator, node_json: []const u8, field: []const u8) ?bool {
-    const parsed = json.parseFromSlice(json.Value, alloc, node_json, .{}) catch return null;
-    if (parsed.value != .object) return null;
-    const val = parsed.value.object.get(field) orelse return null;
-    if (val == .bool) return val.bool;
-    return null;
-}
-
 /// Get a nested object field as JSON string from a node's JSON.
 fn getNodeObjectField(alloc: std.mem.Allocator, node_json: []const u8, field: []const u8) ?[]const u8 {
     const parsed = json.parseFromSlice(json.Value, alloc, node_json, .{}) catch return null;
@@ -1898,12 +1898,6 @@ fn computeCacheKey(alloc: std.mem.Allocator, node_name: []const u8, rendered_pro
 }
 
 // ── Deferred Node Helpers (Gap 6) ───────────────────────────────────
-
-/// Check if a node has "defer": true in its definition.
-fn isNodeDeferred(alloc: std.mem.Allocator, workflow_json: []const u8, node_name: []const u8) bool {
-    const node_json = getNodeJson(alloc, workflow_json, node_name) orelse return false;
-    return getNodeFieldBool(alloc, node_json, "defer") orelse false;
-}
 
 /// Collect all deferred node names from workflow.
 fn collectDeferredNodes(alloc: std.mem.Allocator, workflow_json: []const u8) []const []const u8 {
@@ -2098,27 +2092,6 @@ fn getCheckpointWorkflowVersion(alloc: std.mem.Allocator, metadata_json: ?[]cons
     const val = parsed.value.object.get("workflow_version") orelse return 1;
     if (val == .integer) return val.integer;
     return 1;
-}
-
-/// Merge workflow_version into existing checkpoint metadata JSON.
-fn mergeWorkflowVersionIntoMeta(alloc: std.mem.Allocator, existing_meta: ?[]const u8, wf_version: i64) ?[]const u8 {
-    if (existing_meta) |em| {
-        // Parse existing, add workflow_version
-        const parsed = json.parseFromSlice(json.Value, alloc, em, .{}) catch {
-            return std.fmt.allocPrint(alloc, "{{\"workflow_version\":{d}}}", .{wf_version}) catch null;
-        };
-        if (parsed.value == .object) {
-            var obj = json.ObjectMap.init(alloc);
-            var it = parsed.value.object.iterator();
-            while (it.next()) |entry| {
-                obj.put(entry.key_ptr.*, entry.value_ptr.*) catch continue;
-            }
-            obj.put("workflow_version", .{ .integer = wf_version }) catch {};
-            return serializeJsonValue(alloc, .{ .object = obj }) catch null;
-        }
-        return std.fmt.allocPrint(alloc, "{{\"workflow_version\":{d}}}", .{wf_version}) catch null;
-    }
-    return std.fmt.allocPrint(alloc, "{{\"workflow_version\":{d}}}", .{wf_version}) catch null;
 }
 
 /// Filter completed nodes to only those still present in the workflow definition.
@@ -3012,28 +2985,6 @@ test "migrateCompletedNodes: no changes needed" {
 
     const migrated = migrateCompletedNodes(alloc, &completed, wf);
     try std.testing.expect(!migrated);
-}
-
-test "mergeWorkflowVersionIntoMeta: new metadata" {
-    const allocator = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const result = mergeWorkflowVersionIntoMeta(arena.allocator(), null, 2);
-    try std.testing.expect(result != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.?, "workflow_version") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.?, "2") != null);
-}
-
-test "mergeWorkflowVersionIntoMeta: existing metadata" {
-    const allocator = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const result = mergeWorkflowVersionIntoMeta(arena.allocator(), "{\"route_results\":{}}", 3);
-    try std.testing.expect(result != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.?, "workflow_version") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.?, "route_results") != null);
 }
 
 test "serializeRouteResultsWithVersion: includes version" {

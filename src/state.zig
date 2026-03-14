@@ -637,10 +637,6 @@ pub fn stripEphemeralKeys(alloc: Allocator, state_json: []const u8, schema_json:
     return try alloc.dupe(u8, result_str);
 }
 
-// ── Custom errors ─────────────────────────────────────────────────────
-
-const InvalidNumber = error{InvalidNumber};
-
 // ── Tests ─────────────────────────────────────────────────────────────
 
 fn parseTestJson(alloc: Allocator, json_str: []const u8) !json.Parsed(json.Value) {
