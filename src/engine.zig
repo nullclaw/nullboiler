@@ -1269,10 +1269,10 @@ pub const Engine = struct {
                 processStreamMessages(hub, alloc, run_row.id, step_id, node_type, final_output);
             }
 
-            // Build state_updates from output
-            // Try parsing as JSON with "state_updates" field, otherwise wrap output in "output" key
-            const state_updates = extractStateUpdates(alloc, final_output) orelse
-                try std.fmt.allocPrint(alloc, "{{\"output\":{s}}}", .{try jsonStringify(alloc, final_output)});
+            // Build state_updates from output. Prefer explicit state_updates
+            // from the worker, otherwise honor node-level output_key /
+            // output_mapping before falling back to the legacy "output" key.
+            const state_updates = try buildTaskStateUpdates(alloc, node_json, final_output);
 
             // Extract goto targets from output (command primitive)
             const goto_targets = extractGotoTargets(alloc, final_output);
@@ -1382,9 +1382,9 @@ pub const Engine = struct {
     // ── executeSendNode ──────────────────────────────────────────────
 
     fn executeSendNode(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, node_name: []const u8, node_json: []const u8, state_json: []const u8) !SendNodeResult {
-        // Read items_from state path
-        const items_path = getNodeField(alloc, node_json, "items_from") orelse {
-            log.warn("send node {s} missing items_from", .{node_name});
+        // Read items_key state path, with items_from kept as a legacy alias.
+        const items_path = getSendItemsPath(alloc, node_json) orelse {
+            log.warn("send node {s} missing items_key/items_from", .{node_name});
             return SendNodeResult{ .state_updates = null };
         };
 
@@ -1486,7 +1486,8 @@ pub const Engine = struct {
 
         // Build state_updates from collected results
         const results_json = try serializeStringArray(alloc, results.items);
-        const state_updates = try std.fmt.allocPrint(alloc, "{{\"send_results\":{s}}}", .{results_json});
+        const output_key = getNodeField(alloc, node_json, "output_key") orelse "send_results";
+        const state_updates = try std.fmt.allocPrint(alloc, "{{\"{s}\":{s}}}", .{ output_key, results_json });
 
         // Create parent step record
         const step_id_buf = ids.generateId();
@@ -1837,6 +1838,66 @@ fn wrapOutput(alloc: std.mem.Allocator, output: []const u8) ![]const u8 {
 /// Escape a string as a JSON string literal (with quotes).
 fn jsonStringify(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
     return json.Stringify.valueAlloc(alloc, s, .{});
+}
+
+/// Resolve the state path used by a send node. `items_key` is the canonical
+/// field; `items_from` is accepted as a compatibility alias.
+fn getSendItemsPath(alloc: std.mem.Allocator, node_json: []const u8) ?[]const u8 {
+    return getNodeField(alloc, node_json, "items_key") orelse
+        getNodeField(alloc, node_json, "items_from");
+}
+
+/// Build the state update payload for a task/agent node result.
+///
+/// Precedence:
+/// 1. explicit worker-provided `state_updates`
+/// 2. node `output_key` / `output_mapping`
+/// 3. legacy fallback to `{"output": "..."}`
+fn buildTaskStateUpdates(alloc: std.mem.Allocator, node_json: []const u8, output: []const u8) ![]const u8 {
+    if (extractStateUpdates(alloc, output)) |updates| {
+        return updates;
+    }
+
+    const output_key = getNodeField(alloc, node_json, "output_key");
+    const output_mapping_json = getNodeObjectField(alloc, node_json, "output_mapping");
+    if (output_key == null and output_mapping_json == null) {
+        return std.fmt.allocPrint(alloc, "{{\"output\":{s}}}", .{try jsonStringify(alloc, output)});
+    }
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var result = json.ObjectMap.init(arena_alloc);
+    const parsed_output = json.parseFromSlice(json.Value, arena_alloc, output, .{}) catch null;
+
+    if (output_key) |key| {
+        if (parsed_output) |parsed| {
+            try result.put(key, parsed.value);
+        } else {
+            try result.put(key, .{ .string = output });
+        }
+    }
+
+    if (output_mapping_json) |mapping_json| {
+        const parsed_mapping = json.parseFromSlice(json.Value, arena_alloc, mapping_json, .{}) catch null;
+        if (parsed_mapping) |mapping| {
+            if (mapping.value == .object and parsed_output != null) {
+                var it = mapping.value.object.iterator();
+                while (it.next()) |entry| {
+                    if (entry.value_ptr.* != .string) continue;
+                    const source_path = entry.value_ptr.string;
+                    const raw_val = state_mod.getStateValue(arena_alloc, output, source_path) catch null;
+                    if (raw_val) |value_json| {
+                        const parsed_value = json.parseFromSlice(json.Value, arena_alloc, value_json, .{}) catch continue;
+                        try result.put(entry.key_ptr.*, parsed_value.value);
+                    }
+                }
+            }
+        }
+    }
+
+    return serializeJsonValue(alloc, .{ .object = result });
 }
 
 /// Serialize completed_nodes set to JSON array.
@@ -2807,6 +2868,61 @@ test "extractStateUpdates returns null for plain text" {
 
     const result = extractStateUpdates(arena.allocator(), "just plain text");
     try std.testing.expect(result == null);
+}
+
+test "buildTaskStateUpdates uses output_key for plain text output" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const node =
+        \\{"type":"task","output_key":"plan"}
+    ;
+    const result = try buildTaskStateUpdates(arena.allocator(), node, "draft plan");
+    try std.testing.expectEqualStrings("{\"plan\":\"draft plan\"}", result);
+}
+
+test "buildTaskStateUpdates applies output_mapping from JSON output" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const node =
+        \\{"type":"task","output_key":"review_result","output_mapping":{"grade":"grade","feedback":"details.feedback"}}
+    ;
+    const output =
+        \\{"grade":"approve","details":{"feedback":"looks good"}}
+    ;
+    const result = try buildTaskStateUpdates(arena.allocator(), node, output);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"review_result\":{\"grade\":\"approve\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"grade\":\"approve\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"feedback\":\"looks good\"") != null);
+}
+
+test "getSendItemsPath prefers canonical items_key" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const node =
+        \\{"type":"send","items_key":"state.files","items_from":"state.legacy"}
+    ;
+    const result = getSendItemsPath(arena.allocator(), node);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("state.files", result.?);
+}
+
+test "getSendItemsPath accepts legacy items_from alias" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const node =
+        \\{"type":"send","items_from":"state.files"}
+    ;
+    const result = getSendItemsPath(arena.allocator(), node);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("state.files", result.?);
 }
 
 test "extractGotoTargets: string target" {
