@@ -167,7 +167,11 @@ pub fn cleanAll(root: []const u8) void {
 /// Returns true when the command exits with code 0, false otherwise.
 /// Times out after `timeout_ms` milliseconds (the child is killed on timeout).
 pub fn runHook(allocator: std.mem.Allocator, command: []const u8, cwd: []const u8, timeout_ms: u64) !bool {
-    const argv = [_][]const u8{ "/bin/sh", "-lc", command };
+    const native = @import("builtin").os.tag;
+    const argv = if (native == .windows)
+        [_][]const u8{ "cmd.exe", "/C", command }
+    else
+        [_][]const u8{ "/bin/sh", "-lc", command };
 
     var child = std.process.Child.init(&argv, allocator);
     child.cwd = cwd;
@@ -268,6 +272,9 @@ test "Workspace create and remove" {
 }
 
 test "runHook executes shell command" {
+    const native = @import("builtin").os.tag;
+    if (native == .windows) return error.SkipZigTest;
+
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -286,6 +293,9 @@ test "runHook executes shell command" {
 }
 
 test "runHook returns false for failing command" {
+    const native = @import("builtin").os.tag;
+    if (native == .windows) return error.SkipZigTest;
+
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
