@@ -3738,7 +3738,8 @@ test "processUiMessages: broadcasts events" {
     ;
     processUiMessages(&hub, alloc, "run1", "step1", response);
 
-    const events = queue.drain(alloc);
+    const events = queue.drain();
+    defer queue.freeDrained(events);
     try std.testing.expectEqual(@as(usize, 2), events.len);
     try std.testing.expectEqualStrings("ui_message", events[0].event_type);
     try std.testing.expectEqualStrings("ui_message_delete", events[1].event_type);
@@ -3762,7 +3763,8 @@ test "processStreamMessages: broadcasts message events" {
     ;
     processStreamMessages(&hub, alloc, "run1", "step1", "task", response);
 
-    const events = queue.drain(alloc);
+    const events = queue.drain();
+    defer queue.freeDrained(events);
     try std.testing.expectEqual(@as(usize, 2), events.len);
     try std.testing.expectEqualStrings("message", events[0].event_type);
     try std.testing.expectEqualStrings("message", events[1].event_type);

@@ -33,6 +33,11 @@ pub const RunEventQueue = struct {
     mutex: std.Thread.Mutex,
     closed: std.atomic.Value(bool),
 
+    fn freeEvent(self: *RunEventQueue, event: SseEvent) void {
+        self.alloc.free(event.event_type);
+        self.alloc.free(event.data);
+    }
+
     pub fn init(alloc: Allocator) RunEventQueue {
         return .{
             .events = .empty,
@@ -43,6 +48,9 @@ pub const RunEventQueue = struct {
     }
 
     pub fn deinit(self: *RunEventQueue) void {
+        for (self.events.items) |event| {
+            self.freeEvent(event);
+        }
         self.events.deinit(self.alloc);
     }
 
@@ -50,17 +58,38 @@ pub const RunEventQueue = struct {
     pub fn push(self: *RunEventQueue, event: SseEvent) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.events.append(self.alloc, event) catch {};
+
+        const event_type = self.alloc.dupe(u8, event.event_type) catch return;
+        const data = self.alloc.dupe(u8, event.data) catch {
+            self.alloc.free(event_type);
+            return;
+        };
+
+        self.events.append(self.alloc, .{
+            .event_type = event_type,
+            .data = data,
+            .mode = event.mode,
+        }) catch {
+            self.alloc.free(event_type);
+            self.alloc.free(data);
+        };
     }
 
-    /// Drain all events from the queue. Returns owned slice. Thread-safe.
-    pub fn drain(self: *RunEventQueue, alloc: Allocator) []SseEvent {
+    /// Drain all events from the queue. Returns a queue-allocator-owned slice.
+    /// The caller must release it with `freeDrained`.
+    pub fn drain(self: *RunEventQueue) []SseEvent {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.events.items.len == 0) return &.{};
-        const items = alloc.dupe(SseEvent, self.events.items) catch return &.{};
-        self.events.clearRetainingCapacity();
-        return items;
+        return self.events.toOwnedSlice(self.alloc) catch &.{};
+    }
+
+    pub fn freeDrained(self: *RunEventQueue, events: []SseEvent) void {
+        if (events.len == 0) return;
+        for (events) |event| {
+            self.freeEvent(event);
+        }
+        self.alloc.free(events);
     }
 
     /// Mark queue as closed (run completed/cancelled).
@@ -143,10 +172,33 @@ test "sse hub broadcast and drain" {
     queue.push(.{ .event_type = "step_started", .data = "{}" });
     queue.push(.{ .event_type = "step_completed", .data = "{}" });
 
-    const events = queue.drain(alloc);
-    defer alloc.free(events);
+    const events = queue.drain();
+    defer queue.freeDrained(events);
     try std.testing.expectEqual(@as(usize, 2), events.len);
     try std.testing.expectEqualStrings("step_started", events[0].event_type);
+}
+
+test "sse hub queue owns event payloads beyond source arena lifetime" {
+    const alloc = std.testing.allocator;
+    var hub = SseHub.init(alloc);
+    defer hub.deinit();
+
+    const queue = hub.getOrCreateQueue("run1");
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    const arena_alloc = arena.allocator();
+
+    const event_type = try arena_alloc.dupe(u8, "step.completed");
+    const payload = try arena_alloc.dupe(u8, "{\"ok\":true}");
+    queue.push(.{ .event_type = event_type, .data = payload });
+    arena.deinit();
+
+    const events = queue.drain();
+    defer queue.freeDrained(events);
+
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqualStrings("step.completed", events[0].event_type);
+    try std.testing.expectEqualStrings("{\"ok\":true}", events[0].data);
 }
 
 test "sse hub broadcast to non-existent queue is silent" {
@@ -212,8 +264,8 @@ test "sse hub broadcast with mode" {
     queue.push(.{ .event_type = "task_start", .data = "{}", .mode = .tasks });
     queue.push(.{ .event_type = "debug", .data = "{}", .mode = .debug });
 
-    const events = queue.drain(alloc);
-    defer alloc.free(events);
+    const events = queue.drain();
+    defer queue.freeDrained(events);
     try std.testing.expectEqual(@as(usize, 3), events.len);
     try std.testing.expectEqual(StreamMode.values, events[0].mode);
     try std.testing.expectEqual(StreamMode.tasks, events[1].mode);
