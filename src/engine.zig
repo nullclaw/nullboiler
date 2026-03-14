@@ -97,6 +97,14 @@ pub const OrchestratorEvent = struct {
     }
 };
 
+// ── Constants ────────────────────────────────────────────────────────
+
+/// Maximum number of node executions per tick to prevent infinite loops.
+const max_nodes_per_tick: u32 = 1000;
+
+/// Maximum inline subgraph recursion depth.
+const max_subgraph_depth: u32 = 10;
+
 // ── Engine ───────────────────────────────────────────────────────────
 
 pub const RuntimeConfig = struct {
@@ -408,7 +416,7 @@ pub const Engine = struct {
 
         // 4. Main execution loop: find ready nodes, execute, repeat
         var running_state: []const u8 = try alloc.dupe(u8, current_state);
-        var max_iterations: u32 = 1000; // safety guard against infinite loops
+        var max_iterations: u32 = max_nodes_per_tick;
         var goto_ready: ?[]const []const u8 = null; // goto override from command primitive
 
         while (max_iterations > 0) : (max_iterations -= 1) {
@@ -1194,8 +1202,8 @@ pub const Engine = struct {
     // ── executeSubgraphNode ─────────────────────────────────────────
 
     fn executeSubgraphNode(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, node_name: []const u8, node_json: []const u8, state_json: []const u8, recursion_depth: u32) !TaskNodeResult {
-        if (recursion_depth >= 10) {
-            log.err("subgraph node {s}: max recursion depth (10) exceeded", .{node_name});
+        if (recursion_depth >= max_subgraph_depth) {
+            log.err("subgraph node {s}: max recursion depth ({d}) exceeded", .{ node_name, max_subgraph_depth });
             return TaskNodeResult{ .failed = "subgraph max recursion depth exceeded" };
         }
 
