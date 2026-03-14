@@ -408,11 +408,11 @@ pub const Engine = struct {
         } else "{}";
 
         // 2b. Parse breakpoint lists from workflow definition
-        const interrupt_before = parseBreakpointList(alloc, workflow_json, "interrupt_before");
-        const interrupt_after = parseBreakpointList(alloc, workflow_json, "interrupt_after");
+        const interrupt_before = parseBreakpointListFromRoot(alloc, wf_root, "interrupt_before");
+        const interrupt_after = parseBreakpointListFromRoot(alloc, wf_root, "interrupt_after");
 
         // 2d. Collect deferred nodes (Gap 6)
-        const deferred_nodes = collectDeferredNodes(alloc, workflow_json);
+        const deferred_nodes = collectDeferredNodesFromRoot(alloc, wf_root);
 
         // 2c. Get task id for reconciliation.
         const task_id = getRuntimeStringSetting(alloc, current_state, workflow_json, &.{"task_id"});
@@ -489,7 +489,7 @@ pub const Engine = struct {
             const all_ready_nodes = if (goto_ready) |gr| blk: {
                 goto_ready = null;
                 break :blk gr;
-            } else try findReadyNodes(alloc, workflow_json, &completed_nodes, &route_results);
+            } else try findReadyNodesFromRoot(alloc, wf_root, &completed_nodes, &route_results);
 
             // Gap 6: Filter out deferred nodes from ready list (execute them later)
             var ready_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -551,7 +551,7 @@ pub const Engine = struct {
                     for (deferred_nodes) |deferred_name| {
                         if (completed_nodes.get(deferred_name) != null) continue;
 
-                        const def_node_json = getNodeJson(alloc, workflow_json, deferred_name) orelse continue;
+                        const def_node_json = getNodeJsonFromRoot(alloc, wf_root, deferred_name) orelse continue;
                         const def_node_type = getNodeField(alloc, def_node_json, "type") orelse "task";
 
                         if (std.mem.eql(u8, def_node_type, "transform")) {
@@ -621,7 +621,7 @@ pub const Engine = struct {
                 }
 
                 // Get node definition from workflow
-                const node_json = getNodeJson(alloc, workflow_json, node_name) orelse {
+                const node_json = getNodeJsonFromRoot(alloc, wf_root, node_name) orelse {
                     log.err("node {s} not found in workflow for run {s}", .{ node_name, run_row.id });
                     try self.store.updateRunStatus(run_row.id, "failed", "node not found in workflow");
                     return;
@@ -871,7 +871,7 @@ pub const Engine = struct {
                             if (cr.goto_targets) |targets| {
                                 var valid_targets: std.ArrayListUnmanaged([]const u8) = .empty;
                                 for (targets) |target| {
-                                    if (std.mem.eql(u8, target, "__end__") or getNodeJson(alloc, workflow_json, target) != null) {
+                                    if (std.mem.eql(u8, target, "__end__") or workflowHasNode(wf_root, target)) {
                                         try valid_targets.append(alloc, target);
                                     } else {
                                         log.warn("goto target {s} not found in workflow, skipping", .{target});
@@ -1031,7 +1031,7 @@ pub const Engine = struct {
 
                 // Broadcast rich SSE events for all modes
                 if (self.sse_hub) |hub| {
-                    const node_json_for_sse = getNodeJson(alloc, workflow_json, node_name);
+                    const node_json_for_sse = getNodeJsonFromRoot(alloc, wf_root, node_name);
                     const nt = if (node_json_for_sse) |nj| (getNodeField(alloc, nj, "type") orelse "task") else "task";
                     broadcastNodeEvents(hub, alloc, run_row.id, node_name, nt, running_state, null, version, 0);
                 }
@@ -1685,7 +1685,15 @@ pub fn findReadyNodes(
     const parsed = json.parseFromSlice(json.Value, alloc, workflow_json, .{}) catch {
         return &.{};
     };
-    const root = parsed.value;
+    return findReadyNodesFromRoot(alloc, parsed.value, completed_nodes, route_results);
+}
+
+fn findReadyNodesFromRoot(
+    alloc: std.mem.Allocator,
+    root: json.Value,
+    completed_nodes: *std.StringHashMap(void),
+    route_results: *std.StringHashMap([]const u8),
+) ![]const []const u8 {
     if (root != .object) return &.{};
 
     // Get edges array
@@ -1848,7 +1856,10 @@ pub fn findReadyNodes(
 /// Workflow format: {"nodes": {"node_name": {...}}, "edges": [...]}
 fn getNodeJson(alloc: std.mem.Allocator, workflow_json: []const u8, node_name: []const u8) ?[]const u8 {
     const parsed = json.parseFromSlice(json.Value, alloc, workflow_json, .{}) catch return null;
-    const root = parsed.value;
+    return getNodeJsonFromRoot(alloc, parsed.value, node_name);
+}
+
+fn getNodeJsonFromRoot(alloc: std.mem.Allocator, root: json.Value, node_name: []const u8) ?[]const u8 {
     if (root != .object) return null;
 
     const nodes = root.object.get("nodes") orelse return null;
@@ -1856,6 +1867,13 @@ fn getNodeJson(alloc: std.mem.Allocator, workflow_json: []const u8, node_name: [
 
     const node = nodes.object.get(node_name) orelse return null;
     return serializeJsonValue(alloc, node) catch null;
+}
+
+fn workflowHasNode(root: json.Value, node_name: []const u8) bool {
+    if (root != .object) return false;
+    const nodes = root.object.get("nodes") orelse return false;
+    if (nodes != .object) return false;
+    return nodes.object.get(node_name) != null;
 }
 
 /// Get a string field from a node's JSON.
@@ -2155,8 +2173,12 @@ fn extractGotoTargets(alloc: std.mem.Allocator, output: []const u8) ?[]const []c
 /// Parse interrupt_before / interrupt_after arrays from workflow definition.
 fn parseBreakpointList(alloc: std.mem.Allocator, workflow_json: []const u8, field: []const u8) []const []const u8 {
     const parsed = json.parseFromSlice(json.Value, alloc, workflow_json, .{}) catch return &.{};
-    if (parsed.value != .object) return &.{};
-    const arr_val = parsed.value.object.get(field) orelse return &.{};
+    return parseBreakpointListFromRoot(alloc, parsed.value, field);
+}
+
+fn parseBreakpointListFromRoot(alloc: std.mem.Allocator, root: json.Value, field: []const u8) []const []const u8 {
+    if (root != .object) return &.{};
+    const arr_val = root.object.get(field) orelse return &.{};
     if (arr_val != .array) return &.{};
 
     var result: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -2257,8 +2279,12 @@ fn computeCacheKey(alloc: std.mem.Allocator, node_name: []const u8, rendered_pro
 /// Collect all deferred node names from workflow.
 fn collectDeferredNodes(alloc: std.mem.Allocator, workflow_json: []const u8) []const []const u8 {
     const parsed = json.parseFromSlice(json.Value, alloc, workflow_json, .{}) catch return &.{};
-    if (parsed.value != .object) return &.{};
-    const nodes_val = parsed.value.object.get("nodes") orelse return &.{};
+    return collectDeferredNodesFromRoot(alloc, parsed.value);
+}
+
+fn collectDeferredNodesFromRoot(alloc: std.mem.Allocator, root: json.Value) []const []const u8 {
+    if (root != .object) return &.{};
+    const nodes_val = root.object.get("nodes") orelse return &.{};
     if (nodes_val != .object) return &.{};
 
     var result: std.ArrayListUnmanaged([]const u8) = .empty;
