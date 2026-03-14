@@ -46,7 +46,7 @@ Graph-based workflow orchestrator with unified state model for NullClaw AI bot a
 
 ```sh
 zig build              # build
-zig build test         # unit tests (322 tests)
+zig build test         # unit tests (321 tests)
 zig build && bash tests/test_e2e.sh   # e2e tests (requires Python 3 for mock workers)
 ./zig-out/bin/nullboiler --port 8080 --db nullboiler.db --config config.json
 ```
