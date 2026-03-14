@@ -417,7 +417,7 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
     const model = getJsonString(obj, "model");
 
     const protocol = worker_protocol.parse(protocol_raw) orelse {
-        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid protocol (expected webhook|api_chat|openai_chat)\"}}");
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid protocol (expected webhook|api_chat|openai_chat|mqtt|redis_stream|a2a)\"}}");
     };
     if (!worker_protocol.validateUrlForProtocol(url, protocol)) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"webhook protocol requires explicit URL path (for example /webhook)\"}}");
@@ -962,65 +962,6 @@ fn handleRetryRun(ctx: *Context, run_id: []const u8) HttpResponse {
     const resp = std.fmt.allocPrint(ctx.allocator,
         \\{{"id":"{s}","status":"running"}}
     , .{run_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    return jsonResponse(200, resp);
-}
-
-fn handleSignalStep(ctx: *Context, run_id: []const u8, step_id: []const u8, body: []const u8) HttpResponse {
-    // 1. Get step from store
-    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
-        .ok => |s| s,
-        .err => |resp| return resp,
-    };
-
-    // 2. Must be "waiting_approval" (signal mode uses this status)
-    if (!std.mem.eql(u8, step.status, "waiting_approval")) {
-        const resp = std.fmt.allocPrint(ctx.allocator,
-            \\{{"error":{{"code":"conflict","message":"step is not waiting for signal (current: {s})"}}}}
-        , .{step.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"step is not waiting for signal\"}}");
-        return jsonResponse(409, resp);
-    }
-
-    // 3. Parse optional signal data from body
-    var signal_data: []const u8 = "{}";
-    if (body.len > 0) {
-        const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
-            // Body is not valid JSON; use empty
-            signal_data = "{}";
-            // Continue anyway
-            const output = std.fmt.allocPrint(ctx.allocator,
-                \\{{"output":"signaled","data":{{}}}}
-            , .{}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
-            ctx.store.updateStepStatus(step_id, "completed", null, output, null, step.attempt) catch {
-                return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
-            };
-            ctx.store.insertEvent(run_id, step_id, "step.signaled", output) catch {};
-            const resp = std.fmt.allocPrint(ctx.allocator,
-                \\{{"step_id":"{s}","status":"completed"}}
-            , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-            return jsonResponse(200, resp);
-        };
-        _ = parsed;
-        signal_data = body;
-    }
-
-    // 4. Build output with signal data
-    const output = std.fmt.allocPrint(ctx.allocator,
-        \\{{"output":"signaled","data":{s}}}
-    , .{signal_data}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
-    // 5. Update step to "completed"
-    ctx.store.updateStepStatus(step_id, "completed", null, output, null, step.attempt) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
-    };
-
-    // 6. Insert event
-    ctx.store.insertEvent(run_id, step_id, "step.signaled", output) catch {};
-
-    // 7. Return 200
-    const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"step_id":"{s}","status":"completed"}}
-    , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, resp);
 }
 
