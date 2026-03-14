@@ -115,10 +115,28 @@ const StoreWriter = *const fn (
     value_json: []const u8,
 ) anyerror!void;
 
+const TrackerRuntime = struct {
+    base_url: []const u8,
+    api_token: ?[]const u8,
+
+    fn storeAccess(self: TrackerRuntime, fetcher: templates.StoreFetcher) templates.StoreAccess {
+        return .{
+            .base_url = self.base_url,
+            .api_token = self.api_token,
+            .fetcher = fetcher,
+        };
+    }
+};
+
 const RuntimeBindings = struct {
     input_json: ?[]const u8,
     task_id: ?[]const u8,
-    store_access: ?templates.StoreAccess,
+    tracker: ?TrackerRuntime,
+
+    fn storeAccess(self: RuntimeBindings, fetcher: templates.StoreFetcher) ?templates.StoreAccess {
+        const tracker = self.tracker orelse return null;
+        return tracker.storeAccess(fetcher);
+    }
 };
 
 // ── Engine ───────────────────────────────────────────────────────────
@@ -697,7 +715,7 @@ pub const Engine = struct {
                     running_state = new_state;
 
                     if (getNodeField(alloc, node_json, "store_updates")) |store_updates_json| {
-                        self.applyStoreUpdates(alloc, running_state, store_updates_json, runtime.store_access) catch |err| {
+                        self.applyStoreUpdates(alloc, running_state, store_updates_json, runtime) catch |err| {
                             log.err("transform node {s} failed to write store updates: {}", .{ node_name, err });
                             try self.store.updateRunStatus(run_row.id, "failed", "transform store update failed");
                             return;
@@ -1006,8 +1024,8 @@ pub const Engine = struct {
                 }
 
                 // Reconciliation: check tracker task status between steps
-                if (self.trusted_tracker_url != null and task_id != null) {
-                    if (!reconcileWithTracker(alloc, self.trusted_tracker_url.?, self.trusted_tracker_api_token, task_id.?)) {
+                if (runtime.tracker) |tracker| {
+                    if (task_id != null and !reconcileWithTracker(alloc, tracker.base_url, tracker.api_token, task_id.?)) {
                         log.info("run {s} cancelled by reconciliation", .{run_row.id});
                         try self.store.updateRunStatus(run_row.id, "failed", "cancelled by tracker reconciliation");
                         try self.store.insertEvent(run_row.id, null, "run.failed", "{\"reason\":\"tracker_cancelled\"}");
@@ -1527,29 +1545,25 @@ pub const Engine = struct {
         runtime: RuntimeBindings,
         item_json: ?[]const u8,
     ) ![]const u8 {
-        _ = self;
-        return templates.renderTemplateWithStore(alloc, template, state_json, runtime.input_json, item_json, runtime.store_access);
-    }
-
-    fn runtimeStoreAccess(self: *Engine) ?templates.StoreAccess {
-        const base_url = self.trusted_tracker_url orelse return null;
-        return .{
-            .base_url = base_url,
-            .api_token = self.trusted_tracker_api_token,
-            .fetcher = self.store_fetcher,
-        };
+        return templates.renderTemplateWithStore(alloc, template, state_json, runtime.input_json, item_json, runtime.storeAccess(self.store_fetcher));
     }
 
     fn buildRuntimeBindings(self: *Engine, alloc: std.mem.Allocator, workflow_json: []const u8, state_json: []const u8, input_json: ?[]const u8) RuntimeBindings {
         return .{
             .input_json = input_json,
             .task_id = getRuntimeStringSetting(alloc, state_json, workflow_json, &.{"task_id"}),
-            .store_access = self.runtimeStoreAccess(),
+            .tracker = if (self.trusted_tracker_url) |base_url|
+                .{
+                    .base_url = base_url,
+                    .api_token = self.trusted_tracker_api_token,
+                }
+            else
+                null,
         };
     }
 
-    fn applyStoreUpdates(self: *Engine, alloc: std.mem.Allocator, state_json: []const u8, store_updates_json: []const u8, store_access: ?templates.StoreAccess) !void {
-        const access = store_access orelse return error.StoreNotConfigured;
+    fn applyStoreUpdates(self: *Engine, alloc: std.mem.Allocator, state_json: []const u8, store_updates_json: []const u8, runtime: RuntimeBindings) !void {
+        const access = runtime.storeAccess(self.store_fetcher) orelse return error.StoreNotConfigured;
         const parsed = try json.parseFromSlice(json.Value, alloc, store_updates_json, .{});
 
         switch (parsed.value) {
