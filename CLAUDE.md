@@ -46,7 +46,7 @@ Graph-based workflow orchestrator with unified state model for NullClaw AI bot a
 
 ```sh
 zig build              # build
-zig build test         # unit tests (324 tests)
+zig build test         # unit tests (322 tests)
 zig build && bash tests/test_e2e.sh   # e2e tests (requires Python 3 for mock workers)
 ./zig-out/bin/nullboiler --port 8080 --db nullboiler.db --config config.json
 ```
@@ -112,7 +112,7 @@ zig build && bash tests/test_e2e.sh   # e2e tests (requires Python 3 for mock wo
 ## Architecture
 
 - **Unified state model**: Every node reads from state, returns partial updates, engine applies reducers
-- **Graph-based execution**: Workflow = `{nodes: {}, edges: [], schema: {}}` with `__start__` and `__end__` synthetic nodes
+- **Graph-based execution**: Workflow = `{nodes: {}, edges: [], state_schema: {}}` with `__start__` and `__end__` synthetic nodes
 - **Checkpoints**: State snapshot after every node, enabling fork/replay/resume
 - **Conditional edges**: Route nodes produce values, edges like `["router:yes", "next"]` are taken when route result matches
 - **Deferred nodes**: Nodes with `"defer": true` execute right before `__end__`
