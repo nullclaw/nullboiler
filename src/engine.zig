@@ -3738,13 +3738,13 @@ test "processUiMessages: broadcasts events" {
     ;
     processUiMessages(&hub, alloc, "run1", "step1", response);
 
-    const events = queue.drain();
-    defer queue.freeDrained(events);
-    try std.testing.expectEqual(@as(usize, 2), events.len);
-    try std.testing.expectEqualStrings("ui_message", events[0].event_type);
-    try std.testing.expectEqualStrings("ui_message_delete", events[1].event_type);
+    const snapshot = queue.snapshotSince(alloc, 0);
+    defer queue.freeSnapshot(alloc, snapshot);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.events.len);
+    try std.testing.expectEqualStrings("ui_message", snapshot.events[0].event_type);
+    try std.testing.expectEqualStrings("ui_message_delete", snapshot.events[1].event_type);
     // First event should contain step_id
-    try std.testing.expect(std.mem.indexOf(u8, events[0].data, "step1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.events[0].data, "step1") != null);
 }
 
 test "processStreamMessages: broadcasts message events" {
@@ -3763,15 +3763,15 @@ test "processStreamMessages: broadcasts message events" {
     ;
     processStreamMessages(&hub, alloc, "run1", "step1", "task", response);
 
-    const events = queue.drain();
-    defer queue.freeDrained(events);
-    try std.testing.expectEqual(@as(usize, 2), events.len);
-    try std.testing.expectEqualStrings("message", events[0].event_type);
-    try std.testing.expectEqualStrings("message", events[1].event_type);
+    const snapshot = queue.snapshotSince(alloc, 0);
+    defer queue.freeSnapshot(alloc, snapshot);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.events.len);
+    try std.testing.expectEqualStrings("message", snapshot.events[0].event_type);
+    try std.testing.expectEqualStrings("message", snapshot.events[1].event_type);
     // Should contain step context
-    try std.testing.expect(std.mem.indexOf(u8, events[0].data, "step1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, events[0].data, "task") != null);
-    try std.testing.expect(std.mem.indexOf(u8, events[1].data, "tool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.events[0].data, "step1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.events[0].data, "task") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.events[1].data, "tool") != null);
 }
 
 test "applyUiMessagesToState: creates __ui_messages" {

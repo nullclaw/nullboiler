@@ -913,8 +913,8 @@ fn handleCancelRun(ctx: *Context, run_id: []const u8) HttpResponse {
     // 5. Insert event
     ctx.store.insertEvent(run_id, null, "run.cancelled", "{}") catch {};
 
-    // 6. Close SSE queue
-    if (ctx.sse_hub) |hub| hub.removeQueue(run_id);
+    // 6. Mark SSE queue closed but keep buffered events available for late subscribers.
+    if (ctx.sse_hub) |hub| hub.closeQueue(run_id);
 
     // 7. Return 200
     const resp = std.fmt.allocPrint(ctx.allocator,
@@ -1647,6 +1647,10 @@ fn handleStream(ctx: *Context, run_id: []const u8, target: []const u8) HttpRespo
 
     // Parse requested modes from ?mode= query param
     const mode_param = getQueryParam(target, "mode");
+    const after_seq = if (getQueryParam(target, "after_seq")) |raw|
+        std.fmt.parseInt(u64, raw, 10) catch 0
+    else
+        0;
     var requested_modes: [5]bool = .{ true, true, true, true, true }; // all modes by default
     if (mode_param) |modes_str| {
         // Reset all to false, then enable requested
@@ -1659,37 +1663,44 @@ fn handleStream(ctx: *Context, run_id: []const u8, target: []const u8) HttpRespo
         }
     }
 
-    const events = ctx.store.getEventsByRun(ctx.allocator, run_id) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get events\"}}");
-    };
+    const events_json = if (after_seq == 0) blk: {
+        const events = ctx.store.getEventsByRun(ctx.allocator, run_id) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get events\"}}");
+        };
 
-    // Build events JSON array
-    var events_buf: std.ArrayListUnmanaged(u8) = .empty;
-    events_buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    for (events, 0..) |ev, i| {
-        if (i > 0) {
-            events_buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        // Build events JSON array
+        var events_buf: std.ArrayListUnmanaged(u8) = .empty;
+        events_buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        for (events, 0..) |ev, i| {
+            if (i > 0) {
+                events_buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            }
+            const kind_json = jsonQuoted(ctx.allocator, ev.kind) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            const entry = std.fmt.allocPrint(ctx.allocator,
+                \\{{"kind":{s},"data":{s},"ts_ms":{d}}}
+            , .{ kind_json, ev.data_json, ev.ts_ms }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            events_buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         }
-        const kind_json = jsonQuoted(ctx.allocator, ev.kind) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"kind":{s},"data":{s},"ts_ms":{d}}}
-        , .{ kind_json, ev.data_json, ev.ts_ms }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        events_buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    }
-    events_buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    const events_json = events_buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        events_buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        break :blk events_buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    } else "[]";
 
-    // If SSE hub available, drain queued SSE events filtered by requested modes
+    // If SSE hub available, snapshot queued SSE events filtered by requested modes
     var sse_events_json: []const u8 = "[]";
+    var latest_stream_seq: u64 = 0;
+    var oldest_stream_seq: u64 = 0;
+    var stream_gap = false;
     if (ctx.sse_hub) |hub| {
         const queue = hub.getOrCreateQueue(run_id);
-        const sse_events = queue.drain();
-        defer queue.freeDrained(sse_events);
-        if (sse_events.len > 0) {
+        const snapshot = queue.snapshotSince(ctx.allocator, after_seq);
+        latest_stream_seq = snapshot.latest_seq;
+        oldest_stream_seq = snapshot.oldest_seq;
+        stream_gap = snapshot.gap_detected;
+        if (snapshot.events.len > 0) {
             var sse_buf: std.ArrayListUnmanaged(u8) = .empty;
             sse_buf.append(ctx.allocator, '[') catch {};
             var first = true;
-            for (sse_events) |sse_ev| {
+            for (snapshot.events) |sse_ev| {
                 // Filter by requested modes
                 if (!requested_modes[@intFromEnum(sse_ev.mode)]) continue;
                 if (!first) {
@@ -1698,8 +1709,9 @@ fn handleStream(ctx: *Context, run_id: []const u8, target: []const u8) HttpRespo
                 first = false;
                 const mode_str = sse_ev.mode.toString();
                 const sse_entry = std.fmt.allocPrint(ctx.allocator,
-                    \\{{"event":{s},"mode":"{s}","data":{s}}}
+                    \\{{"seq":{d},"event":{s},"mode":"{s}","data":{s}}}
                 , .{
+                    sse_ev.seq,
                     jsonQuoted(ctx.allocator, sse_ev.event_type) catch "\"\"",
                     mode_str,
                     sse_ev.data,
@@ -1718,12 +1730,15 @@ fn handleStream(ctx: *Context, run_id: []const u8, target: []const u8) HttpRespo
         "";
 
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"status":{s}{s},"events":{s},"stream_events":{s}}}
+        \\{{"status":{s}{s},"events":{s},"stream_events":{s},"next_stream_seq":{d},"stream_oldest_seq":{d},"stream_gap":{s}}}
     , .{
         status_json,
         state_field,
         events_json,
         sse_events_json,
+        latest_stream_seq,
+        oldest_stream_seq,
+        if (stream_gap) "true" else "false",
     }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, resp);
 }
@@ -2786,6 +2801,45 @@ test "API: stream with mode query param" {
     const resp2 = handleRequest(&ctx, "GET", "/runs/r1/stream?mode=values,debug", "");
     try std.testing.expectEqual(@as(u16, 200), resp2.status_code);
     try std.testing.expect(std.mem.indexOf(u8, resp2.body, "stream_events") != null);
+}
+
+test "API: stream supports independent cursors for multiple consumers" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var hub = sse_mod.SseHub.init(allocator);
+    defer hub.deinit();
+
+    try store.createRunWithState("r1", null, "{}", "{}", "{\"x\":1}");
+    try store.updateRunStatus("r1", "running", null);
+
+    const queue = hub.getOrCreateQueue("r1");
+    queue.push(.{ .event_type = "values", .data = "{\"step\":\"n1\"}", .mode = .values });
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .sse_hub = &hub,
+    };
+
+    const consumer_a = handleRequest(&ctx, "GET", "/runs/r1/stream", "");
+    try std.testing.expectEqual(@as(u16, 200), consumer_a.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_a.body, "\"seq\":1") != null);
+
+    const consumer_b = handleRequest(&ctx, "GET", "/runs/r1/stream", "");
+    try std.testing.expectEqual(@as(u16, 200), consumer_b.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_b.body, "\"seq\":1") != null);
+
+    queue.push(.{ .event_type = "updates", .data = "{\"step\":\"n2\"}", .mode = .updates });
+    const consumer_a_next = handleRequest(&ctx, "GET", "/runs/r1/stream?after_seq=1", "");
+    try std.testing.expectEqual(@as(u16, 200), consumer_a_next.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_a_next.body, "\"seq\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_a_next.body, "\"events\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_a_next.body, "\"next_stream_seq\":2") != null);
 }
 
 test "API: workflow routes decode percent-encoded ids" {
