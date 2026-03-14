@@ -51,7 +51,6 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
     const seg2 = getPathSegment(path, 2);
     const seg3 = getPathSegment(path, 3);
     const seg4 = getPathSegment(path, 4);
-    const seg5 = getPathSegment(path, 5);
 
     const is_get = eql(method, "GET");
     const is_post = eql(method, "POST");
