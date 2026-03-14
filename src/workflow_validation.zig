@@ -459,6 +459,25 @@ pub fn validate(alloc: Allocator, definition_json: []const u8) ![]ValidationErro
                     .message = "route target node does not exist",
                 });
             }
+            if (!hasRouteEdge(edge_sources.items, edge_targets.items, nname, re.key_ptr.*, target)) {
+                try errors.append(alloc, .{
+                    .err_type = "missing_route_edge",
+                    .node = nname,
+                    .key = re.key_ptr.*,
+                    .message = "route key is declared in routes but has no matching conditional edge",
+                });
+            }
+        }
+
+        if (getJsonStringFromObj(nobj, "default")) |default_route| {
+            if (!routes_val.object.contains(default_route)) {
+                try errors.append(alloc, .{
+                    .err_type = "invalid_route_default",
+                    .node = nname,
+                    .key = "default",
+                    .message = "route default must reference a declared routes key",
+                });
+            }
         }
     }
 
@@ -504,6 +523,16 @@ fn edgeSourceNode(src_raw: []const u8) []const u8 {
         return src_raw[0..colon_pos];
     }
     return src_raw;
+}
+
+fn hasRouteEdge(edge_sources: []const []const u8, edge_targets: []const []const u8, node_name: []const u8, route_key: []const u8, target: []const u8) bool {
+    for (edge_sources, edge_targets) |src_raw, edge_target| {
+        if (!std.mem.eql(u8, edge_target, target)) continue;
+        const colon_pos = std.mem.indexOfScalar(u8, src_raw, ':') orelse continue;
+        if (!std.mem.eql(u8, src_raw[0..colon_pos], node_name)) continue;
+        if (std.mem.eql(u8, src_raw[colon_pos + 1 ..], route_key)) return true;
+    }
+    return false;
 }
 
 fn getJsonStringFromObj(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -805,4 +834,29 @@ test "validate invalid route target" {
     }
     // Should have error about nonexistent node (either in route target or edge target)
     try std.testing.expect(errors.len > 0);
+}
+
+test "validate route requires matching conditional edges for declared routes" {
+    const alloc = std.testing.allocator;
+    const wf =
+        \\{"state_schema":{"x":{"type":"string","reducer":"last_value"}},"nodes":{"r":{"type":"route","input":"state.x","routes":{"yes":"approved"},"default":"yes"},"approved":{"type":"task","prompt":"approve"}},"edges":[["__start__","r"],["r:no","approved"],["approved","__end__"]]}
+    ;
+    const errors = try validate(alloc, wf);
+    defer {
+        for (errors) |e| {
+            alloc.free(e.err_type);
+            if (e.node) |n| alloc.free(n);
+            if (e.key) |k| alloc.free(k);
+            alloc.free(e.message);
+        }
+        alloc.free(errors);
+    }
+    var found_missing_route_edge = false;
+    for (errors) |err| {
+        if (std.mem.eql(u8, err.err_type, "missing_route_edge")) {
+            found_missing_route_edge = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_missing_route_edge);
 }

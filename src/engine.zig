@@ -1076,24 +1076,20 @@ pub const Engine = struct {
 
         // Get the input path to read from state
         const input_path = getNodeField(alloc, node_json, "input") orelse "state.route_input";
+        const default_route = getNodeField(alloc, node_json, "default");
 
         // Read value from state
         const value_json = state_mod.getStateValue(alloc, state_json, input_path) catch null;
         if (value_json == null) {
-            // No value at path, try default route
-            const default_route = getNodeField(alloc, node_json, "default");
-            return RouteNodeResult{ .route_value = default_route };
+            return RouteNodeResult{ .route_value = resolveDeclaredRouteValue(alloc, node_json, default_route) };
         }
 
         // Stringify value for route matching
         const route_key = state_mod.stringifyForRoute(alloc, value_json.?) catch {
-            const default_route = getNodeField(alloc, node_json, "default");
-            return RouteNodeResult{ .route_value = default_route };
+            return RouteNodeResult{ .route_value = resolveDeclaredRouteValue(alloc, node_json, default_route) };
         };
 
-        // Look up in routes map — but routes are encoded in edges, not in node
-        // The route value is used for conditional edge matching like "node:value"
-        return RouteNodeResult{ .route_value = route_key };
+        return RouteNodeResult{ .route_value = resolveDeclaredRouteValue(alloc, node_json, route_key) };
     }
 
     // ── executeTaskNode ──────────────────────────────────────────────
@@ -2226,6 +2222,20 @@ fn getNodeObjectField(alloc: std.mem.Allocator, node_json: []const u8, field: []
     return serializeJsonValue(alloc, val) catch null;
 }
 
+fn resolveDeclaredRouteValue(alloc: std.mem.Allocator, node_json: []const u8, candidate: ?[]const u8) ?[]const u8 {
+    const routes_json = getNodeObjectField(alloc, node_json, "routes") orelse return candidate;
+    const parsed = json.parseFromSlice(json.Value, alloc, routes_json, .{}) catch return candidate;
+    if (parsed.value != .object) return candidate;
+
+    if (candidate) |route_value| {
+        if (parsed.value.object.get(route_value) != null) return route_value;
+    }
+
+    const default_route = getNodeField(alloc, node_json, "default") orelse return candidate;
+    if (parsed.value.object.get(default_route) != null) return default_route;
+    return candidate;
+}
+
 // ── Retry Config Helpers (Gap 2) ────────────────────────────────────
 
 /// Parse retry.max_attempts from node JSON. Returns null if no retry config.
@@ -2988,6 +2998,38 @@ test "engine: route node with conditional edges" {
     // Verify the "yes" path was taken
     if (updated_run.state_json) |sj| {
         try std.testing.expect(std.mem.indexOf(u8, sj, "yes") != null);
+    }
+}
+
+test "engine: route node falls back to declared default route" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    const wf =
+        \\{"nodes":{"r":{"type":"route","input":"state.decision","routes":{"yes":"t_yes","fallback":"t_fallback"},"default":"fallback"},"t_yes":{"type":"transform","updates":"{\"path\":\"yes\"}"},"t_fallback":{"type":"transform","updates":"{\"path\":\"fallback\"}"}},"edges":[["__start__","r"],["r:yes","t_yes"],["r:fallback","t_fallback"],["t_yes","__end__"],["t_fallback","__end__"]],"schema":{"decision":{"type":"string","reducer":"last_value"},"path":{"type":"string","reducer":"last_value"}}}
+    ;
+
+    try store.createRunWithState("r1", null, wf, "{}", "{\"decision\":\"unknown\"}");
+    try store.updateRunStatus("r1", "running", null);
+
+    var engine = Engine.init(&store, allocator, 500);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const run_row = (try store.getRun(arena.allocator(), "r1")).?;
+    try engine.processRun(arena.allocator(), run_row);
+
+    const run_row2 = (try store.getRun(arena.allocator(), "r1")).?;
+    if (std.mem.eql(u8, run_row2.status, "running")) {
+        try engine.processRun(arena.allocator(), run_row2);
+    }
+
+    const updated_run = (try store.getRun(arena.allocator(), "r1")).?;
+    try std.testing.expectEqualStrings("completed", updated_run.status);
+    if (updated_run.state_json) |sj| {
+        try std.testing.expect(std.mem.indexOf(u8, sj, "fallback") != null);
     }
 }
 
