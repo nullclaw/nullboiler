@@ -318,9 +318,6 @@ pub const Engine = struct {
     }
 
     fn processRunWithDepth(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, recursion_depth: u32) !void {
-        // Emit run_started event
-        self.emitEvent(alloc, .run_started, run_row.id, null, null, null);
-
         // 1. Load current state
         var current_state = run_row.state_json orelse "{}";
 
@@ -392,6 +389,11 @@ pub const Engine = struct {
 
         var version: i64 = if (latest_checkpoint) |cp| cp.version else 0;
         const initial_version = version;
+
+        // Emit run_started only on the first tick (no prior checkpoints)
+        if (latest_checkpoint == null) {
+            self.emitEvent(alloc, .run_started, run_row.id, null, null, null);
+        }
 
         // 3b. Workflow version migration check
         const wf_version = getWorkflowVersion(alloc, workflow_json);
@@ -1081,9 +1083,13 @@ pub const Engine = struct {
                                 }
                             }
 
-                            // Consume pending injections between turns
-                            const injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
-                            _ = injections;
+                            // Consume pending injections between turns — these are
+                            // queued but cannot be applied mid-node. Re-save them so
+                            // they are applied after the full node completes.
+                            const mid_injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
+                            for (mid_injections) |inj| {
+                                self.store.createPendingInjection(run_row.id, inj.updates_json, node_name) catch {};
+                            }
 
                             // Render continuation prompt
                             const cont_rendered = templates.renderTemplate(alloc, continuation_prompt.?, state_json, run_row.input_json, null) catch break;
