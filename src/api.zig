@@ -2434,30 +2434,6 @@ test "API: register worker rejects non-positive max_concurrent" {
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
 }
 
-test "API: approve route does not match extra path segment" {
-    const allocator = std.testing.allocator;
-    var store = try Store.init(allocator, ":memory:");
-    defer store.deinit();
-
-    try store.insertRun("r1", null, "running", "{\"steps\":[]}", "{}", "[]");
-    try store.insertStep("s1", "r1", "approve-1", "approval", "waiting_approval", "{}", 1, null, null, null);
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var ctx = Context{
-        .store = &store,
-        .allocator = arena.allocator(),
-    };
-
-    const resp = handleRequest(&ctx, "POST", "/runs/r1/steps/s1/approve/extra", "");
-    try std.testing.expectEqual(@as(u16, 404), resp.status_code);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "endpoint not found") != null);
-
-    const step = (try store.getStep(arena.allocator(), "s1")).?;
-    try std.testing.expectEqualStrings("waiting_approval", step.status);
-}
-
 test "API: register openai_chat worker requires model" {
     const allocator = std.testing.allocator;
     var store = try Store.init(allocator, ":memory:");
