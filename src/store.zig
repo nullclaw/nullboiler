@@ -716,6 +716,24 @@ pub const Store = struct {
         }
     }
 
+    /// Get a retrying step for a given run and node name (def_step_id).
+    /// Returns the step if it exists with status='ready' and next_attempt_at_ms set.
+    pub fn getRetryingStepForNode(self: *Self, allocator: std.mem.Allocator, run_id: []const u8, node_name: []const u8) !?types.StepRow {
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, next_attempt_at_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE run_id = ? AND def_step_id = ? AND status = 'ready' AND next_attempt_at_ms IS NOT NULL ORDER BY created_at_ms DESC LIMIT 1";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, node_name.ptr, @intCast(node_name.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return try readStepRow(allocator, stmt);
+    }
+
     pub fn countStepsByStatus(self: *Self, run_id: []const u8, status: []const u8) !i64 {
         const sql = "SELECT COUNT(*) FROM steps WHERE run_id = ? AND status = ?";
         var stmt: ?*c.sqlite3_stmt = null;

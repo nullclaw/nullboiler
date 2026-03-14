@@ -398,6 +398,11 @@ pub const Engine = struct {
         var version: i64 = if (latest_checkpoint) |cp| cp.version else 0;
         const initial_version = version;
 
+        // Track the latest checkpoint ID for correct parent chaining.
+        // Updated after each checkpoint creation so subsequent checkpoints
+        // within the same tick correctly chain to their predecessor.
+        var latest_checkpoint_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+
         // Emit run_started only on the first tick (no prior checkpoints)
         if (latest_checkpoint == null) {
             self.emitEvent(alloc, .run_started, run_row.id, null, null, null);
@@ -520,12 +525,13 @@ pub const Engine = struct {
                     const cp_id_buf = ids.generateId();
                     const cp_id = try alloc.dupe(u8, &cp_id_buf);
                     const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                    const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                    const parent_id: ?[]const u8 = latest_checkpoint_id;
                     const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
                     try self.store.createCheckpoint(cp_id, run_row.id, "__end__", parent_id, running_state, cn_json, version, meta_json);
                     try self.store.incrementCheckpointCount(run_row.id);
                     try self.store.updateRunState(run_row.id, running_state);
-    
+                    latest_checkpoint_id = cp_id;
+
                     // Run is completed
                     try self.store.updateRunStatus(run_row.id, "completed", null);
                     try self.store.insertEvent(run_row.id, null, "run.completed", "{}");
@@ -541,12 +547,13 @@ pub const Engine = struct {
                     const cp_id_buf = ids.generateId();
                     const cp_id = try alloc.dupe(u8, &cp_id_buf);
                     const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                    const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                    const parent_id: ?[]const u8 = latest_checkpoint_id;
                     const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
                     try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
                     try self.store.incrementCheckpointCount(run_row.id);
                     try self.store.updateRunState(run_row.id, running_state);
-    
+                    latest_checkpoint_id = cp_id;
+
                     try self.store.updateRunStatus(run_row.id, "interrupted", null);
                     try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
                     callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
@@ -595,12 +602,13 @@ pub const Engine = struct {
                     const cp_id_buf = ids.generateId();
                     const cp_id = try alloc.dupe(u8, &cp_id_buf);
                     const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                    const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                    const parent_id: ?[]const u8 = latest_checkpoint_id;
                     const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
                     try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
                     try self.store.incrementCheckpointCount(run_row.id);
                     try self.store.updateRunState(run_row.id, running_state);
-    
+                    latest_checkpoint_id = cp_id;
+
                     try self.store.updateRunStatus(run_row.id, "interrupted", null);
                     try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
                     callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
@@ -652,45 +660,99 @@ pub const Engine = struct {
                             const ccb = ids.generateId();
                             const cci = try alloc.dupe(u8, &ccb);
                             const ccn = try serializeCompletedNodes(alloc, &completed_nodes);
-                            const cpi: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                            const cpi: ?[]const u8 = latest_checkpoint_id;
                             const cmj = try serializeRouteResults(alloc, &route_results);
                             try self.store.createCheckpoint(cci, run_row.id, node_name, cpi, running_state, ccn, version, cmj);
                             try self.store.incrementCheckpointCount(run_row.id);
                             try self.store.updateRunState(run_row.id, running_state);
+                            latest_checkpoint_id = cci;
                             continue;
                         }
                     }
     
-                    // Gap 2: Retry loop
+                    // Gap 2: Non-blocking retry — check for pending retry step
                     const max_attempts = parseRetryMaxAttempts(alloc, node_json) orelse 1;
                     const retry_init_ms = parseRetryInitialMs(alloc, node_json) orelse 500;
                     const retry_bf = parseRetryBackoff(alloc, node_json) orelse 2.0;
                     const retry_max_ms = parseRetryMaxMs(alloc, node_json) orelse 30000;
-                    var result: TaskNodeResult = undefined;
-                    var attempt: u32 = 0;
-                    while (attempt < max_attempts) : (attempt += 1) {
-                        result = try self.executeTaskNode(alloc, run_row, node_name, node_json, state_with_meta);
-                        switch (result) {
-                            .failed => {
-                                if (attempt + 1 < max_attempts) {
-                                    var dms: u64 = retry_init_ms;
-                                    var ei: u32 = 0;
-                                    while (ei < attempt) : (ei += 1) {
-                                        const nd = @as(f64, @floatFromInt(dms)) * retry_bf;
-                                        dms = @intFromFloat(@min(nd, @as(f64, @floatFromInt(retry_max_ms))));
-                                    }
-                                    if (dms > retry_max_ms) dms = retry_max_ms;
-                                    log.info("task node {s} attempt {d}/{d} failed, retrying in {d}ms", .{ node_name, attempt + 1, max_attempts, dms });
-                                    self.emitEvent(alloc, .step_retrying, run_row.id, null, node_name, null);
-                                    std.Thread.sleep(dms * std.time.ns_per_ms);
-                                    continue;
-                                }
-                            },
-                            else => break,
+
+                    // Check if there's a pending retry step for this node
+                    const retrying_step = self.store.getRetryingStepForNode(alloc, run_row.id, node_name) catch null;
+                    if (retrying_step) |rs| {
+                        const now_ms = ids.nowMs();
+                        if (rs.next_attempt_at_ms) |next_at| {
+                            if (now_ms < next_at) {
+                                // Retry delay not elapsed yet — skip this node, let other runs process
+                                return;
+                            }
                         }
+                        // Retry timer expired — clear the retrying step and re-execute below
+                        // The attempt count is tracked on the step record
                     }
+
+                    const current_attempt: u32 = if (retrying_step) |rs| @intCast(rs.attempt) else 0;
+                    const result = try self.executeTaskNode(alloc, run_row, node_name, node_json, state_with_meta);
+
+                    // Handle retry scheduling for failed results (non-blocking)
+                    const result_after_retry: TaskNodeResult = switch (result) {
+                        .failed => |err_text| blk: {
+                            if (current_attempt + 1 < max_attempts) {
+                                // Calculate delay with exponential backoff
+                                var dms: u64 = retry_init_ms;
+                                var ei: u32 = 0;
+                                while (ei < current_attempt) : (ei += 1) {
+                                    const nd = @as(f64, @floatFromInt(dms)) * retry_bf;
+                                    dms = @intFromFloat(@min(nd, @as(f64, @floatFromInt(retry_max_ms))));
+                                }
+                                if (dms > retry_max_ms) dms = retry_max_ms;
+                                log.info("task node {s} attempt {d}/{d} failed, scheduling retry in {d}ms", .{ node_name, current_attempt + 1, max_attempts, dms });
+                                self.emitEvent(alloc, .step_retrying, run_row.id, null, node_name, null);
+
+                                // Create or update step record with retry schedule
+                                const next_retry_at = ids.nowMs() + @as(i64, @intCast(dms));
+                                if (retrying_step) |rs| {
+                                    // Update existing step with next retry time
+                                    self.store.scheduleStepRetry(rs.id, next_retry_at, @as(i64, @intCast(current_attempt + 1)), err_text) catch {};
+                                } else {
+                                    // Create new step record for retry tracking
+                                    const retry_step_id_buf = ids.generateId();
+                                    const retry_step_id = alloc.dupe(u8, &retry_step_id_buf) catch {
+                                        break :blk result;
+                                    };
+                                    self.store.insertStep(retry_step_id, run_row.id, node_name, node_type, "ready", "{}", @intCast(max_attempts), null, null, null) catch {
+                                        break :blk result;
+                                    };
+                                    self.store.scheduleStepRetry(retry_step_id, next_retry_at, 1, err_text) catch {};
+                                }
+
+                                // Save progress checkpoint before returning
+                                if (version > initial_version) {
+                                    const cp_id_buf = ids.generateId();
+                                    const cp_id = alloc.dupe(u8, &cp_id_buf) catch {
+                                        break :blk result;
+                                    };
+                                    const cn_json = serializeCompletedNodes(alloc, &completed_nodes) catch {
+                                        break :blk result;
+                                    };
+                                    const parent_id: ?[]const u8 = if (latest_checkpoint_id) |pid| pid else null;
+                                    const meta_json = serializeRouteResultsWithVersion(alloc, &route_results, wf_version) catch {
+                                        break :blk result;
+                                    };
+                                    self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json) catch {};
+                                    self.store.incrementCheckpointCount(run_row.id) catch {};
+                                    self.store.updateRunState(run_row.id, running_state) catch {};
+                                    latest_checkpoint_id = cp_id;
+                                }
+
+                                // Return without marking node as completed — next tick will retry
+                                return;
+                            }
+                            break :blk result;
+                        },
+                        else => result,
+                    };
     
-                    switch (result) {
+                    switch (result_after_retry) {
                         .completed => |cr| {
                             // Gap 7: Strip __meta (don't persist)
                             running_state = stripMeta(alloc, running_state) catch running_state;
@@ -767,11 +829,12 @@ pub const Engine = struct {
                             const cp_id_buf = ids.generateId();
                             const cp_id = try alloc.dupe(u8, &cp_id_buf);
                             const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                            const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                            const parent_id: ?[]const u8 = latest_checkpoint_id;
                             const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
                             try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
                             try self.store.incrementCheckpointCount(run_row.id);
                             try self.store.updateRunState(run_row.id, running_state);
+                            latest_checkpoint_id = cp_id;
                             return;
                         },
                         .no_worker => {
@@ -782,11 +845,12 @@ pub const Engine = struct {
                                 const cp_id_buf = ids.generateId();
                                 const cp_id = try alloc.dupe(u8, &cp_id_buf);
                                 const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                                const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                                const parent_id: ?[]const u8 = latest_checkpoint_id;
                                 const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
                                 try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
                                 try self.store.incrementCheckpointCount(run_row.id);
                                 try self.store.updateRunState(run_row.id, running_state);
+                                latest_checkpoint_id = cp_id;
                             }
                             return;
                         },
@@ -853,12 +917,13 @@ pub const Engine = struct {
                     const bp_cp_id_buf = ids.generateId();
                     const bp_cp_id = try alloc.dupe(u8, &bp_cp_id_buf);
                     const bp_cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                    const bp_parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                    const bp_parent_id: ?[]const u8 = latest_checkpoint_id;
                     const bp_meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
                     try self.store.createCheckpoint(bp_cp_id, run_row.id, node_name, bp_parent_id, running_state, bp_cn_json, version, bp_meta_json);
                     try self.store.incrementCheckpointCount(run_row.id);
                     try self.store.updateRunState(run_row.id, running_state);
-    
+                    latest_checkpoint_id = bp_cp_id;
+
                     try self.store.updateRunStatus(run_row.id, "interrupted", null);
                     try self.store.insertEvent(run_row.id, null, "run.interrupted", "{}");
                     callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
@@ -886,11 +951,12 @@ pub const Engine = struct {
                 const cp_id_buf = ids.generateId();
                 const cp_id = try alloc.dupe(u8, &cp_id_buf);
                 const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
-                const parent_id: ?[]const u8 = if (latest_checkpoint) |cp| cp.id else null;
+                const parent_id: ?[]const u8 = latest_checkpoint_id;
                 const meta_json = try serializeRouteResultsWithVersion(alloc, &route_results, wf_version);
                 try self.store.createCheckpoint(cp_id, run_row.id, node_name, parent_id, running_state, cn_json, version, meta_json);
                 try self.store.incrementCheckpointCount(run_row.id);
                 try self.store.updateRunState(run_row.id, running_state);
+                latest_checkpoint_id = cp_id;
     
                 // Emit structured checkpoint event
                 self.emitEvent(alloc, .checkpoint_created, run_row.id, null, node_name, null);
