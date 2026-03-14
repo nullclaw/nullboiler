@@ -1515,7 +1515,9 @@ fn handleForkRun(ctx: *Context, body: []const u8) HttpResponse {
 // ── Replay Handler ──────────────────────────────────────────────────
 
 fn handleReplayRun(ctx: *Context, run_id: []const u8, body: []const u8) HttpResponse {
-    // Parse from_checkpoint_id from body
+    // Parse replay checkpoint ID. Accept both the canonical
+    // `from_checkpoint_id` field and the older `checkpoint_id` alias so
+    // existing clients keep working.
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
     };
@@ -1526,8 +1528,8 @@ fn handleReplayRun(ctx: *Context, run_id: []const u8, body: []const u8) HttpResp
     }
     const obj = parsed.value.object;
 
-    const checkpoint_id = getJsonString(obj, "from_checkpoint_id") orelse {
-        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: from_checkpoint_id\"}}");
+    const checkpoint_id = getJsonString(obj, "from_checkpoint_id") orelse getJsonString(obj, "checkpoint_id") orelse {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: from_checkpoint_id or checkpoint_id\"}}");
     };
 
     // Load checkpoint
@@ -2665,6 +2667,32 @@ test "API: replay run from checkpoint" {
     if (run.state_json) |sj| {
         try std.testing.expectEqualStrings("{\"x\":1}", sj);
     }
+}
+
+test "API: replay run accepts checkpoint_id alias" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try store.createRunWithState("r1", null, "{\"nodes\":{}}", "{}", "{\"x\":1}");
+    try store.updateRunStatus("r1", "completed", null);
+    try store.createCheckpoint("cp1", "r1", "step_a", null, "{\"x\":1}", "[\"step_a\"]", 1, null);
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"checkpoint_id":"cp1"}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs/r1/replay", body);
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "replayed_from_checkpoint") != null);
 }
 
 test "API: replay run rejects wrong checkpoint" {
