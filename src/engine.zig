@@ -710,6 +710,11 @@ pub const Engine = struct {
                             };
                         }
 
+                        // Apply UI messages to state (__ui_messages key)
+                        if (cr.raw_output) |raw_out| {
+                            running_state = applyUiMessagesToState(alloc, running_state, raw_out) catch running_state;
+                        }
+
                         // Consume pending injections
                         const injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
                         for (injections) |injection| {
@@ -861,6 +866,10 @@ pub const Engine = struct {
                 }
             }
 
+            // Strip ephemeral keys before checkpoint persistence
+            const schema_for_eph = getWorkflowField(alloc, workflow_json, "schema") orelse "{}";
+            running_state = state_mod.stripEphemeralKeys(alloc, running_state, schema_for_eph) catch running_state;
+
             // Save checkpoint after each node
             made_progress = true;
             version += 1;
@@ -900,6 +909,7 @@ pub const Engine = struct {
         completed: struct {
             state_updates: ?[]const u8,
             goto_targets: ?[]const []const u8 = null,
+            raw_output: ?[]const u8 = null,
         },
         async_pending: void,
         no_worker: void,
@@ -1135,6 +1145,12 @@ pub const Engine = struct {
             }
             callbacks.fireCallbacks(alloc, run_row.callbacks_json, "step.completed", run_row.id, step_id, output_json, self.metrics);
 
+            // Process UI messages and stream messages from worker response
+            if (self.sse_hub) |hub| {
+                processUiMessages(hub, alloc, run_row.id, step_id, final_output);
+                processStreamMessages(hub, alloc, run_row.id, step_id, node_type, final_output);
+            }
+
             // Build state_updates from output
             // Try parsing as JSON with "state_updates" field, otherwise wrap output in "output" key
             const state_updates = extractStateUpdates(alloc, final_output) orelse
@@ -1143,7 +1159,7 @@ pub const Engine = struct {
             // Extract goto targets from output (command primitive)
             const goto_targets = extractGotoTargets(alloc, final_output);
 
-            return TaskNodeResult{ .completed = .{ .state_updates = state_updates, .goto_targets = goto_targets } };
+            return TaskNodeResult{ .completed = .{ .state_updates = state_updates, .goto_targets = goto_targets, .raw_output = final_output } };
         } else {
             const err_text = result.error_text orelse "dispatch failed";
             try self.store.updateStepStatus(step_id, "failed", worker.id, null, err_text, 1);
@@ -2134,6 +2150,217 @@ fn migrateCompletedNodes(alloc: std.mem.Allocator, completed_nodes: *std.StringH
     return true;
 }
 
+// ── UI Messages ──────────────────────────────────────────────────────
+
+/// Process "ui_messages" from worker response JSON.
+/// For each message:
+///   - If it has "remove": true -> broadcast as "ui_message_delete" SSE event
+///   - Otherwise -> broadcast as "ui_message" SSE event
+/// Also applies to state.__ui_messages via add_messages reducer.
+fn processUiMessages(hub: *sse_mod.SseHub, alloc: std.mem.Allocator, run_id: []const u8, step_id: []const u8, response_json: []const u8) void {
+    const parsed = json.parseFromSlice(json.Value, alloc, response_json, .{}) catch return;
+    if (parsed.value != .object) return;
+    const ui_msgs_val = parsed.value.object.get("ui_messages") orelse return;
+    if (ui_msgs_val != .array) return;
+
+    for (ui_msgs_val.array.items) |msg| {
+        if (msg != .object) continue;
+
+        // Check for remove flag
+        const is_remove = blk: {
+            if (msg.object.get("remove")) |rm_val| {
+                if (rm_val == .bool) break :blk rm_val.bool;
+            }
+            break :blk false;
+        };
+
+        // Add step_id to the event data
+        var event_obj = json.ObjectMap.init(alloc);
+        var it = msg.object.iterator();
+        while (it.next()) |entry| {
+            event_obj.put(entry.key_ptr.*, entry.value_ptr.*) catch continue;
+        }
+        event_obj.put("step_id", .{ .string = step_id }) catch {};
+        const event_data = serializeJsonValue(alloc, .{ .object = event_obj }) catch continue;
+
+        if (is_remove) {
+            hub.broadcast(run_id, .{ .event_type = "ui_message_delete", .data = event_data, .mode = .custom });
+        } else {
+            hub.broadcast(run_id, .{ .event_type = "ui_message", .data = event_data, .mode = .custom });
+        }
+    }
+}
+
+/// Apply ui_messages to run state's __ui_messages key using add_messages reducer.
+fn applyUiMessagesToState(alloc: std.mem.Allocator, state_json: []const u8, response_json: []const u8) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const resp_parsed = json.parseFromSlice(json.Value, arena_alloc, response_json, .{}) catch return try alloc.dupe(u8, state_json);
+    if (resp_parsed.value != .object) return try alloc.dupe(u8, state_json);
+    const ui_msgs_val = resp_parsed.value.object.get("ui_messages") orelse return try alloc.dupe(u8, state_json);
+    if (ui_msgs_val != .array) return try alloc.dupe(u8, state_json);
+
+    // Serialize the ui_messages array
+    const ui_msgs_json = serializeJsonValue(arena_alloc, ui_msgs_val) catch return try alloc.dupe(u8, state_json);
+
+    // Build updates: {"__ui_messages": <ui_msgs>}
+    const updates = std.fmt.allocPrint(arena_alloc, "{{\"__ui_messages\":{s}}}", .{ui_msgs_json}) catch return try alloc.dupe(u8, state_json);
+
+    // Build a temporary schema that uses add_messages for __ui_messages
+    const schema =
+        \\{"__ui_messages":{"type":"array","reducer":"add_messages"}}
+    ;
+
+    return state_mod.applyUpdates(alloc, state_json, updates, schema) catch try alloc.dupe(u8, state_json);
+}
+
+// ── Stream Messages ──────────────────────────────────────────────────
+
+/// Process "stream_messages" from worker response JSON.
+/// For each message: broadcast as a "message" SSE event with step context.
+fn processStreamMessages(hub: *sse_mod.SseHub, alloc: std.mem.Allocator, run_id: []const u8, step_id: []const u8, node_type: []const u8, response_json: []const u8) void {
+    const parsed = json.parseFromSlice(json.Value, alloc, response_json, .{}) catch return;
+    if (parsed.value != .object) return;
+    const stream_msgs_val = parsed.value.object.get("stream_messages") orelse return;
+    if (stream_msgs_val != .array) return;
+
+    for (stream_msgs_val.array.items) |msg| {
+        if (msg != .object) continue;
+
+        // Build enriched message with step context
+        var event_obj = json.ObjectMap.init(alloc);
+        var it = msg.object.iterator();
+        while (it.next()) |entry| {
+            event_obj.put(entry.key_ptr.*, entry.value_ptr.*) catch continue;
+        }
+        event_obj.put("step_id", .{ .string = step_id }) catch {};
+        event_obj.put("node_type", .{ .string = node_type }) catch {};
+        const event_data = serializeJsonValue(alloc, .{ .object = event_obj }) catch continue;
+
+        hub.broadcast(run_id, .{ .event_type = "message", .data = event_data, .mode = .custom });
+    }
+}
+
+// ── Mermaid Graph Export ─────────────────────────────────────────────
+
+/// Generate Mermaid diagram syntax from a workflow JSON definition.
+/// Returns a Mermaid flowchart string.
+pub fn generateMermaid(alloc: std.mem.Allocator, definition_json: []const u8) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const parsed = try json.parseFromSlice(json.Value, arena_alloc, definition_json, .{});
+    if (parsed.value != .object) return try alloc.dupe(u8, "graph TD\n");
+
+    const nodes_val = parsed.value.object.get("nodes") orelse return try alloc.dupe(u8, "graph TD\n");
+    if (nodes_val != .object) return try alloc.dupe(u8, "graph TD\n");
+
+    const edges_val = parsed.value.object.get("edges") orelse return try alloc.dupe(u8, "graph TD\n");
+    if (edges_val != .array) return try alloc.dupe(u8, "graph TD\n");
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+
+    // Header
+    try buf.appendSlice(arena_alloc, "graph TD\n");
+
+    // __start__ and __end__ nodes
+    try buf.appendSlice(arena_alloc, "    __start__((Start))\n");
+
+    // Node definitions
+    var nodes_it = nodes_val.object.iterator();
+    while (nodes_it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const node = entry.value_ptr.*;
+
+        const node_type_str = blk: {
+            if (node == .object) {
+                if (node.object.get("type")) |t| {
+                    if (t == .string) break :blk t.string;
+                }
+            }
+            break :blk "task";
+        };
+
+        // Choose Mermaid shape based on node type
+        if (std.mem.eql(u8, node_type_str, "route")) {
+            try buf.appendSlice(arena_alloc, "    ");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "{");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "\\nroute}\n");
+        } else if (std.mem.eql(u8, node_type_str, "interrupt")) {
+            try buf.appendSlice(arena_alloc, "    ");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "[/");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "\\ninterrupt/]\n");
+        } else if (std.mem.eql(u8, node_type_str, "send")) {
+            try buf.appendSlice(arena_alloc, "    ");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "[[");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "\\nsend]]\n");
+        } else if (std.mem.eql(u8, node_type_str, "transform")) {
+            try buf.appendSlice(arena_alloc, "    ");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "(");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "\\ntransform)\n");
+        } else if (std.mem.eql(u8, node_type_str, "subgraph")) {
+            try buf.appendSlice(arena_alloc, "    ");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "[");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "\\nsubgraph]\n");
+        } else {
+            // task, agent, and others: rectangle
+            try buf.appendSlice(arena_alloc, "    ");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "[");
+            try buf.appendSlice(arena_alloc, name);
+            try buf.appendSlice(arena_alloc, "\\n");
+            try buf.appendSlice(arena_alloc, node_type_str);
+            try buf.appendSlice(arena_alloc, "]\n");
+        }
+    }
+
+    // __end__ node
+    try buf.appendSlice(arena_alloc, "    __end__((End))\n");
+
+    // Edges
+    for (edges_val.array.items) |edge_item| {
+        if (edge_item != .array) continue;
+        if (edge_item.array.items.len < 2) continue;
+
+        const source_raw = if (edge_item.array.items[0] == .string) edge_item.array.items[0].string else continue;
+        const target = if (edge_item.array.items[1] == .string) edge_item.array.items[1].string else continue;
+
+        // Parse conditional edge "source:value"
+        if (std.mem.indexOfScalar(u8, source_raw, ':')) |colon_pos| {
+            const source = source_raw[0..colon_pos];
+            const condition = source_raw[colon_pos + 1 ..];
+            try buf.appendSlice(arena_alloc, "    ");
+            try buf.appendSlice(arena_alloc, source);
+            try buf.appendSlice(arena_alloc, " -->|");
+            try buf.appendSlice(arena_alloc, condition);
+            try buf.appendSlice(arena_alloc, "| ");
+            try buf.appendSlice(arena_alloc, target);
+            try buf.appendSlice(arena_alloc, "\n");
+        } else {
+            try buf.appendSlice(arena_alloc, "    ");
+            try buf.appendSlice(arena_alloc, source_raw);
+            try buf.appendSlice(arena_alloc, " --> ");
+            try buf.appendSlice(arena_alloc, target);
+            try buf.appendSlice(arena_alloc, "\n");
+        }
+    }
+
+    return try alloc.dupe(u8, buf.items);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 test "Engine: init and stop" {
@@ -2914,4 +3141,114 @@ test "engine: validateConfig returns true with registered workers" {
     try store.insertWorker("w1", "http://localhost:9000", "", "webhook", null, "[]", 5, "config");
     var engine = Engine.init(&store, allocator, 500);
     try std.testing.expect(engine.validateConfig());
+}
+
+test "generateMermaid: simple chain" {
+    const allocator = std.testing.allocator;
+    const wf =
+        \\{"nodes":{"analyze":{"type":"task"},"review":{"type":"task"}},"edges":[["__start__","analyze"],["analyze","review"],["review","__end__"]]}
+    ;
+    const result = try generateMermaid(allocator, wf);
+    defer allocator.free(result);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "graph TD") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "__start__((Start))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "__end__((End))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "analyze[analyze") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "__start__ --> analyze") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "review --> __end__") != null);
+}
+
+test "generateMermaid: route node with conditional edges" {
+    const allocator = std.testing.allocator;
+    const wf =
+        \\{"nodes":{"decide":{"type":"route"},"approve":{"type":"task"},"reject":{"type":"task"}},"edges":[["__start__","decide"],["decide:yes","approve"],["decide:no","reject"],["approve","__end__"],["reject","__end__"]]}
+    ;
+    const result = try generateMermaid(allocator, wf);
+    defer allocator.free(result);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "decide{decide") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "decide -->|yes| approve") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "decide -->|no| reject") != null);
+}
+
+test "generateMermaid: node type shapes" {
+    const allocator = std.testing.allocator;
+    const wf =
+        \\{"nodes":{"t":{"type":"transform"},"i":{"type":"interrupt"},"s":{"type":"send"},"sg":{"type":"subgraph"}},"edges":[["__start__","t"],["t","__end__"]]}
+    ;
+    const result = try generateMermaid(allocator, wf);
+    defer allocator.free(result);
+
+    // transform uses rounded parens
+    try std.testing.expect(std.mem.indexOf(u8, result, "t(t\\ntransform)") != null);
+    // interrupt uses parallelogram
+    try std.testing.expect(std.mem.indexOf(u8, result, "i[/i\\ninterrupt/]") != null);
+    // send uses double brackets
+    try std.testing.expect(std.mem.indexOf(u8, result, "s[[s\\nsend]]") != null);
+    // subgraph uses rectangle
+    try std.testing.expect(std.mem.indexOf(u8, result, "sg[sg\\nsubgraph]") != null);
+}
+
+test "processUiMessages: broadcasts events" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var hub = sse_mod.SseHub.init(alloc);
+    defer hub.deinit();
+
+    const queue = hub.getOrCreateQueue("run1");
+
+    const response =
+        \\{"response":"ok","ui_messages":[{"id":"p1","name":"ProgressBar","props":{"progress":75}},{"id":"old","remove":true}]}
+    ;
+    processUiMessages(&hub, alloc, "run1", "step1", response);
+
+    const events = queue.drain(alloc);
+    try std.testing.expectEqual(@as(usize, 2), events.len);
+    try std.testing.expectEqualStrings("ui_message", events[0].event_type);
+    try std.testing.expectEqualStrings("ui_message_delete", events[1].event_type);
+    // First event should contain step_id
+    try std.testing.expect(std.mem.indexOf(u8, events[0].data, "step1") != null);
+}
+
+test "processStreamMessages: broadcasts message events" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var hub = sse_mod.SseHub.init(alloc);
+    defer hub.deinit();
+
+    const queue = hub.getOrCreateQueue("run1");
+
+    const response =
+        \\{"response":"done","stream_messages":[{"role":"assistant","content":"Starting..."},{"role":"tool","content":"Found 3 issues","tool":"lint"}]}
+    ;
+    processStreamMessages(&hub, alloc, "run1", "step1", "task", response);
+
+    const events = queue.drain(alloc);
+    try std.testing.expectEqual(@as(usize, 2), events.len);
+    try std.testing.expectEqualStrings("message", events[0].event_type);
+    try std.testing.expectEqualStrings("message", events[1].event_type);
+    // Should contain step context
+    try std.testing.expect(std.mem.indexOf(u8, events[0].data, "step1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, events[0].data, "task") != null);
+    try std.testing.expect(std.mem.indexOf(u8, events[1].data, "tool") != null);
+}
+
+test "applyUiMessagesToState: creates __ui_messages" {
+    const allocator = std.testing.allocator;
+    const state = "{}";
+    const response =
+        \\{"response":"ok","ui_messages":[{"id":"p1","name":"ProgressBar"}]}
+    ;
+    const result = try applyUiMessagesToState(allocator, state, response);
+    defer allocator.free(result);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "__ui_messages") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "ProgressBar") != null);
 }

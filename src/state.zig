@@ -592,6 +592,51 @@ fn applyAddMessages(alloc: Allocator, old_json: ?[]const u8, update_json: []cons
     return try alloc.dupe(u8, result);
 }
 
+// ── Ephemeral State Keys ──────────────────────────────────────────────
+
+/// Strip ephemeral keys from state before checkpoint persistence.
+/// Parses the schema for keys with `"ephemeral": true` and removes
+/// those keys from the state JSON. Returns a new JSON string.
+pub fn stripEphemeralKeys(alloc: Allocator, state_json: []const u8, schema_json: []const u8) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    // Parse schema to find ephemeral keys
+    const schema_parsed = try json.parseFromSlice(json.Value, arena_alloc, schema_json, .{});
+    if (schema_parsed.value != .object) return try alloc.dupe(u8, state_json);
+
+    var ephemeral_keys = std.StringHashMap(void).init(arena_alloc);
+    var schema_it = schema_parsed.value.object.iterator();
+    while (schema_it.next()) |entry| {
+        const schema_entry = entry.value_ptr.*;
+        if (schema_entry == .object) {
+            if (schema_entry.object.get("ephemeral")) |eph_val| {
+                if (eph_val == .bool and eph_val.bool) {
+                    try ephemeral_keys.put(entry.key_ptr.*, {});
+                }
+            }
+        }
+    }
+
+    if (ephemeral_keys.count() == 0) return try alloc.dupe(u8, state_json);
+
+    // Parse state and remove ephemeral keys
+    const state_parsed = try json.parseFromSlice(json.Value, arena_alloc, state_json, .{});
+    if (state_parsed.value != .object) return try alloc.dupe(u8, state_json);
+
+    var result_obj = json.ObjectMap.init(arena_alloc);
+    var state_it = state_parsed.value.object.iterator();
+    while (state_it.next()) |entry| {
+        if (ephemeral_keys.get(entry.key_ptr.*) == null) {
+            try result_obj.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
+
+    const result_str = try serializeValue(arena_alloc, json.Value{ .object = result_obj });
+    return try alloc.dupe(u8, result_str);
+}
+
 // ── Custom errors ─────────────────────────────────────────────────────
 
 const InvalidNumber = error{InvalidNumber};
@@ -933,4 +978,52 @@ test "overwrite with array value" {
     // Should be [99] (overwritten), not [1,2,3,99] (appended)
     try std.testing.expectEqual(@as(usize, 1), items.array.items.len);
     try std.testing.expectEqual(@as(i64, 99), items.array.items[0].integer);
+}
+
+test "stripEphemeralKeys removes ephemeral keys" {
+    const alloc = std.testing.allocator;
+    const state =
+        \\{"messages":["hello"],"temp_data":"scratch","count":5}
+    ;
+    const schema =
+        \\{"messages":{"type":"array","reducer":"append"},"temp_data":{"type":"string","reducer":"last_value","ephemeral":true},"count":{"type":"number","reducer":"add"}}
+    ;
+
+    const result = try stripEphemeralKeys(alloc, state, schema);
+    defer alloc.free(result);
+
+    const parsed = try parseTestJson(alloc, result);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    // temp_data should be stripped
+    try std.testing.expect(parsed.value.object.get("temp_data") == null);
+    // messages and count should remain
+    try std.testing.expect(parsed.value.object.get("messages") != null);
+    try std.testing.expect(parsed.value.object.get("count") != null);
+}
+
+test "stripEphemeralKeys no-op when no ephemeral keys" {
+    const alloc = std.testing.allocator;
+    const state =
+        \\{"messages":["hello"],"count":5}
+    ;
+    const schema =
+        \\{"messages":{"type":"array","reducer":"append"},"count":{"type":"number","reducer":"add"}}
+    ;
+
+    const result = try stripEphemeralKeys(alloc, state, schema);
+    defer alloc.free(result);
+
+    const parsed = try parseTestJson(alloc, result);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    try std.testing.expect(parsed.value.object.get("messages") != null);
+    try std.testing.expect(parsed.value.object.get("count") != null);
+}
+
+test "stripEphemeralKeys with empty state" {
+    const alloc = std.testing.allocator;
+    const result = try stripEphemeralKeys(alloc, "{}", "{}");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("{}", result);
 }

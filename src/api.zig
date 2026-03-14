@@ -209,6 +209,11 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
         return handleValidateWorkflow(ctx, seg1.?);
     }
 
+    // GET /workflows/{id}/mermaid
+    if (is_get and eql(seg0, "workflows") and seg1 != null and eql(seg2, "mermaid") and seg3 == null) {
+        return handleGetMermaid(ctx, seg1.?);
+    }
+
     // POST /workflows/{id}/run
     if (is_post and eql(seg0, "workflows") and seg1 != null and eql(seg2, "run") and seg3 == null) {
         return handleRunWorkflow(ctx, seg1.?, body);
@@ -1317,9 +1322,35 @@ fn handleValidateWorkflow(ctx: *Context, id: []const u8) HttpResponse {
         buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     }
 
-    buf.appendSlice(ctx.allocator, "]}") catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    buf.appendSlice(ctx.allocator, "]") catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    // Include Mermaid diagram in validation response
+    const mermaid_str = engine_mod.generateMermaid(ctx.allocator, wf.definition_json) catch null;
+    if (mermaid_str) |ms| {
+        const mermaid_json = jsonQuoted(ctx.allocator, ms) catch null;
+        if (mermaid_json) |mj| {
+            buf.appendSlice(ctx.allocator, ",\"mermaid\":") catch {};
+            buf.appendSlice(ctx.allocator, mj) catch {};
+        }
+    }
+
+    buf.appendSlice(ctx.allocator, "}") catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, json_body);
+}
+
+fn handleGetMermaid(ctx: *Context, id: []const u8) HttpResponse {
+    const wf = ctx.store.getWorkflow(ctx.allocator, id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get workflow\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"workflow not found\"}}");
+    };
+
+    const mermaid = engine_mod.generateMermaid(ctx.allocator, wf.definition_json) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to generate mermaid diagram\"}}");
+    };
+
+    return plainResponse(200, mermaid);
 }
 
 fn handleRunWorkflow(ctx: *Context, workflow_id: []const u8, body: []const u8) HttpResponse {
