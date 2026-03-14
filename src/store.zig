@@ -140,6 +140,17 @@ pub const Store = struct {
             }
             return error.MigrationFailed;
         }
+
+        // Migration 004 — orchestration schema (workflows, checkpoints, agent_events)
+        const sql_004 = @embedFile("migrations/004_orchestration.sql");
+        prc = c.sqlite3_exec(self.db, sql_004.ptr, null, null, &err_msg);
+        if (prc != c.SQLITE_OK) {
+            if (err_msg) |msg| {
+                log.err("migration 004 failed (rc={d}): {s}", .{ prc, std.mem.span(msg) });
+                c.sqlite3_free(msg);
+            }
+            return error.MigrationFailed;
+        }
     }
 
     pub fn beginTransaction(self: *Self) !void {
@@ -392,7 +403,7 @@ pub const Store = struct {
     }
 
     pub fn getRun(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE id = ?";
+        const sql = "SELECT id, idempotency_key, status, workflow_id, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -407,19 +418,23 @@ pub const Store = struct {
             .id = try allocStr(allocator, stmt, 0),
             .idempotency_key = try allocStrOpt(allocator, stmt, 1),
             .status = try allocStr(allocator, stmt, 2),
-            .workflow_json = try allocStr(allocator, stmt, 3),
-            .input_json = try allocStr(allocator, stmt, 4),
-            .callbacks_json = try allocStr(allocator, stmt, 5),
-            .error_text = try allocStrOpt(allocator, stmt, 6),
-            .created_at_ms = colInt(stmt, 7),
-            .updated_at_ms = colInt(stmt, 8),
-            .started_at_ms = colIntOpt(stmt, 9),
-            .ended_at_ms = colIntOpt(stmt, 10),
+            .workflow_id = try allocStrOpt(allocator, stmt, 3),
+            .workflow_json = try allocStr(allocator, stmt, 4),
+            .input_json = try allocStr(allocator, stmt, 5),
+            .callbacks_json = try allocStr(allocator, stmt, 6),
+            .error_text = try allocStrOpt(allocator, stmt, 7),
+            .created_at_ms = colInt(stmt, 8),
+            .updated_at_ms = colInt(stmt, 9),
+            .started_at_ms = colIntOpt(stmt, 10),
+            .ended_at_ms = colIntOpt(stmt, 11),
+            .state_json = try allocStrOpt(allocator, stmt, 12),
+            .config_json = try allocStrOpt(allocator, stmt, 13),
+            .parent_run_id = try allocStrOpt(allocator, stmt, 14),
         };
     }
 
     pub fn getRunByIdempotencyKey(self: *Self, allocator: std.mem.Allocator, key: []const u8) !?types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE idempotency_key = ? ORDER BY created_at_ms DESC LIMIT 1";
+        const sql = "SELECT id, idempotency_key, status, workflow_id, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE idempotency_key = ? ORDER BY created_at_ms DESC LIMIT 1";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -433,35 +448,45 @@ pub const Store = struct {
             .id = try allocStr(allocator, stmt, 0),
             .idempotency_key = try allocStrOpt(allocator, stmt, 1),
             .status = try allocStr(allocator, stmt, 2),
-            .workflow_json = try allocStr(allocator, stmt, 3),
-            .input_json = try allocStr(allocator, stmt, 4),
-            .callbacks_json = try allocStr(allocator, stmt, 5),
-            .error_text = try allocStrOpt(allocator, stmt, 6),
-            .created_at_ms = colInt(stmt, 7),
-            .updated_at_ms = colInt(stmt, 8),
-            .started_at_ms = colIntOpt(stmt, 9),
-            .ended_at_ms = colIntOpt(stmt, 10),
+            .workflow_id = try allocStrOpt(allocator, stmt, 3),
+            .workflow_json = try allocStr(allocator, stmt, 4),
+            .input_json = try allocStr(allocator, stmt, 5),
+            .callbacks_json = try allocStr(allocator, stmt, 6),
+            .error_text = try allocStrOpt(allocator, stmt, 7),
+            .created_at_ms = colInt(stmt, 8),
+            .updated_at_ms = colInt(stmt, 9),
+            .started_at_ms = colIntOpt(stmt, 10),
+            .ended_at_ms = colIntOpt(stmt, 11),
+            .state_json = try allocStrOpt(allocator, stmt, 12),
+            .config_json = try allocStrOpt(allocator, stmt, 13),
+            .parent_run_id = try allocStrOpt(allocator, stmt, 14),
         };
     }
 
-    pub fn listRuns(self: *Self, allocator: std.mem.Allocator, status_filter: ?[]const u8, limit: i64, offset: i64) ![]types.RunRow {
+    pub fn listRuns(self: *Self, allocator: std.mem.Allocator, status_filter: ?[]const u8, workflow_id_filter: ?[]const u8, limit: i64, offset: i64) ![]types.RunRow {
         var stmt: ?*c.sqlite3_stmt = null;
-        if (status_filter != null) {
-            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status = ? ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
-            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-                return error.SqlitePrepareFailed;
-            }
-            _ = c.sqlite3_bind_text(stmt, 1, status_filter.?.ptr, @intCast(status_filter.?.len), SQLITE_STATIC);
-            _ = c.sqlite3_bind_int64(stmt, 2, limit);
-            _ = c.sqlite3_bind_int64(stmt, 3, offset);
-        } else {
-            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
-            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-                return error.SqlitePrepareFailed;
-            }
-            _ = c.sqlite3_bind_int64(stmt, 1, limit);
-            _ = c.sqlite3_bind_int64(stmt, 2, offset);
+        const sql =
+            "SELECT id, idempotency_key, status, workflow_id, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id " ++
+            "FROM runs WHERE (? IS NULL OR status = ?) AND (? IS NULL OR workflow_id = ?) ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
         }
+        if (status_filter) |status| {
+            _ = c.sqlite3_bind_text(stmt, 1, status.ptr, @intCast(status.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_text(stmt, 2, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        } else {
+            _ = c.sqlite3_bind_null(stmt, 1);
+            _ = c.sqlite3_bind_null(stmt, 2);
+        }
+        if (workflow_id_filter) |workflow_id| {
+            _ = c.sqlite3_bind_text(stmt, 3, workflow_id.ptr, @intCast(workflow_id.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_text(stmt, 4, workflow_id.ptr, @intCast(workflow_id.len), SQLITE_STATIC);
+        } else {
+            _ = c.sqlite3_bind_null(stmt, 3);
+            _ = c.sqlite3_bind_null(stmt, 4);
+        }
+        _ = c.sqlite3_bind_int64(stmt, 5, limit);
+        _ = c.sqlite3_bind_int64(stmt, 6, offset);
         defer _ = c.sqlite3_finalize(stmt);
 
         var list: std.ArrayListUnmanaged(types.RunRow) = .empty;
@@ -470,14 +495,18 @@ pub const Store = struct {
                 .id = try allocStr(allocator, stmt, 0),
                 .idempotency_key = try allocStrOpt(allocator, stmt, 1),
                 .status = try allocStr(allocator, stmt, 2),
-                .workflow_json = try allocStr(allocator, stmt, 3),
-                .input_json = try allocStr(allocator, stmt, 4),
-                .callbacks_json = try allocStr(allocator, stmt, 5),
-                .error_text = try allocStrOpt(allocator, stmt, 6),
-                .created_at_ms = colInt(stmt, 7),
-                .updated_at_ms = colInt(stmt, 8),
-                .started_at_ms = colIntOpt(stmt, 9),
-                .ended_at_ms = colIntOpt(stmt, 10),
+                .workflow_id = try allocStrOpt(allocator, stmt, 3),
+                .workflow_json = try allocStr(allocator, stmt, 4),
+                .input_json = try allocStr(allocator, stmt, 5),
+                .callbacks_json = try allocStr(allocator, stmt, 6),
+                .error_text = try allocStrOpt(allocator, stmt, 7),
+                .created_at_ms = colInt(stmt, 8),
+                .updated_at_ms = colInt(stmt, 9),
+                .started_at_ms = colIntOpt(stmt, 10),
+                .ended_at_ms = colIntOpt(stmt, 11),
+                .state_json = try allocStrOpt(allocator, stmt, 12),
+                .config_json = try allocStrOpt(allocator, stmt, 13),
+                .parent_run_id = try allocStrOpt(allocator, stmt, 14),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -502,7 +531,7 @@ pub const Store = struct {
     }
 
     pub fn getActiveRuns(self: *Self, allocator: std.mem.Allocator) ![]types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms FROM runs WHERE status IN ('running', 'paused') ORDER BY created_at_ms DESC";
+        const sql = "SELECT id, idempotency_key, status, workflow_id, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE status = 'running' ORDER BY created_at_ms DESC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -515,14 +544,18 @@ pub const Store = struct {
                 .id = try allocStr(allocator, stmt, 0),
                 .idempotency_key = try allocStrOpt(allocator, stmt, 1),
                 .status = try allocStr(allocator, stmt, 2),
-                .workflow_json = try allocStr(allocator, stmt, 3),
-                .input_json = try allocStr(allocator, stmt, 4),
-                .callbacks_json = try allocStr(allocator, stmt, 5),
-                .error_text = try allocStrOpt(allocator, stmt, 6),
-                .created_at_ms = colInt(stmt, 7),
-                .updated_at_ms = colInt(stmt, 8),
-                .started_at_ms = colIntOpt(stmt, 9),
-                .ended_at_ms = colIntOpt(stmt, 10),
+                .workflow_id = try allocStrOpt(allocator, stmt, 3),
+                .workflow_json = try allocStr(allocator, stmt, 4),
+                .input_json = try allocStr(allocator, stmt, 5),
+                .callbacks_json = try allocStr(allocator, stmt, 6),
+                .error_text = try allocStrOpt(allocator, stmt, 7),
+                .created_at_ms = colInt(stmt, 8),
+                .updated_at_ms = colInt(stmt, 9),
+                .started_at_ms = colIntOpt(stmt, 10),
+                .ended_at_ms = colIntOpt(stmt, 11),
+                .state_json = try allocStrOpt(allocator, stmt, 12),
+                .config_json = try allocStrOpt(allocator, stmt, 13),
+                .parent_run_id = try allocStrOpt(allocator, stmt, 14),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -693,13 +726,10 @@ pub const Store = struct {
         }
     }
 
-    pub fn getReadySteps(self: *Self, allocator: std.mem.Allocator, run_id: []const u8) ![]types.StepRow {
-        const sql =
-            "SELECT s.id, s.run_id, s.def_step_id, s.type, s.status, s.worker_id, s.input_json, s.output_json, s.error_text, s.attempt, s.max_attempts, s.timeout_ms, s.next_attempt_at_ms, s.parent_step_id, s.item_index, s.created_at_ms, s.updated_at_ms, s.started_at_ms, s.ended_at_ms, s.child_run_id, s.iteration_index " ++
-            "FROM steps s WHERE s.run_id = ? AND s.status = 'ready' " ++
-            "AND NOT EXISTS (" ++
-            "SELECT 1 FROM step_deps d JOIN steps dep ON dep.id = d.depends_on " ++
-            "WHERE d.step_id = s.id AND dep.status NOT IN ('completed', 'skipped'))";
+    /// Get a retrying step for a given run and node name (def_step_id).
+    /// Returns the step if it exists with status='ready' and next_attempt_at_ms set.
+    pub fn getRetryingStepForNode(self: *Self, allocator: std.mem.Allocator, run_id: []const u8, node_name: []const u8) !?types.StepRow {
+        const sql = "SELECT id, run_id, def_step_id, type, status, worker_id, input_json, output_json, error_text, attempt, max_attempts, timeout_ms, next_attempt_at_ms, parent_step_id, item_index, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, child_run_id, iteration_index FROM steps WHERE run_id = ? AND def_step_id = ? AND status = 'ready' AND next_attempt_at_ms IS NOT NULL ORDER BY created_at_ms DESC LIMIT 1";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -707,12 +737,11 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(stmt);
 
         _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, node_name.ptr, @intCast(node_name.len), SQLITE_STATIC);
 
-        var list: std.ArrayListUnmanaged(types.StepRow) = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            try list.append(allocator, try readStepRow(allocator, stmt));
-        }
-        return list.toOwnedSlice(allocator);
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return try readStepRow(allocator, stmt);
     }
 
     pub fn countStepsByStatus(self: *Self, run_id: []const u8, status: []const u8) !i64 {
@@ -747,22 +776,40 @@ pub const Store = struct {
         return list.toOwnedSlice(allocator);
     }
 
-    /// Get the IDs of steps that a given step depends on.
-    pub fn getStepDeps(self: *Self, allocator: std.mem.Allocator, step_id: []const u8) ![][]const u8 {
-        const sql = "SELECT depends_on FROM step_deps WHERE step_id = ?";
+    /// Delete steps for a run that were created after a given timestamp.
+    /// Used during replay to remove steps that will be re-executed.
+    pub fn deleteStepsAfterTimestamp(self: *Self, run_id: []const u8, after_ms: i64) !void {
+        const sql = "DELETE FROM steps WHERE run_id = ? AND created_at_ms > ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
         }
         defer _ = c.sqlite3_finalize(stmt);
 
-        _ = c.sqlite3_bind_text(stmt, 1, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, after_ms);
 
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            try list.append(allocator, try allocStr(allocator, stmt, 0));
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
         }
-        return list.toOwnedSlice(allocator);
+    }
+
+    /// Delete checkpoints for a run with version greater than a given version.
+    /// Used during replay to remove checkpoints that will be superseded.
+    pub fn deleteCheckpointsAfterVersion(self: *Self, run_id: []const u8, after_version: i64) !void {
+        const sql = "DELETE FROM checkpoints WHERE run_id = ? AND version > ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, after_version);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
     }
 
     /// Count how many running tasks a worker currently has.
@@ -778,24 +825,6 @@ pub const Store = struct {
 
         if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return 0;
         return colInt(stmt, 0);
-    }
-
-    /// Set started_at_ms for a step (used by wait steps to track timer start).
-    pub fn setStepStartedAt(self: *Self, step_id: []const u8, ts_ms: i64) !void {
-        const sql = "UPDATE steps SET started_at_ms = ?, updated_at_ms = ? WHERE id = ?";
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-            return error.SqlitePrepareFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
-
-        _ = c.sqlite3_bind_int64(stmt, 1, ts_ms);
-        _ = c.sqlite3_bind_int64(stmt, 2, ids.nowMs());
-        _ = c.sqlite3_bind_text(stmt, 3, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
-
-        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
-            return error.SqliteStepFailed;
-        }
     }
 
     fn readStepRow(allocator: std.mem.Allocator, stmt: ?*c.sqlite3_stmt) !types.StepRow {
@@ -1084,156 +1113,6 @@ pub const Store = struct {
         };
     }
 
-    // ── Cycle State CRUD ─────────────────────────────────────────────
-
-    pub fn getCycleState(self: *Self, run_id: []const u8, cycle_key: []const u8) !?struct { iteration_count: i64, max_iterations: i64 } {
-        const sql = "SELECT iteration_count, max_iterations FROM cycle_state WHERE run_id = ? AND cycle_key = ?";
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-            return error.SqlitePrepareFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
-
-        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 2, cycle_key.ptr, @intCast(cycle_key.len), SQLITE_STATIC);
-
-        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
-
-        return .{
-            .iteration_count = colInt(stmt, 0),
-            .max_iterations = colInt(stmt, 1),
-        };
-    }
-
-    pub fn upsertCycleState(self: *Self, run_id: []const u8, cycle_key: []const u8, iteration_count: i64, max_iterations: i64) !void {
-        const sql = "INSERT OR REPLACE INTO cycle_state (run_id, cycle_key, iteration_count, max_iterations) VALUES (?, ?, ?, ?)";
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-            return error.SqlitePrepareFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
-
-        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 2, cycle_key.ptr, @intCast(cycle_key.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 3, iteration_count);
-        _ = c.sqlite3_bind_int64(stmt, 4, max_iterations);
-
-        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
-            return error.SqliteStepFailed;
-        }
-    }
-
-    // ── Chat Message CRUD ────────────────────────────────────────────
-
-    pub fn insertChatMessage(self: *Self, run_id: []const u8, step_id: []const u8, round: i64, role: []const u8, worker_id: ?[]const u8, message: []const u8) !void {
-        const sql = "INSERT INTO chat_messages (run_id, step_id, round, role, worker_id, message, ts_ms) VALUES (?, ?, ?, ?, ?, ?, ?)";
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-            return error.SqlitePrepareFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
-
-        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 2, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 3, round);
-        _ = c.sqlite3_bind_text(stmt, 4, role.ptr, @intCast(role.len), SQLITE_STATIC);
-        bindTextOpt(stmt, 5, worker_id);
-        _ = c.sqlite3_bind_text(stmt, 6, message.ptr, @intCast(message.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_int64(stmt, 7, ids.nowMs());
-
-        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
-            return error.SqliteStepFailed;
-        }
-    }
-
-    pub fn getChatMessages(self: *Self, allocator: std.mem.Allocator, step_id: []const u8) ![]types.ChatMessageRow {
-        const sql = "SELECT id, run_id, step_id, round, role, worker_id, message, ts_ms FROM chat_messages WHERE step_id = ? ORDER BY round, id";
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-            return error.SqlitePrepareFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
-
-        _ = c.sqlite3_bind_text(stmt, 1, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
-
-        var list: std.ArrayListUnmanaged(types.ChatMessageRow) = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            try list.append(allocator, .{
-                .id = colInt(stmt, 0),
-                .run_id = try allocStr(allocator, stmt, 1),
-                .step_id = try allocStr(allocator, stmt, 2),
-                .round = colInt(stmt, 3),
-                .role = try allocStr(allocator, stmt, 4),
-                .worker_id = try allocStrOpt(allocator, stmt, 5),
-                .message = try allocStr(allocator, stmt, 6),
-                .ts_ms = colInt(stmt, 7),
-            });
-        }
-        return list.toOwnedSlice(allocator);
-    }
-
-    // ── Saga State CRUD ──────────────────────────────────────────────
-
-    pub fn insertSagaState(self: *Self, run_id: []const u8, saga_step_id: []const u8, body_step_id: []const u8, compensation_step_id: ?[]const u8) !void {
-        const sql = "INSERT INTO saga_state (run_id, saga_step_id, body_step_id, compensation_step_id, status) VALUES (?, ?, ?, ?, 'pending')";
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-            return error.SqlitePrepareFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
-
-        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 2, saga_step_id.ptr, @intCast(saga_step_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 3, body_step_id.ptr, @intCast(body_step_id.len), SQLITE_STATIC);
-        bindTextOpt(stmt, 4, compensation_step_id);
-
-        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
-            return error.SqliteStepFailed;
-        }
-    }
-
-    pub fn updateSagaState(self: *Self, run_id: []const u8, saga_step_id: []const u8, body_step_id: []const u8, status: []const u8) !void {
-        const sql = "UPDATE saga_state SET status = ? WHERE run_id = ? AND saga_step_id = ? AND body_step_id = ?";
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-            return error.SqlitePrepareFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
-
-        _ = c.sqlite3_bind_text(stmt, 1, status.ptr, @intCast(status.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 2, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 3, saga_step_id.ptr, @intCast(saga_step_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 4, body_step_id.ptr, @intCast(body_step_id.len), SQLITE_STATIC);
-
-        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
-            return error.SqliteStepFailed;
-        }
-    }
-
-    pub fn getSagaStates(self: *Self, allocator: std.mem.Allocator, run_id: []const u8, saga_step_id: []const u8) ![]types.SagaStateRow {
-        const sql = "SELECT run_id, saga_step_id, body_step_id, compensation_step_id, status FROM saga_state WHERE run_id = ? AND saga_step_id = ? ORDER BY rowid";
-        var stmt: ?*c.sqlite3_stmt = null;
-        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-            return error.SqlitePrepareFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
-
-        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
-        _ = c.sqlite3_bind_text(stmt, 2, saga_step_id.ptr, @intCast(saga_step_id.len), SQLITE_STATIC);
-
-        var list: std.ArrayListUnmanaged(types.SagaStateRow) = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            try list.append(allocator, .{
-                .run_id = try allocStr(allocator, stmt, 0),
-                .saga_step_id = try allocStr(allocator, stmt, 1),
-                .body_step_id = try allocStr(allocator, stmt, 2),
-                .compensation_step_id = try allocStrOpt(allocator, stmt, 3),
-                .status = try allocStr(allocator, stmt, 4),
-            });
-        }
-        return list.toOwnedSlice(allocator);
-    }
-
     // ── Sub-workflow Helper ──────────────────────────────────────────
 
     pub fn updateStepInputJson(self: *Self, step_id: []const u8, input_json: []const u8) !void {
@@ -1262,6 +1141,647 @@ pub const Store = struct {
 
         _ = c.sqlite3_bind_text(stmt, 1, child_run_id.ptr, @intCast(child_run_id.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 2, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    // ── Workflow CRUD ─────────────────────────────────────────────────
+
+    pub fn createWorkflow(self: *Self, id: []const u8, name: []const u8, definition_json: []const u8) !void {
+        return self.createWorkflowWithVersion(id, name, definition_json, 1);
+    }
+
+    pub fn createWorkflowWithVersion(self: *Self, id: []const u8, name: []const u8, definition_json: []const u8, version: i64) !void {
+        const sql = "INSERT INTO workflows (id, name, definition_json, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        const now = ids.nowMs();
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, name.ptr, @intCast(name.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, definition_json.ptr, @intCast(definition_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 4, version);
+        _ = c.sqlite3_bind_int64(stmt, 5, now);
+        _ = c.sqlite3_bind_int64(stmt, 6, now);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getWorkflow(self: *Self, alloc: std.mem.Allocator, id: []const u8) !?types.WorkflowRow {
+        const sql = "SELECT id, name, definition_json, version, created_at_ms, updated_at_ms FROM workflows WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return types.WorkflowRow{
+            .id = try allocStr(alloc, stmt, 0),
+            .name = try allocStr(alloc, stmt, 1),
+            .definition_json = try allocStr(alloc, stmt, 2),
+            .version = colInt(stmt, 3),
+            .created_at_ms = colInt(stmt, 4),
+            .updated_at_ms = colInt(stmt, 5),
+        };
+    }
+
+    pub fn listWorkflows(self: *Self, alloc: std.mem.Allocator) ![]types.WorkflowRow {
+        const sql = "SELECT id, name, definition_json, version, created_at_ms, updated_at_ms FROM workflows ORDER BY created_at_ms DESC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var list: std.ArrayListUnmanaged(types.WorkflowRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(alloc, .{
+                .id = try allocStr(alloc, stmt, 0),
+                .name = try allocStr(alloc, stmt, 1),
+                .definition_json = try allocStr(alloc, stmt, 2),
+                .version = colInt(stmt, 3),
+                .created_at_ms = colInt(stmt, 4),
+                .updated_at_ms = colInt(stmt, 5),
+            });
+        }
+        return list.toOwnedSlice(alloc);
+    }
+
+    pub fn updateWorkflow(self: *Self, id: []const u8, name: []const u8, definition_json: []const u8) !void {
+        return self.updateWorkflowWithVersion(id, name, definition_json, null);
+    }
+
+    pub fn updateWorkflowWithVersion(self: *Self, id: []const u8, name: []const u8, definition_json: []const u8, version: ?i64) !void {
+        if (version) |v| {
+            const sql = "UPDATE workflows SET name = ?, definition_json = ?, version = ?, updated_at_ms = ? WHERE id = ?";
+            var stmt: ?*c.sqlite3_stmt = null;
+            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+                return error.SqlitePrepareFailed;
+            }
+            defer _ = c.sqlite3_finalize(stmt);
+
+            _ = c.sqlite3_bind_text(stmt, 1, name.ptr, @intCast(name.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_text(stmt, 2, definition_json.ptr, @intCast(definition_json.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_int64(stmt, 3, v);
+            _ = c.sqlite3_bind_int64(stmt, 4, ids.nowMs());
+            _ = c.sqlite3_bind_text(stmt, 5, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+            if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+                return error.SqliteStepFailed;
+            }
+        } else {
+            const sql = "UPDATE workflows SET name = ?, definition_json = ?, updated_at_ms = ? WHERE id = ?";
+            var stmt: ?*c.sqlite3_stmt = null;
+            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+                return error.SqlitePrepareFailed;
+            }
+            defer _ = c.sqlite3_finalize(stmt);
+
+            _ = c.sqlite3_bind_text(stmt, 1, name.ptr, @intCast(name.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_text(stmt, 2, definition_json.ptr, @intCast(definition_json.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_int64(stmt, 3, ids.nowMs());
+            _ = c.sqlite3_bind_text(stmt, 4, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+            if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+                return error.SqliteStepFailed;
+            }
+        }
+    }
+
+    pub fn deleteWorkflow(self: *Self, id: []const u8) !void {
+        const sql = "DELETE FROM workflows WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    // ── Token Accounting ──────────────────────────────────────────────
+
+    pub fn updateStepTokens(self: *Self, step_id: []const u8, input_tokens: i64, output_tokens: i64) !void {
+        const sql = "UPDATE steps SET input_tokens = ?, output_tokens = ?, total_tokens = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_int64(stmt, 1, input_tokens);
+        _ = c.sqlite3_bind_int64(stmt, 2, output_tokens);
+        _ = c.sqlite3_bind_int64(stmt, 3, input_tokens + output_tokens);
+        _ = c.sqlite3_bind_text(stmt, 4, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn updateRunTokens(self: *Self, run_id: []const u8, input_delta: i64, output_delta: i64) !void {
+        const sql = "UPDATE runs SET total_input_tokens = total_input_tokens + ?, total_output_tokens = total_output_tokens + ?, total_tokens = total_tokens + ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_int64(stmt, 1, input_delta);
+        _ = c.sqlite3_bind_int64(stmt, 2, output_delta);
+        _ = c.sqlite3_bind_int64(stmt, 3, input_delta + output_delta);
+        _ = c.sqlite3_bind_text(stmt, 4, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getRunTokens(self: *Self, run_id: []const u8) !struct { input: i64, output: i64, total: i64 } {
+        const sql = "SELECT COALESCE(total_input_tokens, 0), COALESCE(total_output_tokens, 0), COALESCE(total_tokens, 0) FROM runs WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) {
+            return .{ .input = 0, .output = 0, .total = 0 };
+        }
+
+        return .{
+            .input = colInt(stmt, 0),
+            .output = colInt(stmt, 1),
+            .total = colInt(stmt, 2),
+        };
+    }
+
+    // ── Checkpoint CRUD ───────────────────────────────────────────────
+
+    pub fn createCheckpoint(self: *Self, id: []const u8, run_id: []const u8, step_id: []const u8, parent_id: ?[]const u8, state_json: []const u8, completed_nodes_json: []const u8, version: i64, metadata_json: ?[]const u8) !void {
+        const sql = "INSERT INTO checkpoints (id, run_id, step_id, parent_id, state_json, completed_nodes_json, version, metadata_json, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 4, parent_id);
+        _ = c.sqlite3_bind_text(stmt, 5, state_json.ptr, @intCast(state_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 6, completed_nodes_json.ptr, @intCast(completed_nodes_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 7, version);
+        bindTextOpt(stmt, 8, metadata_json);
+        _ = c.sqlite3_bind_int64(stmt, 9, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getCheckpoint(self: *Self, alloc: std.mem.Allocator, id: []const u8) !?types.CheckpointRow {
+        const sql = "SELECT id, run_id, step_id, parent_id, state_json, completed_nodes_json, version, metadata_json, created_at_ms FROM checkpoints WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return try readCheckpointRow(alloc, stmt);
+    }
+
+    pub fn listCheckpoints(self: *Self, alloc: std.mem.Allocator, run_id: []const u8) ![]types.CheckpointRow {
+        const sql = "SELECT id, run_id, step_id, parent_id, state_json, completed_nodes_json, version, metadata_json, created_at_ms FROM checkpoints WHERE run_id = ? ORDER BY version ASC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.CheckpointRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(alloc, try readCheckpointRow(alloc, stmt));
+        }
+        return list.toOwnedSlice(alloc);
+    }
+
+    pub fn getLatestCheckpoint(self: *Self, alloc: std.mem.Allocator, run_id: []const u8) !?types.CheckpointRow {
+        const sql = "SELECT id, run_id, step_id, parent_id, state_json, completed_nodes_json, version, metadata_json, created_at_ms FROM checkpoints WHERE run_id = ? ORDER BY version DESC LIMIT 1";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        return try readCheckpointRow(alloc, stmt);
+    }
+
+    fn readCheckpointRow(alloc: std.mem.Allocator, stmt: ?*c.sqlite3_stmt) !types.CheckpointRow {
+        return .{
+            .id = try allocStr(alloc, stmt, 0),
+            .run_id = try allocStr(alloc, stmt, 1),
+            .step_id = try allocStr(alloc, stmt, 2),
+            .parent_id = try allocStrOpt(alloc, stmt, 3),
+            .state_json = try allocStr(alloc, stmt, 4),
+            .completed_nodes_json = try allocStr(alloc, stmt, 5),
+            .version = colInt(stmt, 6),
+            .metadata_json = try allocStrOpt(alloc, stmt, 7),
+            .created_at_ms = colInt(stmt, 8),
+        };
+    }
+
+    // ── Agent Event CRUD ──────────────────────────────────────────────
+
+    pub fn createAgentEvent(self: *Self, run_id: []const u8, step_id: []const u8, iteration: i64, tool: ?[]const u8, args_json: ?[]const u8, result_text: ?[]const u8, status: []const u8) !void {
+        const sql = "INSERT INTO agent_events (run_id, step_id, iteration, tool, args_json, result_text, status, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 3, iteration);
+        bindTextOpt(stmt, 4, tool);
+        bindTextOpt(stmt, 5, args_json);
+        bindTextOpt(stmt, 6, result_text);
+        _ = c.sqlite3_bind_text(stmt, 7, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 8, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn listAgentEvents(self: *Self, alloc: std.mem.Allocator, run_id: []const u8, step_id: []const u8) ![]types.AgentEventRow {
+        const sql = "SELECT id, run_id, step_id, iteration, tool, args_json, result_text, status, created_at_ms FROM agent_events WHERE run_id = ? AND step_id = ? ORDER BY id ASC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.AgentEventRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(alloc, .{
+                .id = colInt(stmt, 0),
+                .run_id = try allocStr(alloc, stmt, 1),
+                .step_id = try allocStr(alloc, stmt, 2),
+                .iteration = colInt(stmt, 3),
+                .tool = try allocStrOpt(alloc, stmt, 4),
+                .args_json = try allocStrOpt(alloc, stmt, 5),
+                .result_text = try allocStrOpt(alloc, stmt, 6),
+                .status = try allocStr(alloc, stmt, 7),
+                .created_at_ms = colInt(stmt, 8),
+            });
+        }
+        return list.toOwnedSlice(alloc);
+    }
+
+    // ── Run State Management ──────────────────────────────────────────
+
+    pub fn updateRunState(self: *Self, run_id: []const u8, state_json: []const u8) !void {
+        const sql = "UPDATE runs SET state_json = ?, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, state_json.ptr, @intCast(state_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 3, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn incrementCheckpointCount(self: *Self, run_id: []const u8) !void {
+        const sql = "UPDATE runs SET checkpoint_count = COALESCE(checkpoint_count, 0) + 1, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_int64(stmt, 1, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 2, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn createRunWithState(self: *Self, id: []const u8, workflow_id: ?[]const u8, workflow_json: []const u8, input_json: []const u8, state_json: []const u8) !void {
+        return self.createRunWithStateAndStatus(id, workflow_id, workflow_json, input_json, state_json, "pending");
+    }
+
+    /// Create a run with explicit initial status. Use "running" to avoid the
+    /// race window between creating with "pending" and updating to "running".
+    pub fn createRunWithStateAndStatus(self: *Self, id: []const u8, workflow_id: ?[]const u8, workflow_json: []const u8, input_json: []const u8, state_json: []const u8, status: []const u8) !void {
+        const sql = "INSERT INTO runs (id, status, workflow_id, workflow_json, input_json, callbacks_json, state_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        const now = ids.nowMs();
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 3, workflow_id);
+        _ = c.sqlite3_bind_text(stmt, 4, workflow_json.ptr, @intCast(workflow_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 5, input_json.ptr, @intCast(input_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 6, state_json.ptr, @intCast(state_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 7, now);
+        _ = c.sqlite3_bind_int64(stmt, 8, now);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn setParentRunId(self: *Self, run_id: []const u8, parent_run_id: []const u8) !void {
+        const sql = "UPDATE runs SET parent_run_id = ?, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, parent_run_id.ptr, @intCast(parent_run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 3, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn setConfigJson(self: *Self, run_id: []const u8, config_json: []const u8) !void {
+        const sql = "UPDATE runs SET config_json = ?, updated_at_ms = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, config_json.ptr, @intCast(config_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 2, ids.nowMs());
+        _ = c.sqlite3_bind_text(stmt, 3, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn createForkedRun(self: *Self, id: []const u8, workflow_json: []const u8, state_json: []const u8, forked_from_run_id: []const u8, forked_from_checkpoint_id: []const u8) !void {
+        const sql = "INSERT INTO runs (id, status, workflow_json, input_json, callbacks_json, state_json, forked_from_run_id, forked_from_checkpoint_id, created_at_ms, updated_at_ms) VALUES (?, 'pending', ?, '{}', '[]', ?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        const now = ids.nowMs();
+        _ = c.sqlite3_bind_text(stmt, 1, id.ptr, @intCast(id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, workflow_json.ptr, @intCast(workflow_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, state_json.ptr, @intCast(state_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, forked_from_run_id.ptr, @intCast(forked_from_run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 5, forked_from_checkpoint_id.ptr, @intCast(forked_from_checkpoint_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 6, now);
+        _ = c.sqlite3_bind_int64(stmt, 7, now);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    // ── Pending State Injection CRUD ──────────────────────────────────
+
+    pub fn createPendingInjection(self: *Self, run_id: []const u8, updates_json: []const u8, apply_after_step: ?[]const u8) !void {
+        const sql = "INSERT INTO pending_state_injections (run_id, updates_json, apply_after_step, created_at_ms) VALUES (?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, updates_json.ptr, @intCast(updates_json.len), SQLITE_STATIC);
+        bindTextOpt(stmt, 3, apply_after_step);
+        _ = c.sqlite3_bind_int64(stmt, 4, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn consumePendingInjections(self: *Self, alloc: std.mem.Allocator, run_id: []const u8, completed_step: []const u8) ![]types.PendingInjectionRow {
+        // Select injections where apply_after_step matches the completed step or is NULL
+        const sql = "SELECT id, run_id, updates_json, apply_after_step, created_at_ms FROM pending_state_injections WHERE run_id = ? AND (apply_after_step IS NULL OR apply_after_step = ?) ORDER BY id ASC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, completed_step.ptr, @intCast(completed_step.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.PendingInjectionRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(alloc, .{
+                .id = colInt(stmt, 0),
+                .run_id = try allocStr(alloc, stmt, 1),
+                .updates_json = try allocStr(alloc, stmt, 2),
+                .apply_after_step = try allocStrOpt(alloc, stmt, 3),
+                .created_at_ms = colInt(stmt, 4),
+            });
+        }
+
+        const result = try list.toOwnedSlice(alloc);
+
+        // Delete consumed injections
+        if (result.len > 0) {
+            const del_sql = "DELETE FROM pending_state_injections WHERE run_id = ? AND (apply_after_step IS NULL OR apply_after_step = ?)";
+            var del_stmt: ?*c.sqlite3_stmt = null;
+            if (c.sqlite3_prepare_v2(self.db, del_sql, -1, &del_stmt, null) != c.SQLITE_OK) {
+                return error.SqlitePrepareFailed;
+            }
+            defer _ = c.sqlite3_finalize(del_stmt);
+
+            _ = c.sqlite3_bind_text(del_stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_text(del_stmt, 2, completed_step.ptr, @intCast(completed_step.len), SQLITE_STATIC);
+
+            if (c.sqlite3_step(del_stmt) != c.SQLITE_DONE) {
+                return error.SqliteStepFailed;
+            }
+        }
+
+        return result;
+    }
+
+    pub fn discardPendingInjections(self: *Self, run_id: []const u8) !void {
+        const sql = "DELETE FROM pending_state_injections WHERE run_id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    // ── Node Cache (Gap 3) ───────────────────────────────────────────
+
+    pub fn getCachedResult(self: *Self, alloc: std.mem.Allocator, cache_key: []const u8) !?[]const u8 {
+        const sql = "SELECT result_json, created_at_ms, ttl_ms FROM node_cache WHERE cache_key = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, cache_key.ptr, @intCast(cache_key.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        const result_json = try allocStr(alloc, stmt, 0);
+        const created_at_ms = colInt(stmt, 1);
+        const ttl_ms = colIntOpt(stmt, 2);
+
+        // Check expiration
+        if (ttl_ms) |ttl| {
+            const now_ms = ids.nowMs();
+            if (now_ms - created_at_ms > ttl) {
+                // Expired — delete and return null
+                const del_sql = "DELETE FROM node_cache WHERE cache_key = ?";
+                var del_stmt: ?*c.sqlite3_stmt = null;
+                if (c.sqlite3_prepare_v2(self.db, del_sql, -1, &del_stmt, null) == c.SQLITE_OK) {
+                    _ = c.sqlite3_bind_text(del_stmt, 1, cache_key.ptr, @intCast(cache_key.len), SQLITE_STATIC);
+                    _ = c.sqlite3_step(del_stmt);
+                    _ = c.sqlite3_finalize(del_stmt);
+                }
+                alloc.free(result_json);
+                return null;
+            }
+        }
+
+        return result_json;
+    }
+
+    pub fn setCachedResult(self: *Self, cache_key: []const u8, node_name: []const u8, result_json: []const u8, ttl_ms: ?i64) !void {
+        const sql = "INSERT OR REPLACE INTO node_cache (cache_key, node_name, result_json, created_at_ms, ttl_ms) VALUES (?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, cache_key.ptr, @intCast(cache_key.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, node_name.ptr, @intCast(node_name.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, result_json.ptr, @intCast(result_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 4, ids.nowMs());
+        bindIntOpt(stmt, 5, ttl_ms);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    // ── Pending Writes (Gap 4) ───────────────────────────────────────
+
+    pub fn savePendingWrite(self: *Self, run_id: []const u8, step_id: []const u8, channel: []const u8, value_json: []const u8) !void {
+        const sql = "INSERT INTO pending_writes (run_id, step_id, channel, value_json, created_at_ms) VALUES (?, ?, ?, ?, ?)";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 3, channel.ptr, @intCast(channel.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 4, value_json.ptr, @intCast(value_json.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 5, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getPendingWrites(self: *Self, alloc: std.mem.Allocator, run_id: []const u8) ![]types.PendingWriteRow {
+        const sql = "SELECT id, run_id, step_id, channel, value_json, created_at_ms FROM pending_writes WHERE run_id = ? ORDER BY id ASC";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        var list: std.ArrayListUnmanaged(types.PendingWriteRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try list.append(alloc, .{
+                .id = colInt(stmt, 0),
+                .run_id = try allocStr(alloc, stmt, 1),
+                .step_id = try allocStr(alloc, stmt, 2),
+                .channel = try allocStr(alloc, stmt, 3),
+                .value_json = try allocStr(alloc, stmt, 4),
+                .created_at_ms = colInt(stmt, 5),
+            });
+        }
+        return list.toOwnedSlice(alloc);
+    }
+
+    pub fn clearPendingWrites(self: *Self, run_id: []const u8) !void {
+        const sql = "DELETE FROM pending_writes WHERE run_id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
 
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
             return error.SqliteStepFailed;
@@ -1386,6 +1906,7 @@ test "Store: insert and get run" {
         allocator.free(run.id);
         if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
+        if (run.workflow_id) |wid| allocator.free(wid);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
         allocator.free(run.callbacks_json);
@@ -1421,6 +1942,7 @@ test "Store: transaction commit persists inserted run" {
         allocator.free(run.id);
         if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
+        if (run.workflow_id) |wid| allocator.free(wid);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
         allocator.free(run.callbacks_json);
@@ -1435,34 +1957,67 @@ test "Store: list runs with filter" {
     try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertRun("r2", null, "pending", "{}", "{}", "[]");
     try s.insertRun("r3", null, "running", "{}", "{}", "[]");
+    try s.createWorkflow("wf_filter", "Filter WF", "{\"nodes\":{}}");
+    try s.createRunWithState("r4", "wf_filter", "{\"nodes\":{}}", "{}", "{}");
 
-    const running = try s.listRuns(allocator, "running", 100, 0);
+    const running = try s.listRuns(allocator, "running", null, 100, 0);
     defer {
         for (running) |r| {
             allocator.free(r.id);
             if (r.idempotency_key) |ik| allocator.free(ik);
             allocator.free(r.status);
+            if (r.workflow_id) |wid| allocator.free(wid);
             allocator.free(r.workflow_json);
             allocator.free(r.input_json);
             allocator.free(r.callbacks_json);
+            if (r.error_text) |et| allocator.free(et);
+            if (r.state_json) |sj| allocator.free(sj);
+            if (r.config_json) |cj| allocator.free(cj);
+            if (r.parent_run_id) |pid| allocator.free(pid);
         }
         allocator.free(running);
     }
     try std.testing.expectEqual(@as(usize, 2), running.len);
 
-    const all = try s.listRuns(allocator, null, 100, 0);
+    const all = try s.listRuns(allocator, null, null, 100, 0);
     defer {
         for (all) |r| {
             allocator.free(r.id);
             if (r.idempotency_key) |ik| allocator.free(ik);
             allocator.free(r.status);
+            if (r.workflow_id) |wid| allocator.free(wid);
             allocator.free(r.workflow_json);
             allocator.free(r.input_json);
             allocator.free(r.callbacks_json);
+            if (r.error_text) |et| allocator.free(et);
+            if (r.state_json) |sj| allocator.free(sj);
+            if (r.config_json) |cj| allocator.free(cj);
+            if (r.parent_run_id) |pid| allocator.free(pid);
         }
         allocator.free(all);
     }
-    try std.testing.expectEqual(@as(usize, 3), all.len);
+    try std.testing.expectEqual(@as(usize, 4), all.len);
+
+    const filtered = try s.listRuns(allocator, null, "wf_filter", 100, 0);
+    defer {
+        for (filtered) |r| {
+            allocator.free(r.id);
+            if (r.idempotency_key) |ik| allocator.free(ik);
+            allocator.free(r.status);
+            if (r.workflow_id) |wid| allocator.free(wid);
+            allocator.free(r.workflow_json);
+            allocator.free(r.input_json);
+            allocator.free(r.callbacks_json);
+            if (r.error_text) |et| allocator.free(et);
+            if (r.state_json) |sj| allocator.free(sj);
+            if (r.config_json) |cj| allocator.free(cj);
+            if (r.parent_run_id) |pid| allocator.free(pid);
+        }
+        allocator.free(filtered);
+    }
+    try std.testing.expectEqual(@as(usize, 1), filtered.len);
+    try std.testing.expectEqualStrings("r4", filtered[0].id);
+    try std.testing.expectEqualStrings("wf_filter", filtered[0].workflow_id.?);
 }
 
 test "Store: update run status" {
@@ -1476,6 +2031,7 @@ test "Store: update run status" {
         allocator.free(run.id);
         if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
+        if (run.workflow_id) |wid| allocator.free(wid);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
         allocator.free(run.callbacks_json);
@@ -1491,8 +2047,7 @@ test "Store: get active runs" {
     defer s.deinit();
     try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertRun("r2", null, "pending", "{}", "{}", "[]");
-    try s.insertRun("r3", null, "paused", "{}", "{}", "[]");
-    try s.insertRun("r4", null, "completed", "{}", "{}", "[]");
+    try s.insertRun("r3", null, "completed", "{}", "{}", "[]");
 
     const active = try s.getActiveRuns(allocator);
     defer {
@@ -1500,40 +2055,18 @@ test "Store: get active runs" {
             allocator.free(r.id);
             if (r.idempotency_key) |ik| allocator.free(ik);
             allocator.free(r.status);
+            if (r.workflow_id) |wid| allocator.free(wid);
             allocator.free(r.workflow_json);
             allocator.free(r.input_json);
             allocator.free(r.callbacks_json);
+            if (r.error_text) |et| allocator.free(et);
+            if (r.state_json) |sj| allocator.free(sj);
+            if (r.config_json) |cj| allocator.free(cj);
+            if (r.parent_run_id) |pid| allocator.free(pid);
         }
         allocator.free(active);
     }
-    try std.testing.expectEqual(@as(usize, 2), active.len);
-}
-
-test "Store: step deps and ready steps" {
-    const allocator = std.testing.allocator;
-    var s = try Store.init(allocator, ":memory:");
-    defer s.deinit();
-
-    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
-    try s.insertStep("s1", "r1", "step1", "task", "ready", "{}", 1, null, null, null);
-    try s.insertStep("s2", "r1", "step2", "task", "ready", "{}", 1, null, null, null);
-    try s.insertStepDep("s2", "s1");
-
-    // s1 should be ready (no unsatisfied deps), s2 should NOT (depends on s1 which is 'ready' not 'completed')
-    const ready = try s.getReadySteps(allocator, "r1");
-    defer {
-        for (ready) |step| {
-            allocator.free(step.id);
-            allocator.free(step.run_id);
-            allocator.free(step.def_step_id);
-            allocator.free(step.type);
-            allocator.free(step.status);
-            allocator.free(step.input_json);
-        }
-        allocator.free(ready);
-    }
-    try std.testing.expectEqual(@as(usize, 1), ready.len);
-    try std.testing.expectEqualStrings("s1", ready[0].id);
+    try std.testing.expectEqual(@as(usize, 1), active.len);
 }
 
 test "Store: count steps by status" {
@@ -1679,114 +2212,6 @@ test "Store: get nonexistent step returns null" {
     try std.testing.expect(step == null);
 }
 
-test "cycle state: upsert and get" {
-    const allocator = std.testing.allocator;
-    var s = try Store.init(allocator, ":memory:");
-    defer s.deinit();
-
-    // Insert a run first (cycle_state references runs(id))
-    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
-
-    // Upsert cycle state
-    try s.upsertCycleState("r1", "loop_A", 1, 10);
-
-    // Get and verify values
-    const cs = (try s.getCycleState("r1", "loop_A")).?;
-    try std.testing.expectEqual(@as(i64, 1), cs.iteration_count);
-    try std.testing.expectEqual(@as(i64, 10), cs.max_iterations);
-
-    // Upsert again with new iteration_count
-    try s.upsertCycleState("r1", "loop_A", 5, 10);
-
-    // Verify updated value
-    const cs2 = (try s.getCycleState("r1", "loop_A")).?;
-    try std.testing.expectEqual(@as(i64, 5), cs2.iteration_count);
-    try std.testing.expectEqual(@as(i64, 10), cs2.max_iterations);
-}
-
-test "cycle state: get returns null for nonexistent" {
-    const allocator = std.testing.allocator;
-    var s = try Store.init(allocator, ":memory:");
-    defer s.deinit();
-
-    const cs = try s.getCycleState("no_run", "no_key");
-    try std.testing.expect(cs == null);
-}
-
-test "chat messages: insert and get ordered by round" {
-    const allocator = std.testing.allocator;
-    var s = try Store.init(allocator, ":memory:");
-    defer s.deinit();
-
-    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
-    try s.insertStep("s1", "r1", "chat_step", "group_chat", "running", "{}", 1, null, null, null);
-
-    // Insert messages with different rounds (out of order)
-    try s.insertChatMessage("r1", "s1", 2, "assistant", "w1", "round 2 message");
-    try s.insertChatMessage("r1", "s1", 1, "user", null, "round 1 message");
-    try s.insertChatMessage("r1", "s1", 1, "assistant", "w1", "round 1 reply");
-
-    // Verify getChatMessages returns them ordered by round, id
-    const msgs = try s.getChatMessages(allocator, "s1");
-    defer {
-        for (msgs) |m| {
-            allocator.free(m.run_id);
-            allocator.free(m.step_id);
-            allocator.free(m.role);
-            if (m.worker_id) |wid| allocator.free(wid);
-            allocator.free(m.message);
-        }
-        allocator.free(msgs);
-    }
-    try std.testing.expectEqual(@as(usize, 3), msgs.len);
-    // First two should be round 1 (ordered by id within round)
-    try std.testing.expectEqual(@as(i64, 1), msgs[0].round);
-    try std.testing.expectEqual(@as(i64, 1), msgs[1].round);
-    try std.testing.expectEqual(@as(i64, 2), msgs[2].round);
-    try std.testing.expectEqualStrings("round 1 message", msgs[0].message);
-    try std.testing.expectEqualStrings("round 1 reply", msgs[1].message);
-    try std.testing.expectEqualStrings("round 2 message", msgs[2].message);
-}
-
-test "saga state: insert, update status, and get" {
-    const allocator = std.testing.allocator;
-    var s = try Store.init(allocator, ":memory:");
-    defer s.deinit();
-
-    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
-    try s.insertStep("saga1", "r1", "saga_def", "saga", "running", "{}", 1, null, null, null);
-    try s.insertStep("body1", "r1", "body_def1", "task", "pending", "{}", 1, null, "saga1", null);
-    try s.insertStep("body2", "r1", "body_def2", "task", "pending", "{}", 1, null, "saga1", null);
-    try s.insertStep("comp1", "r1", "comp_def1", "task", "pending", "{}", 1, null, "saga1", null);
-
-    // Insert saga states for body steps
-    try s.insertSagaState("r1", "saga1", "body1", "comp1");
-    try s.insertSagaState("r1", "saga1", "body2", null);
-
-    // Update one to 'completed'
-    try s.updateSagaState("r1", "saga1", "body1", "completed");
-
-    // Verify getSagaStates returns correct statuses
-    const states = try s.getSagaStates(allocator, "r1", "saga1");
-    defer {
-        for (states) |st| {
-            allocator.free(st.run_id);
-            allocator.free(st.saga_step_id);
-            allocator.free(st.body_step_id);
-            if (st.compensation_step_id) |cid| allocator.free(cid);
-            allocator.free(st.status);
-        }
-        allocator.free(states);
-    }
-    try std.testing.expectEqual(@as(usize, 2), states.len);
-    try std.testing.expectEqualStrings("body1", states[0].body_step_id);
-    try std.testing.expectEqualStrings("completed", states[0].status);
-    try std.testing.expectEqualStrings("comp1", states[0].compensation_step_id.?);
-    try std.testing.expectEqualStrings("body2", states[1].body_step_id);
-    try std.testing.expectEqualStrings("pending", states[1].status);
-    try std.testing.expect(states[1].compensation_step_id == null);
-}
-
 test "updateStepChildRunId: sets child_run_id on step" {
     const allocator = std.testing.allocator;
     var s = try Store.init(allocator, ":memory:");
@@ -1812,4 +2237,419 @@ test "updateStepChildRunId: sets child_run_id on step" {
         if (step.child_run_id) |crid| allocator.free(crid);
     }
     try std.testing.expectEqualStrings("child_r1", step.child_run_id.?);
+}
+
+test "workflow CRUD" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    // Create
+    try s.createWorkflow("wf1", "My Workflow", "{\"steps\":[]}");
+
+    // Get
+    const wf = (try s.getWorkflow(allocator, "wf1")).?;
+    defer {
+        allocator.free(wf.id);
+        allocator.free(wf.name);
+        allocator.free(wf.definition_json);
+    }
+    try std.testing.expectEqualStrings("wf1", wf.id);
+    try std.testing.expectEqualStrings("My Workflow", wf.name);
+    try std.testing.expectEqualStrings("{\"steps\":[]}", wf.definition_json);
+    try std.testing.expect(wf.created_at_ms > 0);
+    try std.testing.expect(wf.updated_at_ms > 0);
+
+    // Update
+    try s.updateWorkflow("wf1", "Updated Workflow", "{\"steps\":[{\"id\":\"s1\"}]}");
+    const wf2 = (try s.getWorkflow(allocator, "wf1")).?;
+    defer {
+        allocator.free(wf2.id);
+        allocator.free(wf2.name);
+        allocator.free(wf2.definition_json);
+    }
+    try std.testing.expectEqualStrings("Updated Workflow", wf2.name);
+    try std.testing.expectEqualStrings("{\"steps\":[{\"id\":\"s1\"}]}", wf2.definition_json);
+
+    // List
+    try s.createWorkflow("wf2", "Second Workflow", "{}");
+    const workflows = try s.listWorkflows(allocator);
+    defer {
+        for (workflows) |w| {
+            allocator.free(w.id);
+            allocator.free(w.name);
+            allocator.free(w.definition_json);
+        }
+        allocator.free(workflows);
+    }
+    try std.testing.expectEqual(@as(usize, 2), workflows.len);
+
+    // Delete
+    try s.deleteWorkflow("wf1");
+    const deleted = try s.getWorkflow(allocator, "wf1");
+    try std.testing.expect(deleted == null);
+
+    // Remaining list
+    const remaining = try s.listWorkflows(allocator);
+    defer {
+        for (remaining) |w| {
+            allocator.free(w.id);
+            allocator.free(w.name);
+            allocator.free(w.definition_json);
+        }
+        allocator.free(remaining);
+    }
+    try std.testing.expectEqual(@as(usize, 1), remaining.len);
+    try std.testing.expectEqualStrings("wf2", remaining[0].id);
+}
+
+test "checkpoint lifecycle" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    // Create a run
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
+
+    // Create checkpoints with parent chain
+    try s.createCheckpoint("cp1", "r1", "step_a", null, "{\"x\":1}", "[\"step_a\"]", 1, null);
+    try s.createCheckpoint("cp2", "r1", "step_b", "cp1", "{\"x\":2}", "[\"step_a\",\"step_b\"]", 2, "{\"note\":\"test\"}");
+    try s.createCheckpoint("cp3", "r1", "step_c", "cp2", "{\"x\":3}", "[\"step_a\",\"step_b\",\"step_c\"]", 3, null);
+
+    // Get single checkpoint
+    const cp1 = (try s.getCheckpoint(allocator, "cp1")).?;
+    defer {
+        allocator.free(cp1.id);
+        allocator.free(cp1.run_id);
+        allocator.free(cp1.step_id);
+        if (cp1.parent_id) |pid| allocator.free(pid);
+        allocator.free(cp1.state_json);
+        allocator.free(cp1.completed_nodes_json);
+        if (cp1.metadata_json) |mj| allocator.free(mj);
+    }
+    try std.testing.expectEqualStrings("cp1", cp1.id);
+    try std.testing.expectEqualStrings("r1", cp1.run_id);
+    try std.testing.expectEqualStrings("step_a", cp1.step_id);
+    try std.testing.expect(cp1.parent_id == null);
+    try std.testing.expectEqualStrings("{\"x\":1}", cp1.state_json);
+    try std.testing.expectEqual(@as(i64, 1), cp1.version);
+    try std.testing.expect(cp1.metadata_json == null);
+
+    // Get checkpoint with parent and metadata
+    const cp2 = (try s.getCheckpoint(allocator, "cp2")).?;
+    defer {
+        allocator.free(cp2.id);
+        allocator.free(cp2.run_id);
+        allocator.free(cp2.step_id);
+        if (cp2.parent_id) |pid| allocator.free(pid);
+        allocator.free(cp2.state_json);
+        allocator.free(cp2.completed_nodes_json);
+        if (cp2.metadata_json) |mj| allocator.free(mj);
+    }
+    try std.testing.expectEqualStrings("cp1", cp2.parent_id.?);
+    try std.testing.expectEqualStrings("{\"note\":\"test\"}", cp2.metadata_json.?);
+
+    // List checkpoints (ordered by version ASC)
+    const cps = try s.listCheckpoints(allocator, "r1");
+    defer {
+        for (cps) |cp| {
+            allocator.free(cp.id);
+            allocator.free(cp.run_id);
+            allocator.free(cp.step_id);
+            if (cp.parent_id) |pid| allocator.free(pid);
+            allocator.free(cp.state_json);
+            allocator.free(cp.completed_nodes_json);
+            if (cp.metadata_json) |mj| allocator.free(mj);
+        }
+        allocator.free(cps);
+    }
+    try std.testing.expectEqual(@as(usize, 3), cps.len);
+    try std.testing.expectEqualStrings("cp1", cps[0].id);
+    try std.testing.expectEqualStrings("cp3", cps[2].id);
+
+    // Get latest checkpoint
+    const latest = (try s.getLatestCheckpoint(allocator, "r1")).?;
+    defer {
+        allocator.free(latest.id);
+        allocator.free(latest.run_id);
+        allocator.free(latest.step_id);
+        if (latest.parent_id) |pid| allocator.free(pid);
+        allocator.free(latest.state_json);
+        allocator.free(latest.completed_nodes_json);
+        if (latest.metadata_json) |mj| allocator.free(mj);
+    }
+    try std.testing.expectEqualStrings("cp3", latest.id);
+    try std.testing.expectEqual(@as(i64, 3), latest.version);
+
+    // Get nonexistent checkpoint
+    const none = try s.getCheckpoint(allocator, "nonexistent");
+    try std.testing.expect(none == null);
+
+    // Get latest for run with no checkpoints
+    const no_latest = try s.getLatestCheckpoint(allocator, "no_run");
+    try std.testing.expect(no_latest == null);
+}
+
+test "agent events" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    // Create a run
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
+
+    // Create agent events
+    try s.createAgentEvent("r1", "step_a", 1, "read_file", "{\"path\":\"foo.txt\"}", "contents here", "completed");
+    try s.createAgentEvent("r1", "step_a", 2, "write_file", "{\"path\":\"bar.txt\"}", null, "completed");
+    try s.createAgentEvent("r1", "step_a", 3, null, null, null, "thinking");
+    try s.createAgentEvent("r1", "step_b", 1, "search", "{}", "results", "completed");
+
+    // List by run+step
+    const events_a = try s.listAgentEvents(allocator, "r1", "step_a");
+    defer {
+        for (events_a) |ev| {
+            allocator.free(ev.run_id);
+            allocator.free(ev.step_id);
+            if (ev.tool) |t| allocator.free(t);
+            if (ev.args_json) |a| allocator.free(a);
+            if (ev.result_text) |r| allocator.free(r);
+            allocator.free(ev.status);
+        }
+        allocator.free(events_a);
+    }
+    try std.testing.expectEqual(@as(usize, 3), events_a.len);
+    try std.testing.expectEqualStrings("read_file", events_a[0].tool.?);
+    try std.testing.expectEqual(@as(i64, 1), events_a[0].iteration);
+    try std.testing.expectEqualStrings("contents here", events_a[0].result_text.?);
+    try std.testing.expect(events_a[2].tool == null);
+    try std.testing.expectEqualStrings("thinking", events_a[2].status);
+
+    // List different step
+    const events_b = try s.listAgentEvents(allocator, "r1", "step_b");
+    defer {
+        for (events_b) |ev| {
+            allocator.free(ev.run_id);
+            allocator.free(ev.step_id);
+            if (ev.tool) |t| allocator.free(t);
+            if (ev.args_json) |a| allocator.free(a);
+            if (ev.result_text) |r| allocator.free(r);
+            allocator.free(ev.status);
+        }
+        allocator.free(events_b);
+    }
+    try std.testing.expectEqual(@as(usize, 1), events_b.len);
+    try std.testing.expectEqualStrings("search", events_b[0].tool.?);
+
+    // Empty list for nonexistent
+    const empty = try s.listAgentEvents(allocator, "r1", "nonexistent");
+    defer allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+test "pending state injections" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    // Create a run
+    try s.insertRun("r1", null, "running", "{}", "{}", "[]");
+
+    // Create pending injections
+    try s.createPendingInjection("r1", "{\"counter\":5}", "step_a");
+    try s.createPendingInjection("r1", "{\"flag\":true}", "step_b");
+    try s.createPendingInjection("r1", "{\"immediate\":1}", null); // apply immediately (NULL apply_after_step)
+
+    // Consume by step_a -- should get the step_a injection and the NULL one
+    const consumed_a = try s.consumePendingInjections(allocator, "r1", "step_a");
+    defer {
+        for (consumed_a) |inj| {
+            allocator.free(inj.run_id);
+            allocator.free(inj.updates_json);
+            if (inj.apply_after_step) |s_a| allocator.free(s_a);
+        }
+        allocator.free(consumed_a);
+    }
+    try std.testing.expectEqual(@as(usize, 2), consumed_a.len);
+    try std.testing.expectEqualStrings("{\"counter\":5}", consumed_a[0].updates_json);
+    try std.testing.expectEqualStrings("{\"immediate\":1}", consumed_a[1].updates_json);
+
+    // Consuming again for step_a should return empty (already consumed)
+    const consumed_again = try s.consumePendingInjections(allocator, "r1", "step_a");
+    defer allocator.free(consumed_again);
+    try std.testing.expectEqual(@as(usize, 0), consumed_again.len);
+
+    // step_b injection should still be pending
+    const consumed_b = try s.consumePendingInjections(allocator, "r1", "step_b");
+    defer {
+        for (consumed_b) |inj| {
+            allocator.free(inj.run_id);
+            allocator.free(inj.updates_json);
+            if (inj.apply_after_step) |s_a| allocator.free(s_a);
+        }
+        allocator.free(consumed_b);
+    }
+    try std.testing.expectEqual(@as(usize, 1), consumed_b.len);
+    try std.testing.expectEqualStrings("{\"flag\":true}", consumed_b[0].updates_json);
+
+    // Test discard
+    try s.createPendingInjection("r1", "{\"discard_me\":true}", "step_c");
+    try s.discardPendingInjections("r1");
+    const after_discard = try s.consumePendingInjections(allocator, "r1", "step_c");
+    defer allocator.free(after_discard);
+    try std.testing.expectEqual(@as(usize, 0), after_discard.len);
+}
+
+test "run state management" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    // Create run with state
+    try s.createRunWithState("r1", null, "{\"steps\":[]}", "{\"input\":1}", "{\"counter\":0}");
+    const run = (try s.getRun(allocator, "r1")).?;
+    defer {
+        allocator.free(run.id);
+        if (run.idempotency_key) |ik| allocator.free(ik);
+        allocator.free(run.status);
+        if (run.workflow_id) |wid| allocator.free(wid);
+        allocator.free(run.workflow_json);
+        allocator.free(run.input_json);
+        allocator.free(run.callbacks_json);
+        if (run.error_text) |et| allocator.free(et);
+        if (run.state_json) |sj| allocator.free(sj);
+    }
+    try std.testing.expectEqualStrings("r1", run.id);
+    try std.testing.expectEqualStrings("pending", run.status);
+    try std.testing.expectEqualStrings("{\"steps\":[]}", run.workflow_json);
+
+    // Create run with workflow_id
+    try s.createWorkflow("wf1", "Test WF", "{\"steps\":[]}");
+    try s.createRunWithState("r2", "wf1", "{\"steps\":[]}", "{}", "{}");
+    const run2 = (try s.getRun(allocator, "r2")).?;
+    defer {
+        allocator.free(run2.id);
+        if (run2.idempotency_key) |ik| allocator.free(ik);
+        allocator.free(run2.status);
+        if (run2.workflow_id) |wid| allocator.free(wid);
+        allocator.free(run2.workflow_json);
+        allocator.free(run2.input_json);
+        allocator.free(run2.callbacks_json);
+        if (run2.error_text) |et| allocator.free(et);
+        if (run2.state_json) |sj| allocator.free(sj);
+    }
+    try std.testing.expectEqualStrings("r2", run2.id);
+    try std.testing.expectEqualStrings("wf1", run2.workflow_id.?);
+
+    // Update run state
+    try s.updateRunState("r1", "{\"counter\":42}");
+
+    // Increment checkpoint count
+    try s.incrementCheckpointCount("r1");
+    try s.incrementCheckpointCount("r1");
+
+    // Create forked run
+    try s.createCheckpoint("cp1", "r1", "step_a", null, "{}", "[]", 1, null);
+    try s.createForkedRun("r3", "{\"steps\":[]}", "{\"counter\":42}", "r1", "cp1");
+    const forked = (try s.getRun(allocator, "r3")).?;
+    defer {
+        allocator.free(forked.id);
+        if (forked.idempotency_key) |ik| allocator.free(ik);
+        allocator.free(forked.status);
+        if (forked.workflow_id) |wid| allocator.free(wid);
+        allocator.free(forked.workflow_json);
+        allocator.free(forked.input_json);
+        allocator.free(forked.callbacks_json);
+        if (forked.error_text) |et| allocator.free(et);
+        if (forked.state_json) |sj| allocator.free(sj);
+    }
+    try std.testing.expectEqualStrings("r3", forked.id);
+    try std.testing.expectEqualStrings("pending", forked.status);
+}
+
+test "token accounting: update step and run tokens" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.createRunWithState("r-tok", null, "{}", "{}", "{}");
+    try s.updateRunStatus("r-tok", "running", null);
+    try s.insertStep("s-tok", "r-tok", "task1", "task", "completed", "{}", 1, null, null, null);
+
+    // Update step tokens
+    try s.updateStepTokens("s-tok", 100, 200);
+
+    // Update run tokens
+    try s.updateRunTokens("r-tok", 100, 200);
+
+    // Verify run tokens
+    const tokens = try s.getRunTokens("r-tok");
+    try std.testing.expectEqual(@as(i64, 100), tokens.input);
+    try std.testing.expectEqual(@as(i64, 200), tokens.output);
+    try std.testing.expectEqual(@as(i64, 300), tokens.total);
+
+    // Accumulate more tokens
+    try s.updateRunTokens("r-tok", 50, 75);
+    const tokens2 = try s.getRunTokens("r-tok");
+    try std.testing.expectEqual(@as(i64, 150), tokens2.input);
+    try std.testing.expectEqual(@as(i64, 275), tokens2.output);
+    try std.testing.expectEqual(@as(i64, 425), tokens2.total);
+}
+
+test "workflow version CRUD" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    // Create workflow with default version (1)
+    try s.createWorkflow("wf1", "Test Workflow", "{\"nodes\":{}}");
+    const wf1 = (try s.getWorkflow(allocator, "wf1")).?;
+    defer {
+        allocator.free(wf1.id);
+        allocator.free(wf1.name);
+        allocator.free(wf1.definition_json);
+    }
+    try std.testing.expectEqual(@as(i64, 1), wf1.version);
+
+    // Create workflow with explicit version
+    try s.createWorkflowWithVersion("wf2", "Versioned Workflow", "{\"nodes\":{}}", 5);
+    const wf2 = (try s.getWorkflow(allocator, "wf2")).?;
+    defer {
+        allocator.free(wf2.id);
+        allocator.free(wf2.name);
+        allocator.free(wf2.definition_json);
+    }
+    try std.testing.expectEqual(@as(i64, 5), wf2.version);
+
+    // Update workflow with new version
+    try s.updateWorkflowWithVersion("wf2", "Updated", "{\"nodes\":{\"a\":{}}}", 6);
+    const wf3 = (try s.getWorkflow(allocator, "wf2")).?;
+    defer {
+        allocator.free(wf3.id);
+        allocator.free(wf3.name);
+        allocator.free(wf3.definition_json);
+    }
+    try std.testing.expectEqual(@as(i64, 6), wf3.version);
+    try std.testing.expectEqualStrings("Updated", wf3.name);
+
+    // Update without changing version
+    try s.updateWorkflow("wf1", "Still v1", "{\"nodes\":{\"b\":{}}}");
+    const wf4 = (try s.getWorkflow(allocator, "wf1")).?;
+    defer {
+        allocator.free(wf4.id);
+        allocator.free(wf4.name);
+        allocator.free(wf4.definition_json);
+    }
+    try std.testing.expectEqual(@as(i64, 1), wf4.version);
+
+    // List workflows should include version
+    const workflows = try s.listWorkflows(allocator);
+    defer {
+        for (workflows) |w| {
+            allocator.free(w.id);
+            allocator.free(w.name);
+            allocator.free(w.definition_json);
+        }
+        allocator.free(workflows);
+    }
+    try std.testing.expectEqual(@as(usize, 2), workflows.len);
 }

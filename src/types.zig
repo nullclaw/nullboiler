@@ -7,10 +7,11 @@ const std = @import("std");
 pub const RunStatus = enum {
     pending,
     running,
-    paused,
+    interrupted,
     completed,
     failed,
     cancelled,
+    forked,
 
     pub fn toString(self: RunStatus) []const u8 {
         return @tagName(self);
@@ -31,7 +32,7 @@ pub const StepStatus = enum {
     completed,
     failed,
     skipped,
-    waiting_approval,
+    interrupted,
 
     pub fn toString(self: StepStatus) []const u8 {
         return @tagName(self);
@@ -47,19 +48,12 @@ pub const StepStatus = enum {
 
 pub const StepType = enum {
     task,
-    fan_out,
-    map,
-    condition,
-    approval,
-    reduce,
-    loop,
-    sub_workflow,
-    wait,
-    router,
+    route,
+    interrupt,
+    agent,
+    send,
     transform,
-    saga,
-    debate,
-    group_chat,
+    subgraph,
 
     pub fn toString(self: StepType) []const u8 {
         return @tagName(self);
@@ -153,6 +147,7 @@ pub const RunRow = struct {
     id: []const u8,
     idempotency_key: ?[]const u8,
     status: []const u8,
+    workflow_id: ?[]const u8 = null,
     workflow_json: []const u8,
     input_json: []const u8,
     callbacks_json: []const u8,
@@ -161,6 +156,9 @@ pub const RunRow = struct {
     updated_at_ms: i64,
     started_at_ms: ?i64,
     ended_at_ms: ?i64,
+    state_json: ?[]const u8 = null,
+    config_json: ?[]const u8 = null,
+    parent_run_id: ?[]const u8 = null,
 };
 
 pub const StepRow = struct {
@@ -206,17 +204,6 @@ pub const ArtifactRow = struct {
     created_at_ms: i64,
 };
 
-pub const ChatMessageRow = struct {
-    id: i64,
-    run_id: []const u8,
-    step_id: []const u8,
-    round: i64,
-    role: []const u8,
-    worker_id: ?[]const u8,
-    message: []const u8,
-    ts_ms: i64,
-};
-
 pub const TrackerRunRow = struct {
     task_id: []const u8,
     tracker_run_id: []const u8,
@@ -238,12 +225,75 @@ pub const TrackerRunRow = struct {
     last_error_text: ?[]const u8,
 };
 
-pub const SagaStateRow = struct {
+pub const WorkflowRow = struct {
+    id: []const u8,
+    name: []const u8,
+    definition_json: []const u8,
+    version: i64 = 1,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+};
+
+pub const CheckpointRow = struct {
+    id: []const u8,
     run_id: []const u8,
-    saga_step_id: []const u8,
-    body_step_id: []const u8,
-    compensation_step_id: ?[]const u8,
+    step_id: []const u8,
+    parent_id: ?[]const u8,
+    state_json: []const u8,
+    completed_nodes_json: []const u8,
+    version: i64,
+    metadata_json: ?[]const u8,
+    created_at_ms: i64,
+};
+
+pub const AgentEventRow = struct {
+    id: i64,
+    run_id: []const u8,
+    step_id: []const u8,
+    iteration: i64,
+    tool: ?[]const u8,
+    args_json: ?[]const u8,
+    result_text: ?[]const u8,
     status: []const u8,
+    created_at_ms: i64,
+};
+
+pub const PendingInjectionRow = struct {
+    id: i64,
+    run_id: []const u8,
+    updates_json: []const u8,
+    apply_after_step: ?[]const u8,
+    created_at_ms: i64,
+};
+
+pub const PendingWriteRow = struct {
+    id: i64,
+    run_id: []const u8,
+    step_id: []const u8,
+    channel: []const u8,
+    value_json: []const u8,
+    created_at_ms: i64,
+};
+
+pub const ReducerType = enum {
+    last_value,
+    append,
+    merge,
+    add,
+    min,
+    max,
+    add_messages,
+
+    pub fn toString(self: ReducerType) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn fromString(s: []const u8) ?ReducerType {
+        inline for (@typeInfo(ReducerType).@"enum".fields) |f| {
+            if (std.mem.eql(u8, s, f.name)) return @enumFromInt(f.value);
+        }
+        return null;
+    }
 };
 
 // ── API Response Types ─────────────────────────────────────────────────
@@ -275,17 +325,17 @@ test "RunStatus round-trip" {
 }
 
 test "StepStatus round-trip" {
-    const s = StepStatus.waiting_approval;
+    const s = StepStatus.interrupted;
     const name = s.toString();
-    try std.testing.expectEqualStrings("waiting_approval", name);
+    try std.testing.expectEqualStrings("interrupted", name);
     const parsed = StepStatus.fromString(name);
-    try std.testing.expectEqual(StepStatus.waiting_approval, parsed.?);
+    try std.testing.expectEqual(StepStatus.interrupted, parsed.?);
 }
 
 test "StepType round-trip" {
-    const s = StepType.fan_out;
-    try std.testing.expectEqualStrings("fan_out", s.toString());
-    try std.testing.expectEqual(StepType.fan_out, StepType.fromString("fan_out").?);
+    const s = StepType.route;
+    try std.testing.expectEqualStrings("route", s.toString());
+    try std.testing.expectEqual(StepType.route, StepType.fromString("route").?);
 }
 
 test "WorkerStatus round-trip" {

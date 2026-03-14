@@ -12,6 +12,7 @@ const redis_client = @import("redis_client.zig");
 const mqtt_client = @import("mqtt_client.zig");
 const tracker_mod = @import("tracker.zig");
 const workflow_loader = @import("workflow_loader.zig");
+const sse_mod = @import("sse.zig");
 const c = @cImport({
     @cInclude("signal.h");
 });
@@ -148,6 +149,9 @@ pub fn main() !void {
     var metrics = metrics_mod.Metrics{};
     var drain_mode = std.atomic.Value(bool).init(false);
 
+    var sse_hub = sse_mod.SseHub.init(allocator);
+    defer sse_hub.deinit();
+
     var response_queue = async_dispatch.ResponseQueue.init(allocator);
     defer response_queue.deinit();
 
@@ -240,6 +244,14 @@ pub fn main() !void {
 
     // Start DAG engine on a background thread
     const poll_ms: u64 = cfg.engine.poll_interval_ms;
+    // Hot reload watcher for workflow definitions
+    var wf_watcher: ?workflow_loader.WorkflowWatcher = null;
+    if (cfg.tracker) |tracker_cfg| {
+        if (tracker_cfg.workflows_dir.len > 0) {
+            wf_watcher = workflow_loader.WorkflowWatcher.init(allocator, tracker_cfg.workflows_dir, &store);
+        }
+    }
+
     var engine = engine_mod.Engine.init(&store, allocator, poll_ms);
     engine.configure(.{
         .health_check_interval_ms = @as(i64, @intCast(cfg.engine.health_check_interval_ms)),
@@ -250,7 +262,13 @@ pub fn main() !void {
         .retry_jitter_ms = @as(i64, @intCast(cfg.engine.retry_jitter_ms)),
         .retry_max_elapsed_ms = @as(i64, @intCast(cfg.engine.retry_max_elapsed_ms)),
     }, &metrics);
+    if (cfg.tracker) |tracker_cfg| {
+        engine.setTrustedTrackerAccess(tracker_cfg.url, tracker_cfg.api_token);
+    }
     engine.response_queue = &response_queue;
+    if (wf_watcher != null) {
+        engine.workflow_watcher = &wf_watcher.?;
+    }
     const engine_thread = try std.Thread.spawn(.{}, engine_mod.Engine.run, .{&engine});
 
     // Spawn listener threads for async protocols
@@ -337,6 +355,9 @@ pub fn main() !void {
         if (tracker_instance) |*ti| {
             ti.deinit();
         }
+        if (wf_watcher) |*ww| {
+            ww.deinit();
+        }
     }
 
     while (true) {
@@ -387,6 +408,8 @@ pub fn main() !void {
             .strategies = &strategy_map,
             .tracker_state = if (tracker_instance) |*ti| &ti.state else null,
             .tracker_cfg = if (cfg.tracker) |*tc| tc else null,
+            .sse_hub = &sse_hub,
+            .rate_limits = &engine.rate_limits,
         };
         const response = api.handleRequest(&ctx, request.method, request.target, request.body);
 
@@ -638,4 +661,6 @@ comptime {
     _ = @import("subprocess.zig");
     _ = @import("tracker_client.zig");
     _ = @import("tracker.zig");
+    _ = @import("state.zig");
+    _ = @import("sse.zig");
 }

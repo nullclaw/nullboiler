@@ -1,11 +1,24 @@
 const std = @import("std");
 
+pub const UsageInfo = struct {
+    input_tokens: i64 = 0,
+    output_tokens: i64 = 0,
+};
+
+pub const RateLimitData = struct {
+    remaining: i64 = 0,
+    limit: i64 = 0,
+    reset_ms: i64 = 0,
+};
+
 pub const ParseResult = struct {
     output: []const u8,
     success: bool,
     error_text: ?[]const u8,
     async_pending: bool = false,
     correlation_id: ?[]const u8 = null,
+    usage: ?UsageInfo = null,
+    rate_limit: ?RateLimitData = null,
 };
 
 pub const invalid_json_error = "worker response must be a JSON object";
@@ -34,6 +47,8 @@ pub fn parse(allocator: std.mem.Allocator, response_data: []const u8) !ParseResu
             .output = try allocator.dupe(u8, output),
             .success = true,
             .error_text = null,
+            .usage = extractUsage(obj),
+            .rate_limit = extractRateLimit(obj),
         };
     }
 
@@ -92,6 +107,53 @@ fn extractErrorMessage(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?
     }
 
     return null;
+}
+
+fn extractUsage(obj: std.json.ObjectMap) ?UsageInfo {
+    const usage_val = obj.get("usage") orelse return null;
+    if (usage_val != .object) return null;
+    const usage_obj = usage_val.object;
+
+    var info = UsageInfo{};
+
+    // OpenAI format: prompt_tokens / completion_tokens
+    if (usage_obj.get("prompt_tokens")) |v| {
+        if (v == .integer) info.input_tokens = v.integer;
+    }
+    if (usage_obj.get("completion_tokens")) |v| {
+        if (v == .integer) info.output_tokens = v.integer;
+    }
+
+    // A2A/generic format: input_tokens / output_tokens
+    if (usage_obj.get("input_tokens")) |v| {
+        if (v == .integer) info.input_tokens = v.integer;
+    }
+    if (usage_obj.get("output_tokens")) |v| {
+        if (v == .integer) info.output_tokens = v.integer;
+    }
+
+    if (info.input_tokens == 0 and info.output_tokens == 0) return null;
+    return info;
+}
+
+fn extractRateLimit(obj: std.json.ObjectMap) ?RateLimitData {
+    const rl_val = obj.get("rate_limit") orelse return null;
+    if (rl_val != .object) return null;
+    const rl_obj = rl_val.object;
+
+    var info = RateLimitData{};
+    if (rl_obj.get("remaining")) |v| {
+        if (v == .integer) info.remaining = v.integer;
+    }
+    if (rl_obj.get("limit")) |v| {
+        if (v == .integer) info.limit = v.integer;
+    }
+    if (rl_obj.get("reset_ms")) |v| {
+        if (v == .integer) info.reset_ms = v.integer;
+    }
+
+    if (info.remaining == 0 and info.limit == 0) return null;
+    return info;
 }
 
 fn isAsyncAckWithoutOutput(obj: std.json.ObjectMap) bool {
@@ -164,4 +226,53 @@ test "parse rejects object without supported output fields" {
     const result = try parse(allocator, "{\"output\":\"legacy\"}");
     try std.testing.expect(!result.success);
     try std.testing.expectEqualStrings(missing_output_error, result.error_text.?);
+}
+
+test "parse extracts usage info from OpenAI format" {
+    const allocator = std.testing.allocator;
+    const result = try parse(
+        allocator,
+        "{\"response\":\"done\",\"usage\":{\"prompt_tokens\":150,\"completion_tokens\":75}}",
+    );
+    defer allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expect(result.usage != null);
+    try std.testing.expectEqual(@as(i64, 150), result.usage.?.input_tokens);
+    try std.testing.expectEqual(@as(i64, 75), result.usage.?.output_tokens);
+}
+
+test "parse extracts usage info from generic format" {
+    const allocator = std.testing.allocator;
+    const result = try parse(
+        allocator,
+        "{\"response\":\"done\",\"usage\":{\"input_tokens\":200,\"output_tokens\":100}}",
+    );
+    defer allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expect(result.usage != null);
+    try std.testing.expectEqual(@as(i64, 200), result.usage.?.input_tokens);
+    try std.testing.expectEqual(@as(i64, 100), result.usage.?.output_tokens);
+}
+
+test "parse extracts rate limit info" {
+    const allocator = std.testing.allocator;
+    const result = try parse(
+        allocator,
+        "{\"response\":\"done\",\"rate_limit\":{\"remaining\":95,\"limit\":100,\"reset_ms\":1700000000000}}",
+    );
+    defer allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expect(result.rate_limit != null);
+    try std.testing.expectEqual(@as(i64, 95), result.rate_limit.?.remaining);
+    try std.testing.expectEqual(@as(i64, 100), result.rate_limit.?.limit);
+    try std.testing.expectEqual(@as(i64, 1700000000000), result.rate_limit.?.reset_ms);
+}
+
+test "parse returns null usage when no usage field" {
+    const allocator = std.testing.allocator;
+    const result = try parse(allocator, "{\"response\":\"done\"}");
+    defer allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expect(result.usage == null);
+    try std.testing.expect(result.rate_limit == null);
 }

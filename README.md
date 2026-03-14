@@ -67,6 +67,22 @@ This keeps the architecture modular, simpler to reason about, and easier to evol
 
 See additional integration docs in [`docs/`](./docs).
 
+## Workflow Graph Features
+
+The orchestration graph runtime supports:
+
+- `task`, `agent`, `route`, `interrupt`, `send`, `transform`, and `subgraph` nodes
+- run replay, checkpoint forking, breakpoint interrupts, and post-start state injection
+- `send` fan-out with canonical `items_key` and configurable `output_key`
+- task/agent output shaping via `output_key` and `output_mapping`
+- template access to `state.*`, `input.*`, `item.*`, `config.*`, and `store.<namespace>.<key>`
+- `transform.store_updates` for writing durable workflow memory back to NullTickets
+
+Store-backed templates and `store_updates` require a NullTickets base URL. The
+runtime resolves it from workflow fields such as `tracker_url` or from run config
+(`config.tracker_url` / `config.tracker_api_token`), which are injected into
+state as `__config`.
+
 ## Config Location
 
 - Default config path: `~/.nullboiler/config.json`

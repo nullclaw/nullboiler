@@ -1,38 +1,39 @@
 /// Template engine for prompt rendering.
 /// Resolves `{{...}}` expressions against workflow context.
 ///
-/// Supported expressions:
+/// Legacy Context + render():
 ///   - `{{input.X}}`          -- look up key X in the workflow input JSON
 ///   - `{{input.X.Y}}`        -- nested object lookups inside workflow input JSON
-///   - `{{steps.ID.output}}`  -- output of a single completed step
-///   - `{{steps.ID.outputs}}` -- JSON array of outputs from map/fan_out child steps
 ///   - `{{item}}`             -- current item string for map iterations
-///   - `{{task.X}}`           -- look up field X in the NullTickets task JSON (supports nested paths like `task.metadata.repo_url`)
+///   - `{{task.X}}`           -- look up field X in the NullTickets task JSON
+///   - `{{attempt}}`          -- current retry attempt number
+///
+/// State-based renderTemplate():
+///   - `{{state.X}}`          -- look up key X in the unified state JSON
+///   - `{{state.X.Y}}`        -- nested paths with optional [-1] array indexing
+///   - `{{input.X}}`          -- look up key X in the workflow input JSON
+///   - `{{item}}`             -- current item string for send iterations
+///   - `{{store.ns.key}}`     -- fetch NullTickets store entry value
 ///
 /// Conditional blocks:
 ///   - `{% if <expr> %}...{% endif %}`
 ///   - `{% if <expr> %}...{% else %}...{% endif %}`
 ///   Conditionals are processed before expression substitution.
 ///   Truthiness: non-null, non-empty, not "false", not "null" string values are truthy.
-
 const std = @import("std");
 
 // ── Context ───────────────────────────────────────────────────────────
 
 pub const Context = struct {
     input_json: []const u8, // raw JSON string of workflow input
-    step_outputs: []const StepOutput, // completed step outputs
-    item: ?[]const u8, // current map item (null if not in map)
-    debate_responses: ?[]const u8 = null, // JSON array string for debate judge template
-    chat_history: ?[]const u8 = null, // formatted chat transcript for group_chat round_template
-    role: ?[]const u8 = null, // participant role for group_chat round_template
+    step_outputs: []const StepOutput, // completed step outputs (legacy, for tracker.zig)
+    item: ?[]const u8, // current item string (null if not in map/send)
     task_json: ?[]const u8 = null, // raw JSON string of NullTickets task data
     attempt: ?u32 = null, // current retry attempt number
 
     pub const StepOutput = struct {
         step_id: []const u8,
         output: ?[]const u8, // single output (for task steps)
-        outputs: ?[]const []const u8, // array of outputs (for fan_out/map parent)
     };
 };
 
@@ -222,27 +223,6 @@ fn resolveExpression(allocator: std.mem.Allocator, expr: []const u8, ctx: Contex
         return error.ItemNotAvailable;
     }
 
-    if (std.mem.eql(u8, expr, "debate_responses")) {
-        if (ctx.debate_responses) |dr| {
-            return allocator.dupe(u8, dr) catch return error.OutOfMemory;
-        }
-        return allocator.dupe(u8, "[]") catch return error.OutOfMemory;
-    }
-
-    if (std.mem.eql(u8, expr, "chat_history")) {
-        if (ctx.chat_history) |ch| {
-            return allocator.dupe(u8, ch) catch return error.OutOfMemory;
-        }
-        return allocator.dupe(u8, "") catch return error.OutOfMemory;
-    }
-
-    if (std.mem.eql(u8, expr, "role")) {
-        if (ctx.role) |r| {
-            return allocator.dupe(u8, r) catch return error.OutOfMemory;
-        }
-        return allocator.dupe(u8, "") catch return error.OutOfMemory;
-    }
-
     if (std.mem.eql(u8, expr, "attempt")) {
         if (ctx.attempt) |a| {
             return std.fmt.allocPrint(allocator, "{d}", .{a}) catch return error.OutOfMemory;
@@ -292,7 +272,7 @@ fn resolveInputField(allocator: std.mem.Allocator, input_json: []const u8, field
 }
 
 fn resolveStepRef(allocator: std.mem.Allocator, rest: []const u8, step_outputs: []const Context.StepOutput) RenderError![]const u8 {
-    // rest is "ID.output" or "ID.outputs"
+    // rest is "ID.output"
     const dot_pos = std.mem.lastIndexOfScalar(u8, rest, '.') orelse return error.UnknownExpression;
     const step_id = rest[0..dot_pos];
     const field = rest[dot_pos + 1 ..];
@@ -305,9 +285,6 @@ fn resolveStepRef(allocator: std.mem.Allocator, rest: []const u8, step_outputs: 
                     return allocator.dupe(u8, output) catch return error.OutOfMemory;
                 }
                 return allocator.dupe(u8, "") catch return error.OutOfMemory;
-            }
-            if (std.mem.eql(u8, field, "outputs")) {
-                return serializeOutputs(allocator, so.outputs);
             }
             return error.UnknownExpression;
         }
@@ -334,38 +311,6 @@ fn resolveTaskField(allocator: std.mem.Allocator, task_json: []const u8, field_p
     }
 
     return jsonValueToString(allocator, current);
-}
-
-fn serializeOutputs(allocator: std.mem.Allocator, outputs: ?[]const []const u8) RenderError![]const u8 {
-    const items = outputs orelse {
-        return allocator.dupe(u8, "[]") catch return error.OutOfMemory;
-    };
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    buf.append(allocator, '[') catch return error.OutOfMemory;
-    for (items, 0..) |item, i| {
-        if (i > 0) {
-            buf.append(allocator, ',') catch return error.OutOfMemory;
-        }
-        // Write JSON-escaped string
-        buf.append(allocator, '"') catch return error.OutOfMemory;
-        for (item) |c| {
-            switch (c) {
-                '"' => buf.appendSlice(allocator, "\\\"") catch return error.OutOfMemory,
-                '\\' => buf.appendSlice(allocator, "\\\\") catch return error.OutOfMemory,
-                '\n' => buf.appendSlice(allocator, "\\n") catch return error.OutOfMemory,
-                '\r' => buf.appendSlice(allocator, "\\r") catch return error.OutOfMemory,
-                '\t' => buf.appendSlice(allocator, "\\t") catch return error.OutOfMemory,
-                else => buf.append(allocator, c) catch return error.OutOfMemory,
-            }
-        }
-        buf.append(allocator, '"') catch return error.OutOfMemory;
-    }
-    buf.append(allocator, ']') catch return error.OutOfMemory;
-
-    return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
 fn jsonValueToString(allocator: std.mem.Allocator, val: std.json.Value) RenderError![]const u8 {
@@ -403,7 +348,446 @@ fn jsonValueToString(allocator: std.mem.Allocator, val: std.json.Value) RenderEr
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
+// ── New state-based template engine ───────────────────────────────────
+
+const state_mod = @import("state.zig");
+const tracker_client = @import("tracker_client.zig");
+const Allocator = std.mem.Allocator;
+
+pub const StoreFetcher = *const fn (
+    alloc: Allocator,
+    base_url: []const u8,
+    api_token: ?[]const u8,
+    namespace: []const u8,
+    key: []const u8,
+) anyerror!?[]const u8;
+
+pub const StoreAccess = struct {
+    base_url: []const u8,
+    api_token: ?[]const u8 = null,
+    fetcher: StoreFetcher,
+};
+
+pub fn fetchStoreValueHttp(
+    alloc: Allocator,
+    base_url: []const u8,
+    api_token: ?[]const u8,
+    namespace: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    var client = tracker_client.TrackerClient.init(alloc, base_url, api_token);
+    return client.storeGetValue(namespace, key);
+}
+
+/// Strip surrounding double quotes from a JSON string value.
+/// `"hello"` -> `hello`, `42` -> `42`, `[1,2]` -> `[1,2]`
+fn stripJsonQuotes(s: []const u8) []const u8 {
+    if (s.len >= 2 and s[0] == '"' and s[s.len - 1] == '"') {
+        return s[1 .. s.len - 1];
+    }
+    return s;
+}
+
+/// Look up a value from a JSON blob by dotted path (no prefix stripping).
+/// E.g. lookupJsonPath(alloc, '{"topic":"AI"}', "topic") -> "AI"
+fn lookupJsonPath(alloc: Allocator, json_bytes: []const u8, path: []const u8) !?[]const u8 {
+    // Reuse state_mod.getStateValue but without "state." prefix.
+    // getStateValue strips "state." if present, otherwise uses path as-is.
+    return try state_mod.getStateValue(alloc, json_bytes, path);
+}
+
+/// Resolve a template expression (the text inside `{{ }}`) to a string value.
+/// Handles state.X, input.X, item, item.X expressions.
+fn resolveNewExpression(
+    alloc: Allocator,
+    expr: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+    store_access: ?StoreAccess,
+) ![]const u8 {
+    if (std.mem.startsWith(u8, expr, "state.")) {
+        // Use getStateValue which handles "state." prefix, nested paths, [-1] indexing
+        const raw = try state_mod.getStateValue(alloc, state_json, expr);
+        if (raw) |r| {
+            // Strip quotes for strings; leave numbers/bools/arrays/objects as-is
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                // It was a quoted string — dupe the unquoted version and free the original
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.startsWith(u8, expr, "input.")) {
+        const ij = input_json orelse {
+            return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        };
+        const field = expr["input.".len..];
+        const raw = try lookupJsonPath(alloc, ij, field);
+        if (raw) |r| {
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.eql(u8, expr, "item")) {
+        if (item_json) |ij| {
+            const stripped = stripJsonQuotes(ij);
+            return alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.startsWith(u8, expr, "item.")) {
+        const ij = item_json orelse {
+            return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        };
+        const field = expr["item.".len..];
+        const raw = try lookupJsonPath(alloc, ij, field);
+        if (raw) |r| {
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    // {{config.X}} — alias for {{state.__config.X}}
+    if (std.mem.startsWith(u8, expr, "config.")) {
+        const config_path = try std.fmt.allocPrint(alloc, "state.__config.{s}", .{expr["config.".len..]});
+        defer alloc.free(config_path);
+        const raw = try state_mod.getStateValue(alloc, state_json, config_path);
+        if (raw) |r| {
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    if (std.mem.startsWith(u8, expr, "store.")) {
+        const access = store_access orelse return error.StoreNotConfigured;
+        const store_expr = expr["store.".len..];
+        const dot = std.mem.indexOfScalar(u8, store_expr, '.') orelse return error.InvalidStoreExpression;
+        const namespace = store_expr[0..dot];
+        const key = store_expr[dot + 1 ..];
+        if (namespace.len == 0 or key.len == 0) return error.InvalidStoreExpression;
+
+        const raw = try access.fetcher(alloc, access.base_url, access.api_token, namespace, key);
+        if (raw) |r| {
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
+    // Unknown expression — return empty
+    return alloc.dupe(u8, "") catch return error.OutOfMemory;
+}
+
+/// Check if a condition expression is truthy for the new template engine.
+/// Truthy: non-null, non-empty, not "false", not "0", not "null", not empty array "[]"
+fn isNewTruthy(
+    alloc: Allocator,
+    expr: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+    store_access: ?StoreAccess,
+) bool {
+    const value = resolveNewExpression(alloc, expr, state_json, input_json, item_json, store_access) catch return false;
+    defer alloc.free(value);
+
+    if (value.len == 0) return false;
+    if (std.mem.eql(u8, value, "false")) return false;
+    if (std.mem.eql(u8, value, "0")) return false;
+    if (std.mem.eql(u8, value, "null")) return false;
+    if (std.mem.eql(u8, value, "[]")) return false;
+    return true;
+}
+
+/// Process `{% if expr %}...{% endif %}` conditional blocks for the new engine.
+fn processNewConditionals(
+    alloc: Allocator,
+    template: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+    store_access: ?StoreAccess,
+) ![]const u8 {
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var pos: usize = 0;
+
+    while (pos < template.len) {
+        if (std.mem.indexOfPos(u8, template, pos, "{%")) |open| {
+            result.appendSlice(alloc, template[pos..open]) catch return error.OutOfMemory;
+
+            const after_open = open + 2;
+            const close = std.mem.indexOfPos(u8, template, after_open, "%}") orelse
+                return error.OutOfMemory;
+            const tag_content = std.mem.trim(u8, template[after_open..close], " \t\n\r");
+            const after_tag = close + 2;
+
+            if (std.mem.startsWith(u8, tag_content, "if ")) {
+                const expr = std.mem.trim(u8, tag_content["if ".len..], " \t\n\r");
+
+                // Find matching {% endif %} at this nesting level
+                var depth: usize = 0;
+                var scan: usize = after_tag;
+                var else_start: ?usize = null;
+                var else_end: ?usize = null;
+                var endif_start: ?usize = null;
+                var endif_end: ?usize = null;
+
+                while (scan < template.len) {
+                    if (std.mem.indexOfPos(u8, template, scan, "{%")) |inner_open| {
+                        const inner_after = inner_open + 2;
+                        const inner_close = std.mem.indexOfPos(u8, template, inner_after, "%}") orelse
+                            return error.OutOfMemory;
+                        const inner_tag = std.mem.trim(u8, template[inner_after..inner_close], " \t\n\r");
+                        const inner_after_tag = inner_close + 2;
+
+                        if (std.mem.startsWith(u8, inner_tag, "if ")) {
+                            depth += 1;
+                            scan = inner_after_tag;
+                        } else if (std.mem.eql(u8, inner_tag, "else") and depth == 0) {
+                            else_start = inner_open;
+                            else_end = inner_after_tag;
+                            scan = inner_after_tag;
+                        } else if (std.mem.eql(u8, inner_tag, "endif")) {
+                            if (depth == 0) {
+                                endif_start = inner_open;
+                                endif_end = inner_after_tag;
+                                break;
+                            }
+                            depth -= 1;
+                            scan = inner_after_tag;
+                        } else {
+                            scan = inner_after_tag;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                if (endif_end == null) {
+                    return error.OutOfMemory;
+                }
+
+                const truthy = isNewTruthy(alloc, expr, state_json, input_json, item_json, store_access);
+
+                if (truthy) {
+                    const branch_end = else_start orelse endif_start.?;
+                    const branch = template[after_tag..branch_end];
+                    const processed = try processNewConditionals(alloc, branch, state_json, input_json, item_json, store_access);
+                    defer alloc.free(processed);
+                    result.appendSlice(alloc, processed) catch return error.OutOfMemory;
+                } else {
+                    if (else_end) |ee| {
+                        const branch = template[ee..endif_start.?];
+                        const processed = try processNewConditionals(alloc, branch, state_json, input_json, item_json, store_access);
+                        defer alloc.free(processed);
+                        result.appendSlice(alloc, processed) catch return error.OutOfMemory;
+                    }
+                }
+
+                pos = endif_end.?;
+            } else {
+                result.appendSlice(alloc, template[open..after_tag]) catch return error.OutOfMemory;
+                pos = after_tag;
+            }
+        } else {
+            result.appendSlice(alloc, template[pos..]) catch return error.OutOfMemory;
+            break;
+        }
+    }
+
+    return result.toOwnedSlice(alloc) catch return error.OutOfMemory;
+}
+
+/// Render a template using the new state-based interpolation syntax.
+///
+/// Supported expressions:
+///   - `{{state.X}}` — state key value
+///   - `{{state.X.Y}}` — nested state access
+///   - `{{state.X[-1]}}` — last array element from state
+///   - `{{input.X}}` — original input (read-only)
+///   - `{{item}}` — current item in send context
+///   - `{{item.X}}` — nested access on item
+///   - `{% if state.X %}...{% endif %}` — conditionals
+///
+/// Processing order:
+///   1. Process `{% if ... %}...{% endif %}` blocks
+///   2. Process `{{...}}` interpolations
+pub fn renderTemplate(
+    alloc: Allocator,
+    template: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+) ![]const u8 {
+    return renderTemplateWithStore(alloc, template, state_json, input_json, item_json, null);
+}
+
+pub fn renderTemplateWithStore(
+    alloc: Allocator,
+    template: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+    store_access: ?StoreAccess,
+) ![]const u8 {
+    // Phase 1: Process conditional blocks
+    const preprocessed = try processNewConditionals(alloc, template, state_json, input_json, item_json, store_access);
+    defer alloc.free(preprocessed);
+
+    // Phase 2: Resolve {{expression}} substitutions
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var pos: usize = 0;
+
+    while (pos < preprocessed.len) {
+        if (std.mem.indexOfPos(u8, preprocessed, pos, "{{")) |open| {
+            result.appendSlice(alloc, preprocessed[pos..open]) catch return error.OutOfMemory;
+
+            const after_open = open + 2;
+            if (std.mem.indexOfPos(u8, preprocessed, after_open, "}}")) |close| {
+                const raw_expr = preprocessed[after_open..close];
+                const expr = std.mem.trim(u8, raw_expr, " \t\n\r");
+
+                const value = try resolveNewExpression(alloc, expr, state_json, input_json, item_json, store_access);
+                defer alloc.free(value);
+
+                result.appendSlice(alloc, value) catch return error.OutOfMemory;
+                pos = close + 2;
+            } else {
+                // Unterminated — just append the rest as literal
+                result.appendSlice(alloc, preprocessed[pos..]) catch return error.OutOfMemory;
+                break;
+            }
+        } else {
+            result.appendSlice(alloc, preprocessed[pos..]) catch return error.OutOfMemory;
+            break;
+        }
+    }
+
+    return result.toOwnedSlice(alloc) catch return error.OutOfMemory;
+}
+
+// ── New template engine tests ─────────────────────────────────────────
+
+test "template state interpolation" {
+    const alloc = std.testing.allocator;
+    const s = "{\"name\":\"test\",\"count\":42}";
+    const result = try renderTemplate(alloc, "Hello {{state.name}}, count={{state.count}}", s, null, null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("Hello test, count=42", result);
+}
+
+test "template input interpolation" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "Topic: {{input.topic}}", "{}", "{\"topic\":\"AI\"}", null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("Topic: AI", result);
+}
+
+test "template item interpolation" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "File: {{item.path}}", "{}", null, "{\"path\":\"main.py\"}");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("File: main.py", result);
+}
+
+test "template conditional true" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "{% if state.name %}Hi {{state.name}}{% endif %}", "{\"name\":\"Bob\"}", null, null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("Hi Bob", result);
+}
+
+test "template conditional false" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "{% if state.missing %}hidden{% endif %}visible", "{}", null, null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("visible", result);
+}
+
+test "template no interpolation" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplate(alloc, "plain text", "{}", null, null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("plain text", result);
+}
+
+fn mockStoreFetcher(
+    alloc: Allocator,
+    base_url: []const u8,
+    api_token: ?[]const u8,
+    namespace: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    _ = base_url;
+    _ = api_token;
+    if (std.mem.eql(u8, namespace, "prefs") and std.mem.eql(u8, key, "theme")) {
+        return try alloc.dupe(u8, "\"dark\"");
+    }
+    return null;
+}
+
+test "template store interpolation" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplateWithStore(
+        alloc,
+        "Theme: {{store.prefs.theme}}",
+        "{}",
+        null,
+        null,
+        .{
+            .base_url = "http://example.test",
+            .fetcher = mockStoreFetcher,
+        },
+    );
+    defer alloc.free(result);
+
+    try std.testing.expectEqualStrings("Theme: dark", result);
+}
+
+test "template store interpolation errors without store access" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(
+        error.StoreNotConfigured,
+        renderTemplateWithStore(alloc, "Theme: {{store.prefs.theme}}", "{}", null, null, null),
+    );
+}
+
+// ── Old template engine tests ─────────────────────────────────────────
 
 test "render literal text unchanged" {
     const allocator = std.testing.allocator;
@@ -443,28 +827,12 @@ test "render step output" {
     const result = try render(allocator, "Result: {{steps.s1.output}}", .{
         .input_json = "{}",
         .step_outputs = &.{
-            .{ .step_id = "s1", .output = "found data", .outputs = null },
+            .{ .step_id = "s1", .output = "found data" },
         },
         .item = null,
     });
     defer allocator.free(result);
     try std.testing.expectEqualStrings("Result: found data", result);
-}
-
-test "render step outputs array" {
-    const allocator = std.testing.allocator;
-    const outputs: []const []const u8 = &.{ "result1", "result2" };
-    const result = try render(allocator, "All: {{steps.s1.outputs}}", .{
-        .input_json = "{}",
-        .step_outputs = &.{
-            .{ .step_id = "s1", .output = null, .outputs = outputs },
-        },
-        .item = null,
-    });
-    defer allocator.free(result);
-    // Should produce a JSON array like: ["result1","result2"]
-    try std.testing.expect(std.mem.indexOf(u8, result, "result1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "result2") != null);
 }
 
 test "render item in map context" {
@@ -573,43 +941,6 @@ test "item without map context returns error" {
         .item = null,
     });
     try std.testing.expectError(error.ItemNotAvailable, err);
-}
-
-test "render debate_responses expression" {
-    const allocator = std.testing.allocator;
-    const result = try render(allocator, "Pick best:\n{{debate_responses}}", .{
-        .input_json = "{}",
-        .step_outputs = &.{},
-        .item = null,
-        .debate_responses = "[\"resp1\",\"resp2\"]",
-    });
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "resp1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "resp2") != null);
-}
-
-test "render chat_history and role expressions" {
-    const allocator = std.testing.allocator;
-    const result = try render(allocator, "Previous:\n{{chat_history}}\nYour role: {{role}}", .{
-        .input_json = "{}",
-        .step_outputs = &.{},
-        .item = null,
-        .chat_history = "Architect: design first",
-        .role = "Frontend Dev",
-    });
-    defer allocator.free(result);
-    try std.testing.expectEqualStrings("Previous:\nArchitect: design first\nYour role: Frontend Dev", result);
-}
-
-test "debate_responses defaults to empty array when not set" {
-    const allocator = std.testing.allocator;
-    const result = try render(allocator, "{{debate_responses}}", .{
-        .input_json = "{}",
-        .step_outputs = &.{},
-        .item = null,
-    });
-    defer allocator.free(result);
-    try std.testing.expectEqualStrings("[]", result);
 }
 
 test "render task.title variable" {

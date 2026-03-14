@@ -183,7 +183,8 @@ pub const TrackerClient = struct {
         const url = try std.fmt.allocPrint(self.allocator, "{s}/artifacts", .{self.base_url});
         defer self.allocator.free(url);
 
-        const body = try std.fmt.allocPrint(self.allocator,
+        const body = try std.fmt.allocPrint(
+            self.allocator,
             "{{\"task_id\":{f},\"run_id\":{f},\"kind\":{f},\"uri\":{f},\"meta\":{s}}}",
             .{
                 std.json.fmt(task_id, .{}),
@@ -224,6 +225,59 @@ pub const TrackerClient = struct {
 
         const result = try self.httpRequest(url, .GET, null, null);
         return result.body;
+    }
+
+    pub fn storeGetValue(self: *TrackerClient, namespace: []const u8, key: []const u8) !?[]const u8 {
+        const namespace_enc = try encodePathSegment(self.allocator, namespace);
+        defer self.allocator.free(namespace_enc);
+        const key_enc = try encodePathSegment(self.allocator, key);
+        defer self.allocator.free(key_enc);
+
+        const url = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/store/{s}/{s}",
+            .{ trimTrailingSlash(self.base_url), namespace_enc, key_enc },
+        );
+        defer self.allocator.free(url);
+
+        const result = try self.httpRequest(url, .GET, null, null);
+        defer self.allocator.free(result.body);
+
+        if (result.status_code == 404) return null;
+        if (result.status_code < 200 or result.status_code >= 300) return null;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, result.body, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+
+        const value = parsed.value.object.get("value") orelse return null;
+        const value_json = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
+        return value_json;
+    }
+
+    pub fn storePutValue(self: *TrackerClient, namespace: []const u8, key: []const u8, value_json: []const u8) !bool {
+        const namespace_enc = try encodePathSegment(self.allocator, namespace);
+        defer self.allocator.free(namespace_enc);
+        const key_enc = try encodePathSegment(self.allocator, key);
+        defer self.allocator.free(key_enc);
+
+        const url = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/store/{s}/{s}",
+            .{ trimTrailingSlash(self.base_url), namespace_enc, key_enc },
+        );
+        defer self.allocator.free(url);
+
+        const body = try std.fmt.allocPrint(self.allocator, "{{\"value\":{s}}}", .{value_json});
+        defer self.allocator.free(body);
+
+        const result = try self.httpRequest(url, .PUT, body, null);
+        defer self.allocator.free(result.body);
+
+        return result.status_code >= 200 and result.status_code < 300;
     }
 
     fn httpRequest(
@@ -271,6 +325,36 @@ pub const TrackerClient = struct {
         };
     }
 };
+
+fn trimTrailingSlash(url: []const u8) []const u8 {
+    if (url.len > 0 and url[url.len - 1] == '/') return url[0 .. url.len - 1];
+    return url;
+}
+
+fn encodePathSegment(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    for (value) |ch| {
+        if (isUnreserved(ch)) {
+            try buf.append(allocator, ch);
+            continue;
+        }
+        try buf.writer(allocator).print("%{X:0>2}", .{ch});
+    }
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn isUnreserved(ch: u8) bool {
+    return (ch >= 'A' and ch <= 'Z') or
+        (ch >= 'a' and ch <= 'z') or
+        (ch >= '0' and ch <= '9') or
+        ch == '-' or
+        ch == '_' or
+        ch == '.' or
+        ch == '~';
+}
 
 fn parseTaskInfo(allocator: std.mem.Allocator, task_value: std.json.Value) !TaskInfo {
     if (task_value != .object) return error.InvalidTaskPayload;
@@ -364,4 +448,12 @@ test "ClaimResponse defaults" {
 test "TrackerClient exposes optimistic transition support" {
     try std.testing.expect(@hasDecl(TrackerClient, "transition"));
     try std.testing.expect(@hasDecl(TrackerClient, "postArtifact"));
+}
+
+test "encodePathSegment percent-encodes reserved characters" {
+    const allocator = std.testing.allocator;
+    const encoded = try encodePathSegment(allocator, "team alpha/key");
+    defer allocator.free(encoded);
+
+    try std.testing.expectEqualStrings("team%20alpha%2Fkey", encoded);
 }

@@ -14,7 +14,7 @@ pub const WorkerInfo = struct {
     id: []const u8,
     url: []const u8,
     token: []const u8,
-    protocol: []const u8 = "webhook", // "webhook", "api_chat", "openai_chat"
+    protocol: []const u8 = "webhook", // "webhook", "api_chat", "openai_chat", "a2a"
     model: ?[]const u8 = null,
     tags_json: []const u8, // JSON array like ["coder","researcher"]
     max_concurrent: i64,
@@ -84,6 +84,23 @@ fn workerMatchesTags(
     return false;
 }
 
+// ── Agent Step Options ────────────────────────────────────────────────
+
+/// Extra fields included in the webhook body when step type is "agent".
+pub const AgentOpts = struct {
+    /// "autonomous" or "managed"
+    mode: ?[]const u8 = null,
+    /// Full callback URL for agent events; if null, omitted from body.
+    /// Typically constructed as: self_url + "/internal/agent-events/{run_id}/{step_id}"
+    callback_url: ?[]const u8 = null,
+    /// Maximum agent iterations; if null, omitted from body.
+    max_iterations: ?i64 = null,
+    /// JSON array of tool names, e.g. "[\"search\",\"code\"]"; if null, omitted from body.
+    tools_json: ?[]const u8 = null,
+    /// Current state JSON to pass to the agent; if null, omitted from body.
+    state_json: ?[]const u8 = null,
+};
+
 // ── HTTP Dispatch ─────────────────────────────────────────────────────
 
 pub fn dispatchStep(
@@ -95,6 +112,24 @@ pub fn dispatchStep(
     run_id: []const u8,
     step_id: []const u8,
     rendered_prompt: []const u8,
+) !DispatchResult {
+    return dispatchStepWithOpts(allocator, worker_url, worker_token, worker_protocol_raw, worker_model, run_id, step_id, rendered_prompt, null);
+}
+
+/// Like dispatchStep but also accepts optional agent-specific fields.
+/// When agent_opts is non-null and the protocol is webhook, the additional
+/// fields (mode, callback_url, max_iterations, tools, state) are merged
+/// into the request body.
+pub fn dispatchStepWithOpts(
+    allocator: std.mem.Allocator,
+    worker_url: []const u8,
+    worker_token: []const u8,
+    worker_protocol_raw: []const u8,
+    worker_model: ?[]const u8,
+    run_id: []const u8,
+    step_id: []const u8,
+    rendered_prompt: []const u8,
+    agent_opts: ?AgentOpts,
 ) !DispatchResult {
     const protocol = worker_protocol.parse(worker_protocol_raw) orelse {
         const err_msg = try std.fmt.allocPrint(allocator, "unsupported worker protocol: {s}", .{worker_protocol_raw});
@@ -131,6 +166,7 @@ pub fn dispatchStep(
         run_id,
         step_id,
         rendered_prompt,
+        agent_opts,
     ) catch |err| switch (err) {
         error.MissingWorkerModel => {
             return DispatchResult{
@@ -195,6 +231,12 @@ pub fn dispatchStep(
     }
 
     const response_data = response_body.written();
+
+    // A2A uses JSON-RPC 2.0 responses; parse them with the A2A-specific parser
+    if (protocol == .a2a) {
+        return try parseA2aResponse(allocator, response_data);
+    }
+
     return try worker_response.parse(allocator, response_data);
 }
 
@@ -205,7 +247,7 @@ pub fn probeWorker(
 ) bool {
     const protocol = worker_protocol.parse(worker_protocol_raw) orelse return false;
 
-    // Async protocols (mqtt/redis_stream) can't be probed via HTTP
+    // Async protocols (mqtt/redis_stream) can't be probed via HTTP; a2a is probed via its own endpoint
     if (protocol == .mqtt or protocol == .redis_stream) return true;
 
     const url = worker_protocol.buildRequestUrl(allocator, worker_url, protocol) catch return false;
@@ -234,12 +276,18 @@ fn buildRequestBody(
     run_id: []const u8,
     step_id: []const u8,
     rendered_prompt: []const u8,
+    agent_opts: ?AgentOpts,
 ) ![]const u8 {
     const session_key = try std.fmt.allocPrint(allocator, "run_{s}_step_{s}", .{ run_id, step_id });
     defer allocator.free(session_key);
 
     switch (protocol) {
         .webhook => {
+            // For agent steps with opts, build an extended body that includes
+            // agent-specific fields alongside the standard webhook fields.
+            if (agent_opts) |opts| {
+                return buildWebhookAgentBody(allocator, session_key, rendered_prompt, opts);
+            }
             return std.json.Stringify.valueAlloc(allocator, .{
                 .message = rendered_prompt,
                 .text = rendered_prompt,
@@ -267,6 +315,9 @@ fn buildRequestBody(
                 .messages = messages[0..],
             }, .{});
         },
+        .a2a => {
+            return buildA2aRequestBody(allocator, rendered_prompt, session_key);
+        },
         .mqtt, .redis_stream => {
             // MQTT and Redis Stream use async dispatch; body built by their respective clients
             return std.json.Stringify.valueAlloc(allocator, .{
@@ -275,6 +326,247 @@ fn buildRequestBody(
             }, .{});
         },
     }
+}
+
+/// Build the webhook JSON body for an agent step, merging standard fields with
+/// agent-specific optional fields (mode, callback_url, max_iterations, tools, state).
+/// Only non-null fields from agent_opts are included in the output.
+fn buildWebhookAgentBody(
+    allocator: std.mem.Allocator,
+    session_key: []const u8,
+    rendered_prompt: []const u8,
+    opts: AgentOpts,
+) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    // Standard webhook fields
+    try buf.appendSlice(allocator, "{\"message\":");
+    try appendJsonString(&buf, allocator, rendered_prompt);
+    try buf.appendSlice(allocator, ",\"text\":");
+    try appendJsonString(&buf, allocator, rendered_prompt);
+    try buf.appendSlice(allocator, ",\"session_key\":");
+    try appendJsonString(&buf, allocator, session_key);
+    try buf.appendSlice(allocator, ",\"session_id\":");
+    try appendJsonString(&buf, allocator, session_key);
+
+    // Optional agent fields
+    if (opts.mode) |mode| {
+        try buf.appendSlice(allocator, ",\"mode\":");
+        try appendJsonString(&buf, allocator, mode);
+    }
+    if (opts.callback_url) |cb_url| {
+        try buf.appendSlice(allocator, ",\"callback_url\":");
+        try appendJsonString(&buf, allocator, cb_url);
+    }
+    if (opts.max_iterations) |max_iter| {
+        const field = try std.fmt.allocPrint(allocator, ",\"max_iterations\":{d}", .{max_iter});
+        defer allocator.free(field);
+        try buf.appendSlice(allocator, field);
+    }
+    if (opts.tools_json) |tools| {
+        // tools_json is already a JSON array string — embed it verbatim
+        try buf.appendSlice(allocator, ",\"tools\":");
+        try buf.appendSlice(allocator, tools);
+    }
+    if (opts.state_json) |state| {
+        // state_json is already a JSON object/value — embed it verbatim
+        try buf.appendSlice(allocator, ",\"state\":");
+        try buf.appendSlice(allocator, state);
+    }
+
+    try buf.append(allocator, '}');
+
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Append a JSON-encoded string (with surrounding quotes and escapes) to buf.
+fn appendJsonString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, s: []const u8) !void {
+    try buf.append(allocator, '"');
+    for (s) |byte| {
+        switch (byte) {
+            '"' => try buf.appendSlice(allocator, "\\\""),
+            '\\' => try buf.appendSlice(allocator, "\\\\"),
+            '\n' => try buf.appendSlice(allocator, "\\n"),
+            '\r' => try buf.appendSlice(allocator, "\\r"),
+            '\t' => try buf.appendSlice(allocator, "\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                const escaped = try std.fmt.allocPrint(allocator, "\\u{x:0>4}", .{byte});
+                defer allocator.free(escaped);
+                try buf.appendSlice(allocator, escaped);
+            },
+            else => try buf.append(allocator, byte),
+        }
+    }
+    try buf.append(allocator, '"');
+}
+
+// ── A2A Protocol Support ──────────────────────────────────────────────
+
+/// Build an A2A (Agent-to-Agent) JSON-RPC 2.0 request body using tasks/send.
+/// The context_id provides session persistence — same context_id means same conversation.
+fn buildA2aRequestBody(
+    allocator: std.mem.Allocator,
+    prompt: []const u8,
+    context_id: []const u8,
+) ![]const u8 {
+    // Build the parts array
+    const parts = [_]struct {
+        type: []const u8,
+        text: []const u8,
+    }{
+        .{ .type = "text", .text = prompt },
+    };
+
+    // Build the message
+    const message = .{
+        .role = "user",
+        .parts = parts[0..],
+    };
+
+    // Build the params
+    const params = .{
+        .message = message,
+        .contextId = context_id,
+    };
+
+    // Build the full JSON-RPC request
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = context_id,
+        .method = "tasks/send",
+        .params = params,
+    }, .{});
+}
+
+/// Parse an A2A JSON-RPC 2.0 response and extract the text from the first artifact.
+/// Expected structure: result.artifacts[0].parts[0].text (or .kind=="text")
+/// Also checks for JSON-RPC error responses.
+fn parseA2aResponse(allocator: std.mem.Allocator, response_body: []const u8) !DispatchResult {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, response_body, .{}) catch {
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "A2A: invalid JSON response",
+        };
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "A2A: response is not a JSON object",
+        };
+    }
+    const obj = parsed.value.object;
+
+    // Check for JSON-RPC error
+    if (obj.get("error")) |err_val| {
+        if (err_val == .object) {
+            if (err_val.object.get("message")) |msg_val| {
+                if (msg_val == .string) {
+                    return DispatchResult{
+                        .output = "",
+                        .success = false,
+                        .error_text = try allocator.dupe(u8, msg_val.string),
+                    };
+                }
+            }
+        }
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "A2A: JSON-RPC error",
+        };
+    }
+
+    // Extract result
+    const result_val = obj.get("result") orelse {
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "A2A: missing result field",
+        };
+    };
+    if (result_val != .object) {
+        return DispatchResult{
+            .output = "",
+            .success = false,
+            .error_text = "A2A: result is not an object",
+        };
+    }
+    const result_obj = result_val.object;
+
+    // Check task status
+    if (result_obj.get("status")) |status_val| {
+        if (status_val == .object) {
+            if (status_val.object.get("state")) |state_val| {
+                if (state_val == .string) {
+                    if (std.mem.eql(u8, state_val.string, "failed")) {
+                        // Extract error message from status if available
+                        if (status_val.object.get("message")) |msg| {
+                            if (msg == .object) {
+                                if (msg.object.get("parts")) |msg_parts| {
+                                    if (msg_parts == .array and msg_parts.array.items.len > 0) {
+                                        const first_part = msg_parts.array.items[0];
+                                        if (first_part == .object) {
+                                            if (first_part.object.get("text")) |t| {
+                                                if (t == .string) {
+                                                    return DispatchResult{
+                                                        .output = "",
+                                                        .success = false,
+                                                        .error_text = try allocator.dupe(u8, t.string),
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return DispatchResult{
+                            .output = "",
+                            .success = false,
+                            .error_text = "A2A: task failed",
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract text from artifacts[0].parts[0].text
+    if (result_obj.get("artifacts")) |artifacts_val| {
+        if (artifacts_val == .array and artifacts_val.array.items.len > 0) {
+            const first_artifact = artifacts_val.array.items[0];
+            if (first_artifact == .object) {
+                if (first_artifact.object.get("parts")) |parts_val| {
+                    if (parts_val == .array and parts_val.array.items.len > 0) {
+                        const first_part = parts_val.array.items[0];
+                        if (first_part == .object) {
+                            // Check for "text" field (A2A uses "text" key for text parts)
+                            if (first_part.object.get("text")) |text_val| {
+                                if (text_val == .string) {
+                                    return DispatchResult{
+                                        .output = try allocator.dupe(u8, text_val.string),
+                                        .success = true,
+                                        .error_text = null,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return DispatchResult{
+        .output = "",
+        .success = false,
+        .error_text = "A2A: no text found in artifacts",
+    };
 }
 
 /// Build the wire-format JSON body for async (MQTT/Redis) dispatch.
@@ -623,8 +915,54 @@ test "buildRequestBody: openai_chat requires model" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(
         error.MissingWorkerModel,
-        buildRequestBody(allocator, .openai_chat, null, "run-1", "step-1", "hello"),
+        buildRequestBody(allocator, .openai_chat, null, "run-1", "step-1", "hello", null),
     );
+}
+
+test "buildWebhookAgentBody: includes all agent fields when present" {
+    const allocator = std.testing.allocator;
+    const opts = AgentOpts{
+        .mode = "autonomous",
+        .callback_url = "http://localhost:8080/internal/agent-events/run-1/step-1",
+        .max_iterations = 25,
+        .tools_json = "[\"search\",\"code\"]",
+        .state_json = "{\"foo\":\"bar\"}",
+    };
+    const body = try buildRequestBody(allocator, .webhook, null, "run-1", "step-1", "do something", opts);
+    defer allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    try std.testing.expectEqualStrings("do something", obj.get("message").?.string);
+    try std.testing.expectEqualStrings("autonomous", obj.get("mode").?.string);
+    try std.testing.expectEqualStrings(
+        "http://localhost:8080/internal/agent-events/run-1/step-1",
+        obj.get("callback_url").?.string,
+    );
+    try std.testing.expectEqual(@as(i64, 25), obj.get("max_iterations").?.integer);
+    // tools and state are embedded JSON — check they round-trip
+    const tools_arr = obj.get("tools").?.array;
+    try std.testing.expectEqual(@as(usize, 2), tools_arr.items.len);
+    try std.testing.expectEqualStrings("search", tools_arr.items[0].string);
+}
+
+test "buildWebhookAgentBody: omits null agent fields" {
+    const allocator = std.testing.allocator;
+    const opts = AgentOpts{ .mode = "managed" };
+    const body = try buildRequestBody(allocator, .webhook, null, "run-1", "step-1", "hello", opts);
+    defer allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    try std.testing.expectEqualStrings("managed", obj.get("mode").?.string);
+    try std.testing.expect(obj.get("callback_url") == null);
+    try std.testing.expect(obj.get("max_iterations") == null);
+    try std.testing.expect(obj.get("tools") == null);
+    try std.testing.expect(obj.get("state") == null);
 }
 
 test "buildAsyncRequestBody: produces valid wire-format JSON with all fields" {
@@ -702,4 +1040,93 @@ test "dispatchRedis: invalid URL returns error" {
     const result = try dispatchRedis(allocator, "http://wrong", "token", "r", "s", "prompt");
     try std.testing.expect(!result.success);
     try std.testing.expectEqualStrings("invalid redis:// URL", result.error_text.?);
+}
+
+test "buildA2aRequestBody: produces valid JSON-RPC 2.0 request" {
+    const allocator = std.testing.allocator;
+    const body = try buildA2aRequestBody(allocator, "Fix the bug in main.py", "run_abc_step_fix");
+    defer allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
+    try std.testing.expectEqualStrings("run_abc_step_fix", obj.get("id").?.string);
+    try std.testing.expectEqualStrings("tasks/send", obj.get("method").?.string);
+
+    const params = obj.get("params").?.object;
+    try std.testing.expectEqualStrings("run_abc_step_fix", params.get("contextId").?.string);
+
+    const message = params.get("message").?.object;
+    try std.testing.expectEqualStrings("user", message.get("role").?.string);
+
+    const parts = message.get("parts").?.array;
+    try std.testing.expectEqual(@as(usize, 1), parts.items.len);
+    try std.testing.expectEqualStrings("text", parts.items[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("Fix the bug in main.py", parts.items[0].object.get("text").?.string);
+}
+
+test "buildRequestBody: a2a protocol produces JSON-RPC body" {
+    const allocator = std.testing.allocator;
+    const body = try buildRequestBody(allocator, .a2a, null, "run-1", "step-1", "hello agent", null);
+    defer allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
+    try std.testing.expectEqualStrings("tasks/send", obj.get("method").?.string);
+    // context_id is "run_{run_id}_step_{step_id}"
+    try std.testing.expectEqualStrings("run_run-1_step_step-1", obj.get("id").?.string);
+}
+
+test "parseA2aResponse: extracts text from successful response" {
+    const allocator = std.testing.allocator;
+    const response =
+        \\{"jsonrpc":"2.0","id":"req-1","result":{"id":"task-1","contextId":"ctx-1","status":{"state":"completed","timestamp":"2025-01-01T00:00:00Z"},"artifacts":[{"artifactId":"a1","parts":[{"kind":"text","text":"The bug has been fixed."}]}]}}
+    ;
+    const result = try parseA2aResponse(allocator, response);
+    defer allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("The bug has been fixed.", result.output);
+}
+
+test "parseA2aResponse: handles JSON-RPC error" {
+    const allocator = std.testing.allocator;
+    const response =
+        \\{"jsonrpc":"2.0","id":"req-1","error":{"code":-32600,"message":"Invalid Request"}}
+    ;
+    const result = try parseA2aResponse(allocator, response);
+    defer allocator.free(result.error_text.?);
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("Invalid Request", result.error_text.?);
+}
+
+test "parseA2aResponse: handles failed task status" {
+    const allocator = std.testing.allocator;
+    const response =
+        \\{"jsonrpc":"2.0","id":"req-1","result":{"id":"task-1","status":{"state":"failed"}}}
+    ;
+    const result = try parseA2aResponse(allocator, response);
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("A2A: task failed", result.error_text.?);
+}
+
+test "parseA2aResponse: handles missing artifacts" {
+    const allocator = std.testing.allocator;
+    const response =
+        \\{"jsonrpc":"2.0","id":"req-1","result":{"id":"task-1","status":{"state":"completed"}}}
+    ;
+    const result = try parseA2aResponse(allocator, response);
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("A2A: no text found in artifacts", result.error_text.?);
+}
+
+test "parseA2aResponse: handles invalid JSON" {
+    const allocator = std.testing.allocator;
+    const result = try parseA2aResponse(allocator, "not json");
+    try std.testing.expect(!result.success);
+    try std.testing.expectEqualStrings("A2A: invalid JSON response", result.error_text.?);
 }

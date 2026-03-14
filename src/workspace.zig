@@ -14,6 +14,52 @@ pub fn sanitizeId(allocator: std.mem.Allocator, id: []const u8) ![]const u8 {
     return buf;
 }
 
+/// Validate that a workspace path is safely contained within the workspace root.
+/// Returns true if the canonical workspace_path starts with the canonical root
+/// and contains no invalid characters. Returns false if a symlink escape or
+/// directory traversal is detected.
+pub fn validateWorkspacePath(allocator: std.mem.Allocator, workspace_root: []const u8, workspace_path: []const u8) bool {
+    // Check for invalid characters (\n, \r, \0) in the raw path
+    for (workspace_path) |ch| {
+        if (ch == '\n' or ch == '\r' or ch == 0) {
+            log.warn("workspace path contains invalid character: {s}", .{workspace_path});
+            return false;
+        }
+    }
+
+    // Canonicalize both paths (resolves symlinks)
+    const canon_root = std.fs.cwd().realpathAlloc(allocator, workspace_root) catch {
+        log.warn("workspace: cannot resolve root {s}", .{workspace_root});
+        return false;
+    };
+    defer allocator.free(canon_root);
+
+    const canon_path = std.fs.cwd().realpathAlloc(allocator, workspace_path) catch {
+        log.warn("workspace: cannot resolve path {s}", .{workspace_path});
+        return false;
+    };
+    defer allocator.free(canon_path);
+
+    // Check that canonical workspace_path starts with canonical workspace_root
+    if (!std.mem.startsWith(u8, canon_path, canon_root)) {
+        log.warn("workspace path escape detected: {s} is not under {s}", .{ canon_path, canon_root });
+        return false;
+    }
+
+    // Ensure there's a separator after the root (not just a prefix match on a longer name)
+    if (canon_path.len > canon_root.len and canon_path[canon_root.len] != std.fs.path.sep) {
+        log.warn("workspace path escape detected: {s} is not under {s}", .{ canon_path, canon_root });
+        return false;
+    }
+
+    return true;
+}
+
+/// Sanitize a directory name by replacing any character not in [A-Za-z0-9._-]
+/// with '_'. This prevents directory traversal via task identifiers.
+/// Alias for sanitizeId — same logic, exported under the canonical name.
+pub const sanitizeDirectoryName = sanitizeId;
+
 /// An isolated workspace directory for a single task.
 pub const Workspace = struct {
     root: []const u8,
@@ -44,6 +90,13 @@ pub const Workspace = struct {
             log.warn("workspace: failed to create workspace dir {s}: {}", .{ path, err });
             return err;
         };
+
+        // Validate the created path is safely under the workspace root
+        if (!validateWorkspacePath(allocator, root, path)) {
+            log.warn("workspace: path validation failed for {s}, refusing to use", .{path});
+            allocator.free(path);
+            return error.PathValidationFailed;
+        }
 
         // If the directory already had contents it was not freshly created
         var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
@@ -114,7 +167,11 @@ pub fn cleanAll(root: []const u8) void {
 /// Returns true when the command exits with code 0, false otherwise.
 /// Times out after `timeout_ms` milliseconds (the child is killed on timeout).
 pub fn runHook(allocator: std.mem.Allocator, command: []const u8, cwd: []const u8, timeout_ms: u64) !bool {
-    const argv = [_][]const u8{ "/bin/sh", "-lc", command };
+    const native = @import("builtin").os.tag;
+    const argv = if (native == .windows)
+        [_][]const u8{ "cmd.exe", "/C", command }
+    else
+        [_][]const u8{ "/bin/sh", "-lc", command };
 
     var child = std.process.Child.init(&argv, allocator);
     child.cwd = cwd;
@@ -215,6 +272,9 @@ test "Workspace create and remove" {
 }
 
 test "runHook executes shell command" {
+    const native = @import("builtin").os.tag;
+    if (native == .windows) return error.SkipZigTest;
+
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -233,6 +293,9 @@ test "runHook executes shell command" {
 }
 
 test "runHook returns false for failing command" {
+    const native = @import("builtin").os.tag;
+    if (native == .windows) return error.SkipZigTest;
+
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -261,4 +324,39 @@ test "cleanAll removes all subdirectories" {
     // Verify they're gone
     try std.testing.expectError(error.FileNotFound, tmp.dir.openDir("task-001", .{}));
     try std.testing.expectError(error.FileNotFound, tmp.dir.openDir("task-002", .{}));
+}
+
+test "validateWorkspacePath accepts safe path" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    // Create a subdirectory
+    try tmp.dir.makeDir("safe-task");
+    const sub_path = try std.fs.path.join(allocator, &.{ root, "safe-task" });
+    defer allocator.free(sub_path);
+
+    try std.testing.expect(validateWorkspacePath(allocator, root, sub_path));
+}
+
+test "validateWorkspacePath rejects path outside root" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    // /tmp is definitely not under the test temp dir
+    try std.testing.expect(!validateWorkspacePath(allocator, root, "/tmp"));
+}
+
+test "sanitizeDirectoryName replaces invalid chars" {
+    const allocator = std.testing.allocator;
+    const result = try sanitizeDirectoryName(allocator, "../../etc/passwd");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings(".._.._etc_passwd", result);
 }

@@ -8,6 +8,9 @@ const metrics_mod = @import("metrics.zig");
 const strategy_mod = @import("strategy.zig");
 const tracker_mod = @import("tracker.zig");
 const config_mod = @import("config.zig");
+const sse_mod = @import("sse.zig");
+const state_mod = @import("state.zig");
+const engine_mod = @import("engine.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -24,6 +27,8 @@ pub const Context = struct {
     strategies: ?*const strategy_mod.StrategyMap = null,
     tracker_state: ?*tracker_mod.TrackerState = null,
     tracker_cfg: ?*const config_mod.TrackerConfig = null,
+    sse_hub: ?*sse_mod.SseHub = null,
+    rate_limits: ?*std.StringHashMap(engine_mod.RateLimitInfo) = null,
 };
 
 pub const HttpResponse = struct {
@@ -41,16 +46,16 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
     }
 
     const path = parsePath(target);
-    const seg0 = getPathSegment(path, 0);
-    const seg1 = getPathSegment(path, 1);
-    const seg2 = getPathSegment(path, 2);
-    const seg3 = getPathSegment(path, 3);
-    const seg4 = getPathSegment(path, 4);
-    const seg5 = getPathSegment(path, 5);
+    const seg0 = decodePathSegment(ctx.allocator, getPathSegment(path, 0));
+    const seg1 = decodePathSegment(ctx.allocator, getPathSegment(path, 1));
+    const seg2 = decodePathSegment(ctx.allocator, getPathSegment(path, 2));
+    const seg3 = decodePathSegment(ctx.allocator, getPathSegment(path, 3));
+    const seg4 = decodePathSegment(ctx.allocator, getPathSegment(path, 4));
 
     const is_get = eql(method, "GET");
     const is_post = eql(method, "POST");
     const is_delete = eql(method, "DELETE");
+    const is_put = eql(method, "PUT");
 
     if (!isAuthorized(ctx, seg0, seg1)) {
         return jsonResponse(401, "{\"error\":{\"code\":\"unauthorized\",\"message\":\"missing or invalid bearer token\"}}");
@@ -99,26 +104,6 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
     // GET /runs/{id}/steps/{step_id}
     if (is_get and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and seg4 == null) {
         return handleGetStep(ctx, seg1.?, seg3.?);
-    }
-
-    // POST /runs/{id}/steps/{step_id}/approve
-    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "approve") and seg5 == null) {
-        return handleApproveStep(ctx, seg1.?, seg3.?);
-    }
-
-    // POST /runs/{id}/steps/{step_id}/reject
-    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "reject") and seg5 == null) {
-        return handleRejectStep(ctx, seg1.?, seg3.?);
-    }
-
-    // POST /runs/{id}/steps/{step_id}/signal
-    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "signal") and seg5 == null) {
-        return handleSignalStep(ctx, seg1.?, seg3.?, body);
-    }
-
-    // GET /runs/{id}/steps/{step_id}/chat
-    if (is_get and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "chat") and seg5 == null) {
-        return handleGetChatTranscript(ctx, seg1.?, seg3.?);
     }
 
     // GET /runs/{id}/events
@@ -171,6 +156,103 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
         return handleTrackerRefresh(ctx);
     }
 
+    // GET /rate-limits
+    if (is_get and eql(seg0, "rate-limits") and seg1 == null) {
+        return handleGetRateLimits(ctx);
+    }
+
+    // ── Workflow CRUD ───────────────────────────────────────────────
+
+    // POST /workflows
+    if (is_post and eql(seg0, "workflows") and seg1 == null) {
+        return handleCreateWorkflow(ctx, body);
+    }
+
+    // GET /workflows
+    if (is_get and eql(seg0, "workflows") and seg1 == null) {
+        return handleListWorkflows(ctx);
+    }
+
+    // GET /workflows/{id}
+    if (is_get and eql(seg0, "workflows") and seg1 != null and seg2 == null) {
+        return handleGetWorkflow(ctx, seg1.?);
+    }
+
+    // PUT /workflows/{id}
+    if (is_put and eql(seg0, "workflows") and seg1 != null and seg2 == null) {
+        return handleUpdateWorkflow(ctx, seg1.?, body);
+    }
+
+    // DELETE /workflows/{id}
+    if (is_delete and eql(seg0, "workflows") and seg1 != null and seg2 == null) {
+        return handleDeleteWorkflow(ctx, seg1.?);
+    }
+
+    // POST /workflows/{id}/validate
+    if (is_post and eql(seg0, "workflows") and seg1 != null and eql(seg2, "validate") and seg3 == null) {
+        return handleValidateWorkflow(ctx, seg1.?);
+    }
+
+    // GET /workflows/{id}/mermaid
+    if (is_get and eql(seg0, "workflows") and seg1 != null and eql(seg2, "mermaid") and seg3 == null) {
+        return handleGetMermaid(ctx, seg1.?);
+    }
+
+    // POST /workflows/{id}/run
+    if (is_post and eql(seg0, "workflows") and seg1 != null and eql(seg2, "run") and seg3 == null) {
+        return handleRunWorkflow(ctx, seg1.?, body);
+    }
+
+    // ── Checkpoint endpoints ────────────────────────────────────────
+
+    // GET /runs/{id}/checkpoints
+    if (is_get and eql(seg0, "runs") and seg1 != null and eql(seg2, "checkpoints") and seg3 == null) {
+        return handleListCheckpoints(ctx, seg1.?);
+    }
+
+    // GET /runs/{id}/checkpoints/{cpId}
+    if (is_get and eql(seg0, "runs") and seg1 != null and eql(seg2, "checkpoints") and seg3 != null and seg4 == null) {
+        return handleGetCheckpoint(ctx, seg1.?, seg3.?);
+    }
+
+    // ── State control endpoints ─────────────────────────────────────
+
+    // POST /runs/{id}/resume
+    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "resume") and seg3 == null) {
+        return handleResumeRun(ctx, seg1.?, body);
+    }
+
+    // POST /runs/fork
+    if (is_post and eql(seg0, "runs") and eql(seg1, "fork") and seg2 == null) {
+        return handleForkRun(ctx, body);
+    }
+
+    // POST /runs/{id}/state
+    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "state") and seg3 == null) {
+        return handleInjectState(ctx, seg1.?, body);
+    }
+
+    // ── SSE stream endpoint ─────────────────────────────────────────
+
+    // GET /runs/{id}/stream
+    if (is_get and eql(seg0, "runs") and seg1 != null and eql(seg2, "stream") and seg3 == null) {
+        return handleStream(ctx, seg1.?, target);
+    }
+
+    // ── Replay endpoint ────────────────────────────────────────────
+
+    // POST /runs/{id}/replay
+    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "replay") and seg3 == null) {
+        return handleReplayRun(ctx, seg1.?, body);
+    }
+
+    // ── Agent events callback ───────────────────────────────────────
+
+    // POST /internal/agent-events/{run_id}/{step_id}
+    if (is_post and eql(seg0, "internal") and eql(seg1, "agent-events") and seg2 != null and seg3 != null and seg4 == null) {
+        return handleAgentEventCallback(ctx, seg2.?, seg3.?, body);
+    }
+
     return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"endpoint not found\"}}");
 }
 
@@ -210,6 +292,36 @@ fn handleEnableDrain(ctx: *Context) HttpResponse {
     };
     drain.store(true, .release);
     return jsonResponse(200, "{\"status\":\"draining\"}");
+}
+
+// ── Rate Limit Handler ──────────────────────────────────────────────
+
+fn handleGetRateLimits(ctx: *Context) HttpResponse {
+    const rl_map = ctx.rate_limits orelse {
+        return jsonResponse(200, "[]");
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    var it = rl_map.iterator();
+    var first = true;
+    while (it.next()) |entry| {
+        if (!first) {
+            buf.append(ctx.allocator, ',') catch continue;
+        }
+        first = false;
+
+        const rl = entry.value_ptr.*;
+        const wid_json = jsonQuoted(ctx.allocator, rl.worker_id) catch continue;
+        const item = std.fmt.allocPrint(ctx.allocator,
+            \\{{"worker_id":{s},"remaining":{d},"limit":{d},"reset_ms":{d},"updated_at_ms":{d}}}
+        , .{ wid_json, rl.remaining, rl.limit, rl.reset_ms, rl.updated_at_ms }) catch continue;
+        buf.appendSlice(ctx.allocator, item) catch continue;
+    }
+
+    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, buf.items);
 }
 
 // ── Worker Handlers ──────────────────────────────────────────────────
@@ -294,7 +406,7 @@ fn handleRegisterWorker(ctx: *Context, body: []const u8) HttpResponse {
     const model = getJsonString(obj, "model");
 
     const protocol = worker_protocol.parse(protocol_raw) orelse {
-        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid protocol (expected webhook|api_chat|openai_chat)\"}}");
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid protocol (expected webhook|api_chat|openai_chat|mqtt|redis_stream|a2a)\"}}");
     };
     if (!worker_protocol.validateUrlForProtocol(url, protocol)) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"webhook protocol requires explicit URL path (for example /webhook)\"}}");
@@ -615,20 +727,50 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
         const ik_json = jsonQuoted(ctx.allocator, ik) catch "";
         break :blk std.fmt.allocPrint(ctx.allocator, ",\"idempotency_key\":{s}", .{ik_json}) catch "";
     } else "";
+    const workflow_id_field = if (run.workflow_id) |wid| blk: {
+        const wid_json = jsonQuoted(ctx.allocator, wid) catch "";
+        break :blk std.fmt.allocPrint(ctx.allocator, ",\"workflow_id\":{s}", .{wid_json}) catch "";
+    } else "";
+
+    // Include state_json if present
+    const state_field = if (run.state_json) |sj|
+        std.fmt.allocPrint(ctx.allocator, ",\"state_json\":{s}", .{sj}) catch ""
+    else
+        "";
+
+    // Count checkpoints
+    const checkpoints = ctx.store.listCheckpoints(ctx.allocator, id) catch &.{};
+    const checkpoint_count: i64 = @intCast(checkpoints.len);
+    const checkpoint_field = std.fmt.allocPrint(ctx.allocator, ",\"checkpoint_count\":{d}", .{checkpoint_count}) catch "";
+
+    // Token accounting (Gap 2)
+    var token_input: i64 = 0;
+    var token_output: i64 = 0;
+    var token_total: i64 = 0;
+    if (ctx.store.getRunTokens(id)) |t| {
+        token_input = t.input;
+        token_output = t.output;
+        token_total = t.total;
+    } else |_| {}
+    const token_field = std.fmt.allocPrint(ctx.allocator, ",\"total_input_tokens\":{d},\"total_output_tokens\":{d},\"total_tokens\":{d}", .{ token_input, token_output, token_total }) catch "";
 
     const run_id_json = jsonQuoted(ctx.allocator, run.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const run_status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s},"steps":{s}}}
+        \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s}{s},"steps":{s}}}
     , .{
         run_id_json,
         run_status_json,
         idempotency_field,
         run.created_at_ms,
         run.updated_at_ms,
+        workflow_id_field,
         error_field,
         started_field,
         ended_field,
+        state_field,
+        checkpoint_field,
+        token_field,
         steps_json,
     }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, resp);
@@ -636,11 +778,12 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
 
 fn handleListRuns(ctx: *Context, target: []const u8) HttpResponse {
     const status_filter = getQueryParam(target, "status");
+    const workflow_id_filter = getQueryParam(target, "workflow_id");
     const limit = parseQueryInt(target, "limit", 100, 1, 1000);
     const offset = parseQueryInt(target, "offset", 0, 0, 1_000_000_000);
 
     // Fetch one extra row to compute has_more.
-    const runs = ctx.store.listRuns(ctx.allocator, status_filter, limit + 1, offset) catch {
+    const runs = ctx.store.listRuns(ctx.allocator, status_filter, workflow_id_filter, limit + 1, offset) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to list runs\"}}");
     };
 
@@ -660,12 +803,17 @@ fn handleListRuns(ctx: *Context, target: []const u8) HttpResponse {
             const ik_json = jsonQuoted(ctx.allocator, ik) catch "";
             break :blk std.fmt.allocPrint(ctx.allocator, ",\"idempotency_key\":{s}", .{ik_json}) catch "";
         } else "";
+        const workflow_id_field = if (r.workflow_id) |wid| blk: {
+            const wid_json = jsonQuoted(ctx.allocator, wid) catch "";
+            break :blk std.fmt.allocPrint(ctx.allocator, ",\"workflow_id\":{s}", .{wid_json}) catch "";
+        } else "";
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}}}
+            \\{{"id":{s},"status":{s}{s}{s},"created_at_ms":{d},"updated_at_ms":{d}}}
         , .{
             run_id_json,
             run_status_json,
             idempotency_field,
+            workflow_id_field,
             r.created_at_ms,
             r.updated_at_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -765,7 +913,10 @@ fn handleCancelRun(ctx: *Context, run_id: []const u8) HttpResponse {
     // 5. Insert event
     ctx.store.insertEvent(run_id, null, "run.cancelled", "{}") catch {};
 
-    // 6. Return 200
+    // 6. Mark SSE queue closed but keep buffered events available for late subscribers.
+    if (ctx.sse_hub) |hub| hub.closeQueue(run_id);
+
+    // 7. Return 200
     const resp = std.fmt.allocPrint(ctx.allocator,
         \\{{"id":"{s}","status":"cancelled"}}
     , .{run_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -814,125 +965,6 @@ fn handleRetryRun(ctx: *Context, run_id: []const u8) HttpResponse {
     return jsonResponse(200, resp);
 }
 
-fn handleApproveStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
-    // 1. Get step from store
-    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
-        .ok => |s| s,
-        .err => |resp| return resp,
-    };
-
-    // 2. Must be "waiting_approval"
-    if (!std.mem.eql(u8, step.status, "waiting_approval")) {
-        const resp = std.fmt.allocPrint(ctx.allocator,
-            \\{{"error":{{"code":"conflict","message":"step is not waiting_approval (current: {s})"}}}}
-        , .{step.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"step is not waiting_approval\"}}");
-        return jsonResponse(409, resp);
-    }
-
-    // 3. Update status to "completed"
-    ctx.store.updateStepStatus(step_id, "completed", null, null, null, step.attempt) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
-    };
-
-    // 4. Insert event
-    ctx.store.insertEvent(run_id, step_id, "step.approved", "{}") catch {};
-
-    // 5. Return 200
-    const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"step_id":"{s}","status":"completed"}}
-    , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    return jsonResponse(200, resp);
-}
-
-fn handleRejectStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
-    // 1. Get step from store
-    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
-        .ok => |s| s,
-        .err => |resp| return resp,
-    };
-
-    // 2. Must be "waiting_approval"
-    if (!std.mem.eql(u8, step.status, "waiting_approval")) {
-        const resp = std.fmt.allocPrint(ctx.allocator,
-            \\{{"error":{{"code":"conflict","message":"step is not waiting_approval (current: {s})"}}}}
-        , .{step.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"step is not waiting_approval\"}}");
-        return jsonResponse(409, resp);
-    }
-
-    // 3. Update status to "failed", set error_text
-    ctx.store.updateStepStatus(step_id, "failed", null, null, "rejected by user", step.attempt) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
-    };
-
-    // 4. Insert event
-    ctx.store.insertEvent(run_id, step_id, "step.rejected", "{}") catch {};
-
-    // 5. Return 200
-    const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"step_id":"{s}","status":"failed"}}
-    , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    return jsonResponse(200, resp);
-}
-
-fn handleSignalStep(ctx: *Context, run_id: []const u8, step_id: []const u8, body: []const u8) HttpResponse {
-    // 1. Get step from store
-    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
-        .ok => |s| s,
-        .err => |resp| return resp,
-    };
-
-    // 2. Must be "waiting_approval" (signal mode uses this status)
-    if (!std.mem.eql(u8, step.status, "waiting_approval")) {
-        const resp = std.fmt.allocPrint(ctx.allocator,
-            \\{{"error":{{"code":"conflict","message":"step is not waiting for signal (current: {s})"}}}}
-        , .{step.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"step is not waiting for signal\"}}");
-        return jsonResponse(409, resp);
-    }
-
-    // 3. Parse optional signal data from body
-    var signal_data: []const u8 = "{}";
-    if (body.len > 0) {
-        const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
-            // Body is not valid JSON; use empty
-            signal_data = "{}";
-            // Continue anyway
-            const output = std.fmt.allocPrint(ctx.allocator,
-                \\{{"output":"signaled","data":{{}}}}
-            , .{}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
-            ctx.store.updateStepStatus(step_id, "completed", null, output, null, step.attempt) catch {
-                return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
-            };
-            ctx.store.insertEvent(run_id, step_id, "step.signaled", output) catch {};
-            const resp = std.fmt.allocPrint(ctx.allocator,
-                \\{{"step_id":"{s}","status":"completed"}}
-            , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-            return jsonResponse(200, resp);
-        };
-        _ = parsed;
-        signal_data = body;
-    }
-
-    // 4. Build output with signal data
-    const output = std.fmt.allocPrint(ctx.allocator,
-        \\{{"output":"signaled","data":{s}}}
-    , .{signal_data}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
-    // 5. Update step to "completed"
-    ctx.store.updateStepStatus(step_id, "completed", null, output, null, step.attempt) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
-    };
-
-    // 6. Insert event
-    ctx.store.insertEvent(run_id, step_id, "step.signaled", output) catch {};
-
-    // 7. Return 200
-    const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"step_id":"{s}","status":"completed"}}
-    , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    return jsonResponse(200, resp);
-}
-
 fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
     // 1. Get events from store
     const events = ctx.store.getEventsByRun(ctx.allocator, run_id) catch {
@@ -973,47 +1005,75 @@ fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
     return jsonResponse(200, json_body);
 }
 
-// ── Chat Transcript Handler ──────────────────────────────────────────
+// ── Workflow CRUD Handlers ───────────────────────────────────────────
 
-fn handleGetChatTranscript(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
-    _ = switch (lookupStepInRun(ctx, run_id, step_id)) {
-        .ok => |s| s,
-        .err => |resp| return resp,
+fn handleCreateWorkflow(ctx: *Context, body: []const u8) HttpResponse {
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"body must be a JSON object\"}}");
+    }
+    const obj = parsed.value.object;
+
+    const name = getJsonString(obj, "name") orelse "untitled";
+
+    // Use provided id or generate one
+    const wf_id = if (getJsonString(obj, "id")) |provided_id|
+        ctx.allocator.dupe(u8, provided_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}")
+    else blk: {
+        const id_buf = ids.generateId();
+        break :blk ctx.allocator.dupe(u8, &id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     };
 
-    const messages = ctx.store.getChatMessages(ctx.allocator, step_id) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get chat messages\"}}");
+    // If definition_json is a sub-key, extract it; otherwise use the whole body
+    const definition_json = if (obj.get("definition_json")) |def_val| blk: {
+        break :blk serializeJsonValue(ctx.allocator, def_val) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize definition\"}}");
+    } else body;
+
+    // Extract version from body (default 1)
+    const version: i64 = if (obj.get("version")) |v| blk: {
+        if (v == .integer) break :blk v.integer;
+        break :blk 1;
+    } else 1;
+
+    ctx.store.createWorkflowWithVersion(wf_id, name, definition_json, version) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to create workflow\"}}");
     };
 
-    // Build JSON array of chat messages
+    const id_json = jsonQuoted(ctx.allocator, wf_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const name_json = jsonQuoted(ctx.allocator, name) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":{s},"name":{s},"version":{d}}}
+    , .{ id_json, name_json, version }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(201, resp);
+}
+
+fn handleListWorkflows(ctx: *Context) HttpResponse {
+    const workflows = ctx.store.listWorkflows(ctx.allocator) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to list workflows\"}}");
+    };
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
 
-    for (messages, 0..) |msg, i| {
+    for (workflows, 0..) |wf, i| {
         if (i > 0) {
             buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         }
-
-        const worker_field = if (msg.worker_id) |wid| blk: {
-            const wid_json = jsonQuoted(ctx.allocator, wid) catch "";
-            break :blk std.fmt.allocPrint(ctx.allocator, ",\"worker_id\":{s}", .{wid_json}) catch "";
-        } else "";
-        const msg_run_id_json = jsonQuoted(ctx.allocator, msg.run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        const msg_step_id_json = jsonQuoted(ctx.allocator, msg.step_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        const role_json = jsonQuoted(ctx.allocator, msg.role) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        const message_json = jsonQuoted(ctx.allocator, msg.message) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
+        const id_json = jsonQuoted(ctx.allocator, wf.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const name_json = jsonQuoted(ctx.allocator, wf.name) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":{d},"run_id":{s},"step_id":{s},"round":{d},"role":{s}{s},"message":{s},"ts_ms":{d}}}
+            \\{{"id":{s},"name":{s},"version":{d},"definition":{s},"created_at_ms":{d},"updated_at_ms":{d}}}
         , .{
-            msg.id,
-            msg_run_id_json,
-            msg_step_id_json,
-            msg.round,
-            role_json,
-            worker_field,
-            message_json,
-            msg.ts_ms,
+            id_json,
+            name_json,
+            wf.version,
+            wf.definition_json,
+            wf.created_at_ms,
+            wf.updated_at_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
         buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     }
@@ -1021,6 +1081,721 @@ fn handleGetChatTranscript(ctx: *Context, run_id: []const u8, step_id: []const u
     buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, json_body);
+}
+
+fn handleGetWorkflow(ctx: *Context, id: []const u8) HttpResponse {
+    const wf = ctx.store.getWorkflow(ctx.allocator, id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get workflow\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"workflow not found\"}}");
+    };
+
+    const id_json = jsonQuoted(ctx.allocator, wf.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const name_json = jsonQuoted(ctx.allocator, wf.name) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":{s},"name":{s},"version":{d},"definition":{s},"created_at_ms":{d},"updated_at_ms":{d}}}
+    , .{
+        id_json,
+        name_json,
+        wf.version,
+        wf.definition_json,
+        wf.created_at_ms,
+        wf.updated_at_ms,
+    }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
+}
+
+fn handleUpdateWorkflow(ctx: *Context, id: []const u8, body: []const u8) HttpResponse {
+    // Verify workflow exists
+    _ = ctx.store.getWorkflow(ctx.allocator, id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get workflow\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"workflow not found\"}}");
+    };
+
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"body must be a JSON object\"}}");
+    }
+    const obj = parsed.value.object;
+
+    const name = getJsonString(obj, "name") orelse "untitled";
+    const definition_json = if (obj.get("definition_json")) |def_val| blk: {
+        break :blk serializeJsonValue(ctx.allocator, def_val) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize definition\"}}");
+    } else body;
+
+    // Extract version if provided
+    const version: ?i64 = if (obj.get("version")) |v| blk: {
+        if (v == .integer) break :blk v.integer;
+        break :blk null;
+    } else null;
+
+    ctx.store.updateWorkflowWithVersion(id, name, definition_json, version) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update workflow\"}}");
+    };
+
+    return jsonResponse(200, "{\"ok\":true}");
+}
+
+fn handleDeleteWorkflow(ctx: *Context, id: []const u8) HttpResponse {
+    // Verify workflow exists
+    _ = ctx.store.getWorkflow(ctx.allocator, id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get workflow\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"workflow not found\"}}");
+    };
+
+    ctx.store.deleteWorkflow(id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to delete workflow\"}}");
+    };
+
+    return jsonResponse(200, "{\"ok\":true}");
+}
+
+fn handleValidateWorkflow(ctx: *Context, id: []const u8) HttpResponse {
+    const wf = ctx.store.getWorkflow(ctx.allocator, id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get workflow\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"workflow not found\"}}");
+    };
+
+    const errors = workflow_validation.validate(ctx.allocator, wf.definition_json) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"validation failed\"}}");
+    };
+
+    // Build validation result
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.appendSlice(ctx.allocator, "{\"valid\":") catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    buf.appendSlice(ctx.allocator, if (errors.len == 0) "true" else "false") catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    buf.appendSlice(ctx.allocator, ",\"errors\":[") catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    for (errors, 0..) |ve, i| {
+        if (i > 0) {
+            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        }
+        const err_type_json = jsonQuoted(ctx.allocator, ve.err_type) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const node_field = if (ve.node) |n| blk: {
+            const n_json = jsonQuoted(ctx.allocator, n) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            break :blk std.fmt.allocPrint(ctx.allocator, ",\"node\":{s}", .{n_json}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        } else "";
+        const key_field = if (ve.key) |k| blk: {
+            const k_json = jsonQuoted(ctx.allocator, k) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            break :blk std.fmt.allocPrint(ctx.allocator, ",\"key\":{s}", .{k_json}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        } else "";
+        const msg_json = jsonQuoted(ctx.allocator, ve.message) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        const entry = std.fmt.allocPrint(ctx.allocator,
+            \\{{"type":{s}{s}{s},"message":{s}}}
+        , .{
+            err_type_json,
+            node_field,
+            key_field,
+            msg_json,
+        }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    }
+
+    buf.appendSlice(ctx.allocator, "]") catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    // Include Mermaid diagram in validation response
+    const mermaid_str = engine_mod.generateMermaid(ctx.allocator, wf.definition_json) catch null;
+    if (mermaid_str) |ms| {
+        const mermaid_json = jsonQuoted(ctx.allocator, ms) catch null;
+        if (mermaid_json) |mj| {
+            buf.appendSlice(ctx.allocator, ",\"mermaid\":") catch {};
+            buf.appendSlice(ctx.allocator, mj) catch {};
+        }
+    }
+
+    buf.appendSlice(ctx.allocator, "}") catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, json_body);
+}
+
+fn handleGetMermaid(ctx: *Context, id: []const u8) HttpResponse {
+    const wf = ctx.store.getWorkflow(ctx.allocator, id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get workflow\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"workflow not found\"}}");
+    };
+
+    const mermaid = engine_mod.generateMermaid(ctx.allocator, wf.definition_json) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to generate mermaid diagram\"}}");
+    };
+
+    return plainResponse(200, mermaid);
+}
+
+fn handleRunWorkflow(ctx: *Context, workflow_id: []const u8, body: []const u8) HttpResponse {
+    // Load workflow
+    const wf = ctx.store.getWorkflow(ctx.allocator, workflow_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get workflow\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"workflow not found\"}}");
+    };
+
+    // Validate
+    const errors = workflow_validation.validate(ctx.allocator, wf.definition_json) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"validation failed\"}}");
+    };
+    if (errors.len > 0) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"workflow has validation errors\"}}");
+    }
+
+    // Parse definition to extract state_schema for initState
+    const def_parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, wf.definition_json, .{}) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to parse workflow definition\"}}");
+    };
+    defer def_parsed.deinit();
+
+    const schema_json = if (def_parsed.value == .object) blk: {
+        if (def_parsed.value.object.get("state_schema")) |ss| {
+            break :blk serializeJsonValue(ctx.allocator, ss) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize schema\"}}");
+        }
+        break :blk "{}";
+    } else "{}";
+
+    // Parse input from request body (or default to {})
+    const input_json = if (body.len > 0) blk: {
+        const bp = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch break :blk "{}";
+        defer bp.deinit();
+        if (bp.value == .object) {
+            if (bp.value.object.get("input")) |input_val| {
+                break :blk serializeJsonValue(ctx.allocator, input_val) catch break :blk "{}";
+            }
+        }
+        break :blk "{}";
+    } else "{}";
+
+    // Init state
+    const initial_state = state_mod.initState(ctx.allocator, input_json, schema_json) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to initialize state\"}}");
+    };
+
+    // Generate run ID
+    const run_id_buf = ids.generateId();
+    const run_id = ctx.allocator.dupe(u8, &run_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    // Create run directly with "running" status to avoid race window where
+    // engine could miss a run created as "pending" then updated to "running".
+    ctx.store.createRunWithStateAndStatus(run_id, workflow_id, wf.definition_json, input_json, initial_state, "running") catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to create run\"}}");
+    };
+
+    // Create initial checkpoint (version 0, no completed nodes)
+    const cp_id_buf = ids.generateId();
+    const cp_id = ctx.allocator.dupe(u8, &cp_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    ctx.store.createCheckpoint(cp_id, run_id, "__init__", null, initial_state, "[]", 0, null) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to create checkpoint\"}}");
+    };
+
+    const run_id_json = jsonQuoted(ctx.allocator, run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":{s},"status":"running"}}
+    , .{run_id_json}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(201, resp);
+}
+
+// ── Checkpoint Handlers ─────────────────────────────────────────────
+
+fn handleListCheckpoints(ctx: *Context, run_id: []const u8) HttpResponse {
+    // Verify run exists
+    _ = ctx.store.getRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get run\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
+    };
+
+    const checkpoints = ctx.store.listCheckpoints(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to list checkpoints\"}}");
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    for (checkpoints, 0..) |cp, i| {
+        if (i > 0) {
+            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        }
+        const entry = buildCheckpointJson(ctx.allocator, cp) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    }
+
+    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, json_body);
+}
+
+fn handleGetCheckpoint(ctx: *Context, run_id: []const u8, cp_id: []const u8) HttpResponse {
+    const cp = ctx.store.getCheckpoint(ctx.allocator, cp_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get checkpoint\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"checkpoint not found\"}}");
+    };
+
+    // Verify checkpoint belongs to run
+    if (!std.mem.eql(u8, cp.run_id, run_id)) {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"checkpoint not found\"}}");
+    }
+
+    const json_body = buildCheckpointJson(ctx.allocator, cp) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, json_body);
+}
+
+fn buildCheckpointJson(allocator: std.mem.Allocator, cp: types.CheckpointRow) ![]const u8 {
+    const id_json = try jsonQuoted(allocator, cp.id);
+    const run_id_json = try jsonQuoted(allocator, cp.run_id);
+    const step_id_json = try jsonQuoted(allocator, cp.step_id);
+    const parent_field = if (cp.parent_id) |pid| blk: {
+        const pid_json = try jsonQuoted(allocator, pid);
+        break :blk try std.fmt.allocPrint(allocator, ",\"parent_id\":{s}", .{pid_json});
+    } else "";
+    const metadata_field = if (cp.metadata_json) |md|
+        try std.fmt.allocPrint(allocator, ",\"metadata\":{s}", .{md})
+    else
+        "";
+
+    return try std.fmt.allocPrint(allocator,
+        \\{{"id":{s},"run_id":{s},"step_id":{s}{s},"state":{s},"completed_nodes":{s},"version":{d}{s},"created_at_ms":{d}}}
+    , .{
+        id_json,
+        run_id_json,
+        step_id_json,
+        parent_field,
+        cp.state_json,
+        cp.completed_nodes_json,
+        cp.version,
+        metadata_field,
+        cp.created_at_ms,
+    });
+}
+
+// ── State Control Handlers ──────────────────────────────────────────
+
+fn handleResumeRun(ctx: *Context, run_id: []const u8, body: []const u8) HttpResponse {
+    // Load run — must be status=interrupted
+    const run = ctx.store.getRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get run\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
+    };
+
+    if (!std.mem.eql(u8, run.status, "interrupted")) {
+        const resp = std.fmt.allocPrint(ctx.allocator,
+            \\{{"error":{{"code":"conflict","message":"run is not interrupted (current: {s})"}}}}
+        , .{run.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"run is not interrupted\"}}");
+        return jsonResponse(409, resp);
+    }
+
+    // Load latest checkpoint
+    const latest_cp = ctx.store.getLatestCheckpoint(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get latest checkpoint\"}}");
+    } orelse {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"no checkpoint found for run\"}}");
+    };
+
+    // Get current state
+    var current_state = latest_cp.state_json;
+
+    // Apply state_updates from body if provided
+    if (body.len > 0) {
+        const bp = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{});
+        if (bp) |body_parsed| {
+            defer body_parsed.deinit();
+
+            if (body_parsed.value == .object) {
+                if (body_parsed.value.object.get("state_updates")) |updates_val| {
+                    const updates_json = serializeJsonValue(ctx.allocator, updates_val) catch {
+                        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize updates\"}}");
+                    };
+
+                    // Get schema from workflow definition
+                    const schema_json = getSchemaFromRun(ctx, run);
+
+                    current_state = state_mod.applyUpdates(ctx.allocator, latest_cp.state_json, updates_json, schema_json) catch {
+                        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to apply state updates\"}}");
+                    };
+                }
+            }
+        } else |_| {
+            // Body is not valid JSON — proceed without updates
+        }
+    }
+
+    // Save new state
+    ctx.store.updateRunState(run_id, current_state) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update run state\"}}");
+    };
+
+    // Set status to running
+    ctx.store.updateRunStatus(run_id, "running", null) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update run status\"}}");
+    };
+
+    const run_id_json = jsonQuoted(ctx.allocator, run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":{s},"status":"running"}}
+    , .{run_id_json}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
+}
+
+fn handleForkRun(ctx: *Context, body: []const u8) HttpResponse {
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"body must be a JSON object\"}}");
+    }
+    const obj = parsed.value.object;
+
+    // Get checkpoint_id from body
+    const checkpoint_id = getJsonString(obj, "checkpoint_id") orelse {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: checkpoint_id\"}}");
+    };
+
+    // Load checkpoint
+    const cp = ctx.store.getCheckpoint(ctx.allocator, checkpoint_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get checkpoint\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"checkpoint not found\"}}");
+    };
+
+    // Load the original run to get workflow_json
+    const orig_run = ctx.store.getRun(ctx.allocator, cp.run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get original run\"}}");
+    } orelse {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"original run not found\"}}");
+    };
+
+    // Apply state_overrides if provided
+    var fork_state = cp.state_json;
+    if (obj.get("state_overrides")) |overrides_val| {
+        const overrides_json = serializeJsonValue(ctx.allocator, overrides_val) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize overrides\"}}");
+        };
+        const schema_json = getSchemaFromRun(ctx, orig_run);
+        fork_state = state_mod.applyUpdates(ctx.allocator, cp.state_json, overrides_json, schema_json) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to apply state overrides\"}}");
+        };
+    }
+
+    // Generate new run ID
+    const new_run_id_buf = ids.generateId();
+    const new_run_id = ctx.allocator.dupe(u8, &new_run_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    // Create forked run
+    ctx.store.createForkedRun(new_run_id, orig_run.workflow_json, fork_state, cp.run_id, checkpoint_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to create forked run\"}}");
+    };
+
+    // Create initial checkpoint for forked run
+    const cp_id_buf = ids.generateId();
+    const cp_id = ctx.allocator.dupe(u8, &cp_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    ctx.store.createCheckpoint(cp_id, new_run_id, "__fork__", checkpoint_id, fork_state, cp.completed_nodes_json, 0, null) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to create checkpoint\"}}");
+    };
+
+    // Set to running
+    ctx.store.updateRunStatus(new_run_id, "running", null) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update run status\"}}");
+    };
+
+    const run_id_json = jsonQuoted(ctx.allocator, new_run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":{s},"status":"running","forked_from_checkpoint":{s}}}
+    , .{ run_id_json, checkpoint_id }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(201, resp);
+}
+
+// ── Replay Handler ──────────────────────────────────────────────────
+
+fn handleReplayRun(ctx: *Context, run_id: []const u8, body: []const u8) HttpResponse {
+    // Parse replay checkpoint ID. Accept both the canonical
+    // `from_checkpoint_id` field and the older `checkpoint_id` alias so
+    // existing clients keep working.
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"body must be a JSON object\"}}");
+    }
+    const obj = parsed.value.object;
+
+    const checkpoint_id = getJsonString(obj, "from_checkpoint_id") orelse getJsonString(obj, "checkpoint_id") orelse {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: from_checkpoint_id or checkpoint_id\"}}");
+    };
+
+    // Load checkpoint
+    const cp = ctx.store.getCheckpoint(ctx.allocator, checkpoint_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get checkpoint\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"checkpoint not found\"}}");
+    };
+
+    // Verify checkpoint belongs to this run
+    if (!std.mem.eql(u8, cp.run_id, run_id)) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"checkpoint does not belong to this run\"}}");
+    }
+
+    // Load run to verify it exists
+    _ = ctx.store.getRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get run\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
+    };
+
+    // Delete steps and checkpoints created after the replay checkpoint
+    // so the engine re-executes from a clean slate.
+    ctx.store.deleteStepsAfterTimestamp(run_id, cp.created_at_ms) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to clear old steps\"}}");
+    };
+    ctx.store.deleteCheckpointsAfterVersion(run_id, cp.version) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to clear old checkpoints\"}}");
+    };
+
+    // Reset run state to checkpoint's state
+    ctx.store.updateRunState(run_id, cp.state_json) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update run state\"}}");
+    };
+
+    // Set run status to running — engine will pick it up on next tick
+    // with the checkpoint's completed_nodes
+    ctx.store.updateRunStatus(run_id, "running", null) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update run status\"}}");
+    };
+
+    ctx.store.insertEvent(run_id, null, "run.replayed", "{}") catch {};
+
+    const run_id_json = jsonQuoted(ctx.allocator, run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const cp_id_json = jsonQuoted(ctx.allocator, checkpoint_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"id":{s},"status":"running","replayed_from_checkpoint":{s}}}
+    , .{ run_id_json, cp_id_json }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
+}
+
+fn handleInjectState(ctx: *Context, run_id: []const u8, body: []const u8) HttpResponse {
+    // Verify run exists
+    const run = ctx.store.getRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get run\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
+    };
+
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"body must be a JSON object\"}}");
+    }
+    const obj = parsed.value.object;
+
+    // Get updates
+    const updates_val = obj.get("updates") orelse {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"missing required field: updates\"}}");
+    };
+    const updates_json = serializeJsonValue(ctx.allocator, updates_val) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize updates\"}}");
+    };
+
+    // Check apply_after_step
+    const apply_after_step = getJsonString(obj, "apply_after_step");
+
+    if (apply_after_step == null) {
+        // Apply immediately to run.state_json
+        const current_state = run.state_json orelse "{}";
+        const schema_json = getSchemaFromRun(ctx, run);
+        const new_state = state_mod.applyUpdates(ctx.allocator, current_state, updates_json, schema_json) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to apply state updates\"}}");
+        };
+        ctx.store.updateRunState(run_id, new_state) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update run state\"}}");
+        };
+        return jsonResponse(200, "{\"applied\":true}");
+    } else {
+        // Insert into pending_state_injections
+        ctx.store.createPendingInjection(run_id, updates_json, apply_after_step) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to create pending injection\"}}");
+        };
+        return jsonResponse(200, "{\"applied\":false,\"pending\":true}");
+    }
+}
+
+// ── SSE Stream Handler ──────────────────────────────────────────────
+
+fn handleStream(ctx: *Context, run_id: []const u8, target: []const u8) HttpResponse {
+    // For now, return the current state and events as a regular JSON response.
+    // Full SSE streaming with held-open connections will be implemented
+    // when the threading model is wired in main.zig (Task 12).
+    //
+    // Supports ?mode=values,tasks,debug,updates,custom query param to filter
+    // which streaming modes the client wants. Default: all modes.
+    const run = ctx.store.getRun(ctx.allocator, run_id) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get run\"}}");
+    } orelse {
+        return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"run not found\"}}");
+    };
+
+    // Parse requested modes from ?mode= query param
+    const mode_param = getQueryParam(target, "mode");
+    const after_seq = if (getQueryParam(target, "after_seq")) |raw|
+        std.fmt.parseInt(u64, raw, 10) catch 0
+    else
+        0;
+    var requested_modes: [5]bool = .{ true, true, true, true, true }; // all modes by default
+    if (mode_param) |modes_str| {
+        // Reset all to false, then enable requested
+        requested_modes = .{ false, false, false, false, false };
+        var mode_it = std.mem.splitScalar(u8, modes_str, ',');
+        while (mode_it.next()) |mode_name| {
+            if (sse_mod.StreamMode.fromString(mode_name)) |m| {
+                requested_modes[@intFromEnum(m)] = true;
+            }
+        }
+    }
+
+    const events_json = if (after_seq == 0) blk: {
+        const events = ctx.store.getEventsByRun(ctx.allocator, run_id) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get events\"}}");
+        };
+
+        // Build events JSON array
+        var events_buf: std.ArrayListUnmanaged(u8) = .empty;
+        events_buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        for (events, 0..) |ev, i| {
+            if (i > 0) {
+                events_buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            }
+            const kind_json = jsonQuoted(ctx.allocator, ev.kind) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            const entry = std.fmt.allocPrint(ctx.allocator,
+                \\{{"kind":{s},"data":{s},"ts_ms":{d}}}
+            , .{ kind_json, ev.data_json, ev.ts_ms }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            events_buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        }
+        events_buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+        break :blk events_buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    } else "[]";
+
+    // If SSE hub available, snapshot queued SSE events filtered by requested modes
+    var sse_events_json: []const u8 = "[]";
+    var latest_stream_seq: u64 = 0;
+    var oldest_stream_seq: u64 = 0;
+    var stream_gap = false;
+    if (ctx.sse_hub) |hub| {
+        const queue = hub.getOrCreateQueue(run_id);
+        const snapshot = queue.snapshotSince(ctx.allocator, after_seq);
+        latest_stream_seq = snapshot.latest_seq;
+        oldest_stream_seq = snapshot.oldest_seq;
+        stream_gap = snapshot.gap_detected;
+        if (snapshot.events.len > 0) {
+            var sse_buf: std.ArrayListUnmanaged(u8) = .empty;
+            sse_buf.append(ctx.allocator, '[') catch {};
+            var first = true;
+            for (snapshot.events) |sse_ev| {
+                // Filter by requested modes
+                if (!requested_modes[@intFromEnum(sse_ev.mode)]) continue;
+                if (!first) {
+                    sse_buf.append(ctx.allocator, ',') catch {};
+                }
+                first = false;
+                const mode_str = sse_ev.mode.toString();
+                const sse_entry = std.fmt.allocPrint(ctx.allocator,
+                    \\{{"seq":{d},"event":{s},"mode":"{s}","data":{s}}}
+                , .{
+                    sse_ev.seq,
+                    jsonQuoted(ctx.allocator, sse_ev.event_type) catch "\"\"",
+                    mode_str,
+                    sse_ev.data,
+                }) catch continue;
+                sse_buf.appendSlice(ctx.allocator, sse_entry) catch {};
+            }
+            sse_buf.append(ctx.allocator, ']') catch {};
+            sse_events_json = sse_buf.toOwnedSlice(ctx.allocator) catch "[]";
+        }
+    }
+
+    const status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const state_field = if (run.state_json) |sj|
+        std.fmt.allocPrint(ctx.allocator, ",\"state\":{s}", .{sj}) catch ""
+    else
+        "";
+
+    const resp = std.fmt.allocPrint(ctx.allocator,
+        \\{{"status":{s}{s},"events":{s},"stream_events":{s},"next_stream_seq":{d},"stream_oldest_seq":{d},"stream_gap":{s}}}
+    , .{
+        status_json,
+        state_field,
+        events_json,
+        sse_events_json,
+        latest_stream_seq,
+        oldest_stream_seq,
+        if (stream_gap) "true" else "false",
+    }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, resp);
+}
+
+// ── Agent Events Callback Handler ───────────────────────────────────
+
+fn handleAgentEventCallback(ctx: *Context, run_id: []const u8, step_id: []const u8, body: []const u8) HttpResponse {
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid JSON body\"}}");
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"body must be a JSON object\"}}");
+    }
+    const obj = parsed.value.object;
+
+    const iteration: i64 = if (obj.get("iteration")) |it| blk: {
+        if (it == .integer) break :blk it.integer;
+        break :blk 0;
+    } else 0;
+
+    const tool = getJsonString(obj, "tool");
+    const args_json = if (obj.get("args")) |args_val|
+        serializeJsonValue(ctx.allocator, args_val) catch null
+    else
+        null;
+    const result_text = getJsonString(obj, "result");
+    const status = getJsonString(obj, "status") orelse "running";
+
+    ctx.store.createAgentEvent(run_id, step_id, iteration, tool, args_json, result_text, status) catch {
+        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to create agent event\"}}");
+    };
+
+    // If sse_hub is available, broadcast as agent_event
+    if (ctx.sse_hub) |hub| {
+        const event_data = std.fmt.allocPrint(ctx.allocator,
+            \\{{"run_id":"{s}","step_id":"{s}","iteration":{d},"status":"{s}"}}
+        , .{ run_id, step_id, iteration, status }) catch "";
+        if (event_data.len > 0) {
+            hub.broadcast(run_id, .{ .event_type = "agent_event", .data = event_data });
+        }
+    }
+
+    return jsonResponse(200, "{\"ok\":true}");
+}
+
+// ── State Helper ────────────────────────────────────────────────────
+
+fn getSchemaFromRun(ctx: *Context, run: types.RunRow) []const u8 {
+    const def_parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, run.workflow_json, .{}) catch return "{}";
+    defer def_parsed.deinit();
+    if (def_parsed.value != .object) return "{}";
+    if (def_parsed.value.object.get("state_schema")) |ss| {
+        return serializeJsonValue(ctx.allocator, ss) catch "{}";
+    }
+    return "{}";
 }
 
 // ── Tracker Handlers ─────────────────────────────────────────────────
@@ -1188,16 +1963,6 @@ fn validationErrorResponse(err: workflow_validation.ValidateError) HttpResponse 
         error.DependsOnItemNotString => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on items must be strings\"}}"),
         error.DependsOnDuplicate => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on contains duplicate step id\"}}"),
         error.DependsOnUnknownStepId => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on references unknown step id\"}}"),
-        error.LoopBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}"),
-        error.SubWorkflowRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}"),
-        error.WaitConditionRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait step requires 'duration_ms', 'until_ms', or 'signal'\"}}"),
-        error.WaitDurationInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.duration_ms must be a non-negative integer\"}}"),
-        error.WaitUntilInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.until_ms must be a non-negative integer\"}}"),
-        error.WaitSignalInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.signal must be a non-empty string\"}}"),
-        error.RouterRoutesRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"router step requires 'routes' field\"}}"),
-        error.SagaBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"saga step requires 'body' field\"}}"),
-        error.DebateCountRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"debate step requires 'count' field\"}}"),
-        error.GroupChatParticipantsRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"group_chat step requires 'participants' field\"}}"),
         error.RetryMustBeObject => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"retry must be an object\"}}"),
         error.MaxAttemptsMustBePositiveInteger => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"retry.max_attempts must be a positive integer\"}}"),
         error.TimeoutMsMustBePositiveInteger => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"timeout_ms must be a positive integer\"}}"),
@@ -1375,6 +2140,14 @@ fn parseQueryInt(target: []const u8, key: []const u8, default_val: i64, min: i64
 fn getPathSegment(segments: [max_segments]?[]const u8, index: usize) ?[]const u8 {
     if (index >= max_segments) return null;
     return segments[index];
+}
+
+fn decodePathSegment(allocator: std.mem.Allocator, segment: ?[]const u8) ?[]const u8 {
+    const raw = segment orelse return null;
+    if (std.mem.indexOfScalar(u8, raw, '%') == null) return raw;
+
+    const encoded = allocator.dupe(u8, raw) catch return raw;
+    return std.Uri.percentDecodeInPlace(encoded);
 }
 
 fn eql(a: ?[]const u8, b: []const u8) bool {
@@ -1581,48 +2354,6 @@ test "API: create run rejects non-positive timeout_ms" {
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
 }
 
-test "API: create run rejects invalid wait duration string" {
-    const allocator = std.testing.allocator;
-    var store = try Store.init(allocator, ":memory:");
-    defer store.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var ctx = Context{
-        .store = &store,
-        .allocator = arena.allocator(),
-    };
-
-    const body =
-        \\{"steps":[{"id":"w1","type":"wait","duration_ms":"abc"}]}
-    ;
-
-    const resp = handleRequest(&ctx, "POST", "/runs", body);
-    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
-}
-
-test "API: create run rejects invalid wait signal type" {
-    const allocator = std.testing.allocator;
-    var store = try Store.init(allocator, ":memory:");
-    defer store.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var ctx = Context{
-        .store = &store,
-        .allocator = arena.allocator(),
-    };
-
-    const body =
-        \\{"steps":[{"id":"w1","type":"wait","signal":1}]}
-    ;
-
-    const resp = handleRequest(&ctx, "POST", "/runs", body);
-    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
-}
-
 test "API: create run rejects duplicate depends_on items" {
     const allocator = std.testing.allocator;
     var store = try Store.init(allocator, ":memory:");
@@ -1662,34 +2393,6 @@ test "API: get step enforces run ownership" {
 
     const resp = handleRequest(&ctx, "GET", "/runs/run-a/steps/step-b-1", "");
     try std.testing.expectEqual(@as(u16, 404), resp.status_code);
-}
-
-test "API: chat transcript escapes message content" {
-    const allocator = std.testing.allocator;
-    var store = try Store.init(allocator, ":memory:");
-    defer store.deinit();
-
-    try store.insertRun("run-chat", null, "running", "{\"steps\":[]}", "{}", "[]");
-    try store.insertStep("step-chat-1", "run-chat", "chat", "group_chat", "completed", "{}", 1, null, null, null);
-    try store.insertChatMessage("run-chat", "step-chat-1", 1, "agent", null, "He said \"go\"\\nline");
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var ctx = Context{
-        .store = &store,
-        .allocator = arena.allocator(),
-    };
-
-    const resp = handleRequest(&ctx, "GET", "/runs/run-chat/steps/step-chat-1/chat", "");
-    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp.body, .{});
-    defer parsed.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
-    const msg = parsed.value.array.items[0].object.get("message").?;
-    try std.testing.expectEqualStrings("He said \"go\"\\nline", msg.string);
 }
 
 test "API: register worker rejects non-array tags" {
@@ -1770,30 +2473,6 @@ test "API: register worker rejects non-positive max_concurrent" {
     ;
     const resp = handleRequest(&ctx, "POST", "/workers", body);
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
-}
-
-test "API: approve route does not match extra path segment" {
-    const allocator = std.testing.allocator;
-    var store = try Store.init(allocator, ":memory:");
-    defer store.deinit();
-
-    try store.insertRun("r1", null, "running", "{\"steps\":[]}", "{}", "[]");
-    try store.insertStep("s1", "r1", "approve-1", "approval", "waiting_approval", "{}", 1, null, null, null);
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var ctx = Context{
-        .store = &store,
-        .allocator = arena.allocator(),
-    };
-
-    const resp = handleRequest(&ctx, "POST", "/runs/r1/steps/s1/approve/extra", "");
-    try std.testing.expectEqual(@as(u16, 404), resp.status_code);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "endpoint not found") != null);
-
-    const step = (try store.getStep(arena.allocator(), "s1")).?;
-    try std.testing.expectEqualStrings("waiting_approval", step.status);
 }
 
 test "API: register openai_chat worker requires model" {
@@ -1941,4 +2620,247 @@ test "API: metrics endpoint returns text format" {
     try std.testing.expectEqual(@as(u16, 200), resp.status_code);
     try std.testing.expect(std.mem.startsWith(u8, resp.content_type, "text/plain"));
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "nullboiler_http_requests_total") != null);
+}
+
+test "API: list runs supports workflow_id filter" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try store.createWorkflowWithVersion("wf_1", "WF 1", "{\"nodes\":{},\"edges\":[]}", 1);
+    try store.createWorkflowWithVersion("wf_2", "WF 2", "{\"nodes\":{},\"edges\":[]}", 1);
+    try store.createRunWithStateAndStatus("r1", "wf_1", "{\"nodes\":{},\"edges\":[]}", "{}", "{}", "running");
+    try store.createRunWithStateAndStatus("r2", "wf_2", "{\"nodes\":{},\"edges\":[]}", "{}", "{}", "running");
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const resp = handleRequest(&ctx, "GET", "/runs?workflow_id=wf_1", "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"workflow_id\":\"wf_1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"workflow_id\":\"wf_2\"") == null);
+}
+
+test "API: replay run from checkpoint" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // Create a run with a checkpoint
+    try store.createRunWithState("r1", null, "{\"nodes\":{}}", "{}", "{\"x\":1}");
+    try store.updateRunStatus("r1", "completed", null);
+    try store.createCheckpoint("cp1", "r1", "step_a", null, "{\"x\":1}", "[\"step_a\"]", 1, null);
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"from_checkpoint_id":"cp1"}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs/r1/replay", body);
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "replayed_from_checkpoint") != null);
+
+    // Verify run state was reset to checkpoint state
+    const run = (try store.getRun(arena.allocator(), "r1")).?;
+    try std.testing.expectEqualStrings("running", run.status);
+    if (run.state_json) |sj| {
+        try std.testing.expectEqualStrings("{\"x\":1}", sj);
+    }
+}
+
+test "API: replay run accepts checkpoint_id alias" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try store.createRunWithState("r1", null, "{\"nodes\":{}}", "{}", "{\"x\":1}");
+    try store.updateRunStatus("r1", "completed", null);
+    try store.createCheckpoint("cp1", "r1", "step_a", null, "{\"x\":1}", "[\"step_a\"]", 1, null);
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"checkpoint_id":"cp1"}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs/r1/replay", body);
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "replayed_from_checkpoint") != null);
+}
+
+test "API: replay run rejects wrong checkpoint" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // Create two runs, checkpoint belongs to r2
+    try store.createRunWithState("r1", null, "{}", "{}", "{}");
+    try store.createRunWithState("r2", null, "{}", "{}", "{}");
+    try store.createCheckpoint("cp_r2", "r2", "step_a", null, "{}", "[]", 1, null);
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"from_checkpoint_id":"cp_r2"}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs/r1/replay", body);
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "does not belong") != null);
+}
+
+test "API: replay run rejects missing checkpoint" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try store.createRunWithState("r1", null, "{}", "{}", "{}");
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const body =
+        \\{"from_checkpoint_id":"nonexistent"}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs/r1/replay", body);
+    try std.testing.expectEqual(@as(u16, 404), resp.status_code);
+}
+
+test "API: replay run rejects missing field" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try store.createRunWithState("r1", null, "{}", "{}", "{}");
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const resp = handleRequest(&ctx, "POST", "/runs/r1/replay", "{}");
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+}
+
+test "API: stream with mode query param" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try store.createRunWithState("r1", null, "{}", "{}", "{\"x\":1}");
+    try store.updateRunStatus("r1", "running", null);
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    // Default (no mode param) — should succeed
+    const resp1 = handleRequest(&ctx, "GET", "/runs/r1/stream", "");
+    try std.testing.expectEqual(@as(u16, 200), resp1.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, resp1.body, "stream_events") != null);
+
+    // With specific modes
+    const resp2 = handleRequest(&ctx, "GET", "/runs/r1/stream?mode=values,debug", "");
+    try std.testing.expectEqual(@as(u16, 200), resp2.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, resp2.body, "stream_events") != null);
+}
+
+test "API: stream supports independent cursors for multiple consumers" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var hub = sse_mod.SseHub.init(allocator);
+    defer hub.deinit();
+
+    try store.createRunWithState("r1", null, "{}", "{}", "{\"x\":1}");
+    try store.updateRunStatus("r1", "running", null);
+
+    const queue = hub.getOrCreateQueue("r1");
+    queue.push(.{ .event_type = "values", .data = "{\"step\":\"n1\"}", .mode = .values });
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .sse_hub = &hub,
+    };
+
+    const consumer_a = handleRequest(&ctx, "GET", "/runs/r1/stream", "");
+    try std.testing.expectEqual(@as(u16, 200), consumer_a.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_a.body, "\"seq\":1") != null);
+
+    const consumer_b = handleRequest(&ctx, "GET", "/runs/r1/stream", "");
+    try std.testing.expectEqual(@as(u16, 200), consumer_b.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_b.body, "\"seq\":1") != null);
+
+    queue.push(.{ .event_type = "updates", .data = "{\"step\":\"n2\"}", .mode = .updates });
+    const consumer_a_next = handleRequest(&ctx, "GET", "/runs/r1/stream?after_seq=1", "");
+    try std.testing.expectEqual(@as(u16, 200), consumer_a_next.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_a_next.body, "\"seq\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_a_next.body, "\"events\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, consumer_a_next.body, "\"next_stream_seq\":2") != null);
+}
+
+test "API: workflow routes decode percent-encoded ids" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try store.createWorkflowWithVersion("wf/alpha beta", "Encoded Workflow", "{\"nodes\":{},\"edges\":[]}", 1);
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const get_resp = handleRequest(&ctx, "GET", "/workflows/wf%2Falpha%20beta", "");
+    try std.testing.expectEqual(@as(u16, 200), get_resp.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, get_resp.body, "\"id\":\"wf/alpha beta\"") != null);
+
+    const validate_resp = handleRequest(&ctx, "POST", "/workflows/wf%2Falpha%20beta/validate", "");
+    try std.testing.expectEqual(@as(u16, 200), validate_resp.status_code);
 }

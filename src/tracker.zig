@@ -257,6 +257,14 @@ pub const Tracker = struct {
         _ = self.used_ports.swapRemove(port);
     }
 
+    /// Startup cleanup: remove all stale workspaces from a previous run.
+    /// Workspaces are ephemeral and will be recreated by hooks when tasks are
+    /// claimed again, so a clean slate on restart is safe.
+    pub fn startupCleanup(self: *Tracker) void {
+        log.info("startup: cleaning terminal workspaces", .{});
+        workspace_mod.cleanAll(self.cfg.workspace.root);
+    }
+
     /// Thread entry point — run the poll loop until shutdown is requested.
     pub fn run(self: *Tracker) void {
         log.info("tracker started (poll_interval={d}ms, agent_id={s})", .{
@@ -265,7 +273,7 @@ pub const Tracker = struct {
         });
 
         // Startup cleanup: remove all stale workspaces from previous run
-        workspace_mod.cleanAll(self.cfg.workspace.root);
+        self.startupCleanup();
 
         const poll_ns: u64 = @as(u64, self.cfg.poll_interval_ms) * std.time.ns_per_ms;
 
@@ -378,6 +386,9 @@ pub const Tracker = struct {
     }
 
     /// Poll NullTickets for each workflow's claim_roles and claim available tasks.
+    // TODO(task14): When nulltickets schema changes are integrated, update WorkflowDef
+    // and pollAndClaim to handle the new workflow format (e.g. new claim fields, task
+    // shape, or execution modes introduced in the orchestration milestone).
     fn pollAndClaim(self: *Tracker, tick_alloc: std.mem.Allocator) void {
         const base_url = self.cfg.url orelse return;
 
