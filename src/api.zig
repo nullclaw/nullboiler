@@ -46,11 +46,11 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
     }
 
     const path = parsePath(target);
-    const seg0 = getPathSegment(path, 0);
-    const seg1 = getPathSegment(path, 1);
-    const seg2 = getPathSegment(path, 2);
-    const seg3 = getPathSegment(path, 3);
-    const seg4 = getPathSegment(path, 4);
+    const seg0 = decodePathSegment(ctx.allocator, getPathSegment(path, 0));
+    const seg1 = decodePathSegment(ctx.allocator, getPathSegment(path, 1));
+    const seg2 = decodePathSegment(ctx.allocator, getPathSegment(path, 2));
+    const seg3 = decodePathSegment(ctx.allocator, getPathSegment(path, 3));
+    const seg4 = decodePathSegment(ctx.allocator, getPathSegment(path, 4));
 
     const is_get = eql(method, "GET");
     const is_post = eql(method, "POST");
@@ -2117,6 +2117,14 @@ fn getPathSegment(segments: [max_segments]?[]const u8, index: usize) ?[]const u8
     return segments[index];
 }
 
+fn decodePathSegment(allocator: std.mem.Allocator, segment: ?[]const u8) ?[]const u8 {
+    const raw = segment orelse return null;
+    if (std.mem.indexOfScalar(u8, raw, '%') == null) return raw;
+
+    const encoded = allocator.dupe(u8, raw) catch return raw;
+    return std.Uri.percentDecodeInPlace(encoded);
+}
+
 fn eql(a: ?[]const u8, b: []const u8) bool {
     if (a) |val| return std.mem.eql(u8, val, b);
     return false;
@@ -2718,4 +2726,27 @@ test "API: stream with mode query param" {
     const resp2 = handleRequest(&ctx, "GET", "/runs/r1/stream?mode=values,debug", "");
     try std.testing.expectEqual(@as(u16, 200), resp2.status_code);
     try std.testing.expect(std.mem.indexOf(u8, resp2.body, "stream_events") != null);
+}
+
+test "API: workflow routes decode percent-encoded ids" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try store.createWorkflowWithVersion("wf/alpha beta", "Encoded Workflow", "{\"nodes\":{},\"edges\":[]}", 1);
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const get_resp = handleRequest(&ctx, "GET", "/workflows/wf%2Falpha%20beta", "");
+    try std.testing.expectEqual(@as(u16, 200), get_resp.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, get_resp.body, "\"id\":\"wf/alpha beta\"") != null);
+
+    const validate_resp = handleRequest(&ctx, "POST", "/workflows/wf%2Falpha%20beta/validate", "");
+    try std.testing.expectEqual(@as(u16, 200), validate_resp.status_code);
 }
