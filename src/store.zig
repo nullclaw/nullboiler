@@ -1418,6 +1418,65 @@ pub const Store = struct {
         }
     }
 
+    // ── Token Accounting ──────────────────────────────────────────────
+
+    pub fn updateStepTokens(self: *Self, step_id: []const u8, input_tokens: i64, output_tokens: i64) !void {
+        const sql = "UPDATE steps SET input_tokens = ?, output_tokens = ?, total_tokens = ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_int64(stmt, 1, input_tokens);
+        _ = c.sqlite3_bind_int64(stmt, 2, output_tokens);
+        _ = c.sqlite3_bind_int64(stmt, 3, input_tokens + output_tokens);
+        _ = c.sqlite3_bind_text(stmt, 4, step_id.ptr, @intCast(step_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn updateRunTokens(self: *Self, run_id: []const u8, input_delta: i64, output_delta: i64) !void {
+        const sql = "UPDATE runs SET total_input_tokens = total_input_tokens + ?, total_output_tokens = total_output_tokens + ?, total_tokens = total_tokens + ? WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_int64(stmt, 1, input_delta);
+        _ = c.sqlite3_bind_int64(stmt, 2, output_delta);
+        _ = c.sqlite3_bind_int64(stmt, 3, input_delta + output_delta);
+        _ = c.sqlite3_bind_text(stmt, 4, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            return error.SqliteStepFailed;
+        }
+    }
+
+    pub fn getRunTokens(self: *Self, run_id: []const u8) !struct { input: i64, output: i64, total: i64 } {
+        const sql = "SELECT COALESCE(total_input_tokens, 0), COALESCE(total_output_tokens, 0), COALESCE(total_tokens, 0) FROM runs WHERE id = ?";
+        var stmt: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
+        }
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, run_id.ptr, @intCast(run_id.len), SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) {
+            return .{ .input = 0, .output = 0, .total = 0 };
+        }
+
+        return .{
+            .input = colInt(stmt, 0),
+            .output = colInt(stmt, 1),
+            .total = colInt(stmt, 2),
+        };
+    }
+
     // ── Checkpoint CRUD ───────────────────────────────────────────────
 
     pub fn createCheckpoint(self: *Self, id: []const u8, run_id: []const u8, step_id: []const u8, parent_id: ?[]const u8, state_json: []const u8, completed_nodes_json: []const u8, version: i64, metadata_json: ?[]const u8) !void {
@@ -2733,6 +2792,35 @@ test "run state management" {
     }
     try std.testing.expectEqualStrings("r3", forked.id);
     try std.testing.expectEqualStrings("pending", forked.status);
+}
+
+test "token accounting: update step and run tokens" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    try s.createRunWithState("r-tok", null, "{}", "{}", "{}");
+    try s.updateRunStatus("r-tok", "running", null);
+    try s.insertStep("s-tok", "r-tok", "task1", "task", "completed", "{}", 1, null, null, null);
+
+    // Update step tokens
+    try s.updateStepTokens("s-tok", 100, 200);
+
+    // Update run tokens
+    try s.updateRunTokens("r-tok", 100, 200);
+
+    // Verify run tokens
+    const tokens = try s.getRunTokens("r-tok");
+    try std.testing.expectEqual(@as(i64, 100), tokens.input);
+    try std.testing.expectEqual(@as(i64, 200), tokens.output);
+    try std.testing.expectEqual(@as(i64, 300), tokens.total);
+
+    // Accumulate more tokens
+    try s.updateRunTokens("r-tok", 50, 75);
+    const tokens2 = try s.getRunTokens("r-tok");
+    try std.testing.expectEqual(@as(i64, 150), tokens2.input);
+    try std.testing.expectEqual(@as(i64, 275), tokens2.output);
+    try std.testing.expectEqual(@as(i64, 425), tokens2.total);
 }
 
 test "workflow version CRUD" {

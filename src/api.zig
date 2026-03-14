@@ -10,6 +10,7 @@ const tracker_mod = @import("tracker.zig");
 const config_mod = @import("config.zig");
 const sse_mod = @import("sse.zig");
 const state_mod = @import("state.zig");
+const engine_mod = @import("engine.zig");
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -27,6 +28,7 @@ pub const Context = struct {
     tracker_state: ?*tracker_mod.TrackerState = null,
     tracker_cfg: ?*const config_mod.TrackerConfig = null,
     sse_hub: ?*sse_mod.SseHub = null,
+    rate_limits: ?*std.StringHashMap(engine_mod.RateLimitInfo) = null,
 };
 
 pub const HttpResponse = struct {
@@ -170,6 +172,11 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
         return handleTrackerRefresh(ctx);
     }
 
+    // GET /rate-limits
+    if (is_get and eql(seg0, "rate-limits") and seg1 == null) {
+        return handleGetRateLimits(ctx);
+    }
+
     // ── Workflow CRUD ───────────────────────────────────────────────
 
     // POST /workflows
@@ -296,6 +303,36 @@ fn handleEnableDrain(ctx: *Context) HttpResponse {
     };
     drain.store(true, .release);
     return jsonResponse(200, "{\"status\":\"draining\"}");
+}
+
+// ── Rate Limit Handler ──────────────────────────────────────────────
+
+fn handleGetRateLimits(ctx: *Context) HttpResponse {
+    const rl_map = ctx.rate_limits orelse {
+        return jsonResponse(200, "[]");
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+
+    var it = rl_map.iterator();
+    var first = true;
+    while (it.next()) |entry| {
+        if (!first) {
+            buf.append(ctx.allocator, ',') catch continue;
+        }
+        first = false;
+
+        const rl = entry.value_ptr.*;
+        const wid_json = jsonQuoted(ctx.allocator, rl.worker_id) catch continue;
+        const item = std.fmt.allocPrint(ctx.allocator,
+            \\{{"worker_id":{s},"remaining":{d},"limit":{d},"reset_ms":{d},"updated_at_ms":{d}}}
+        , .{ wid_json, rl.remaining, rl.limit, rl.reset_ms, rl.updated_at_ms }) catch continue;
+        buf.appendSlice(ctx.allocator, item) catch continue;
+    }
+
+    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    return jsonResponse(200, buf.items);
 }
 
 // ── Worker Handlers ──────────────────────────────────────────────────
@@ -713,10 +750,21 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
     const checkpoint_count: i64 = @intCast(checkpoints.len);
     const checkpoint_field = std.fmt.allocPrint(ctx.allocator, ",\"checkpoint_count\":{d}", .{checkpoint_count}) catch "";
 
+    // Token accounting (Gap 2)
+    var token_input: i64 = 0;
+    var token_output: i64 = 0;
+    var token_total: i64 = 0;
+    if (ctx.store.getRunTokens(id)) |t| {
+        token_input = t.input;
+        token_output = t.output;
+        token_total = t.total;
+    } else |_| {}
+    const token_field = std.fmt.allocPrint(ctx.allocator, ",\"total_input_tokens\":{d},\"total_output_tokens\":{d},\"total_tokens\":{d}", .{ token_input, token_output, token_total }) catch "";
+
     const run_id_json = jsonQuoted(ctx.allocator, run.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const run_status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s},"steps":{s}}}
+        \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s},"steps":{s}}}
     , .{
         run_id_json,
         run_status_json,
@@ -728,6 +776,7 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
         ended_field,
         state_field,
         checkpoint_field,
+        token_field,
         steps_json,
     }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, resp);

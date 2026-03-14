@@ -1,4 +1,7 @@
 const std = @import("std");
+const ids = @import("ids.zig");
+const Store = @import("store.zig").Store;
+const log = std.log.scoped(.workflow_loader);
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -99,6 +102,102 @@ test "loadWorkflows: supports absolute workflow directories" {
     try std.testing.expectEqual(@as(usize, 1), map.count());
     try std.testing.expectEqualStrings("absolute", map.get("absolute").?.pipeline_id);
 }
+
+// ── WorkflowWatcher ──────────────────────────────────────────────────
+
+pub const WorkflowWatcher = struct {
+    dir_path: []const u8,
+    store: *Store,
+    last_check_ms: i64,
+    file_hashes: std.StringHashMap(u64),
+    alloc: std.mem.Allocator,
+
+    pub fn init(alloc: std.mem.Allocator, dir_path: []const u8, store: *Store) WorkflowWatcher {
+        return .{
+            .dir_path = dir_path,
+            .store = store,
+            .last_check_ms = 0,
+            .file_hashes = std.StringHashMap(u64).init(alloc),
+            .alloc = alloc,
+        };
+    }
+
+    pub fn deinit(self: *WorkflowWatcher) void {
+        var it = self.file_hashes.iterator();
+        while (it.next()) |entry| {
+            self.alloc.free(entry.key_ptr.*);
+        }
+        self.file_hashes.deinit();
+    }
+
+    /// Check for changed workflow files. Called periodically from engine tick.
+    pub fn checkForChanges(self: *WorkflowWatcher) void {
+        const now = ids.nowMs();
+        if (now - self.last_check_ms < 5000) return; // check every 5 seconds
+        self.last_check_ms = now;
+
+        var dir = if (std.fs.path.isAbsolute(self.dir_path))
+            std.fs.openDirAbsolute(self.dir_path, .{ .iterate = true }) catch return
+        else
+            std.fs.cwd().openDir(self.dir_path, .{ .iterate = true }) catch return;
+        defer dir.close();
+
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+
+            const contents = dir.readFileAlloc(self.alloc, entry.name, 1024 * 1024) catch continue;
+            defer self.alloc.free(contents);
+
+            // Compute FNV1a hash of content
+            const hash = std.hash.Fnv1a_64.hash(contents);
+
+            // Check if hash changed
+            const existing = self.file_hashes.get(entry.name);
+            if (existing) |prev_hash| {
+                if (prev_hash == hash) continue; // unchanged
+            }
+
+            // Parse and validate
+            const parsed = std.json.parseFromSlice(std.json.Value, self.alloc, contents, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+
+            const obj = parsed.value.object;
+
+            // Extract name and id
+            const wf_name = if (obj.get("name")) |v| (if (v == .string) v.string else null) else null;
+            const wf_id = if (obj.get("id")) |v| (if (v == .string) v.string else null) else null;
+            if (wf_id == null and wf_name == null) continue;
+
+            const id = wf_id orelse wf_name.?;
+            const name = wf_name orelse wf_id.?;
+
+            // Upsert into workflows table
+            // Try insert first; if it fails (duplicate id), update instead
+            self.store.createWorkflow(id, name, contents) catch {
+                self.store.updateWorkflow(id, name, contents) catch continue;
+            };
+
+            // Store hash (need to dupe the key since entry.name is transient)
+            const key_dupe = self.alloc.dupe(u8, entry.name) catch continue;
+            if (existing != null) {
+                // Free old key if we're replacing
+                if (self.file_hashes.fetchPut(key_dupe, hash) catch null) |old| {
+                    self.alloc.free(old.key);
+                }
+            } else {
+                self.file_hashes.put(key_dupe, hash) catch {
+                    self.alloc.free(key_dupe);
+                    continue;
+                };
+            }
+
+            log.info("workflow {s} reloaded", .{id});
+        }
+    }
+};
 
 // ── getWorkflowForPipeline ────────────────────────────────────────────
 
@@ -298,4 +397,42 @@ test "parse workflow with continuation_prompt" {
     const parsed = try std.json.parseFromSlice(WorkflowDef, allocator, json, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     try std.testing.expectEqualStrings("Continue: attempt #{{attempt}}", parsed.value.subprocess.continuation_prompt.?);
+}
+
+test "WorkflowWatcher: detects file changes" {
+    const allocator = std.testing.allocator;
+    var s = try Store.init(allocator, ":memory:");
+    defer s.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+
+    var watcher = WorkflowWatcher.init(allocator, dir_path, &s);
+    defer watcher.deinit();
+
+    // Force last_check_ms to 0 so check runs immediately
+    watcher.last_check_ms = 0;
+
+    // Write a workflow file
+    try tmp.dir.writeFile(.{
+        .sub_path = "test_wf.json",
+        .data =
+        \\{"id":"wf-test","name":"Test WF","nodes":{}}
+        ,
+    });
+
+    watcher.checkForChanges();
+
+    // Verify workflow was inserted
+    const wf = try s.getWorkflow(allocator, "wf-test");
+    try std.testing.expect(wf != null);
+    allocator.free(wf.?.id);
+    allocator.free(wf.?.name);
+    allocator.free(wf.?.definition_json);
+
+    // Verify hash was stored
+    try std.testing.expectEqual(@as(usize, 1), watcher.file_hashes.count());
 }

@@ -85,3 +85,13 @@ CREATE TABLE IF NOT EXISTS pending_writes (
     created_at_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_writes_run ON pending_writes(run_id);
+
+-- Token accounting columns on runs
+ALTER TABLE runs ADD COLUMN total_input_tokens INTEGER DEFAULT 0;
+ALTER TABLE runs ADD COLUMN total_output_tokens INTEGER DEFAULT 0;
+ALTER TABLE runs ADD COLUMN total_tokens INTEGER DEFAULT 0;
+
+-- Token accounting columns on steps
+ALTER TABLE steps ADD COLUMN input_tokens INTEGER DEFAULT 0;
+ALTER TABLE steps ADD COLUMN output_tokens INTEGER DEFAULT 0;
+ALTER TABLE steps ADD COLUMN total_tokens INTEGER DEFAULT 0;

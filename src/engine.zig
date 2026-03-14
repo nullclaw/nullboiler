@@ -36,6 +36,66 @@ const metrics_mod = @import("metrics.zig");
 const async_dispatch = @import("async_dispatch.zig");
 const state_mod = @import("state.zig");
 const sse_mod = @import("sse.zig");
+const workflow_loader = @import("workflow_loader.zig");
+
+// ── Structured Events ────────────────────────────────────────────────
+
+pub const OrchestratorEvent = struct {
+    event_type: EventType,
+    run_id: ?[]const u8,
+    step_id: ?[]const u8,
+    node_name: ?[]const u8,
+    timestamp_ms: i64,
+    metadata_json: ?[]const u8,
+
+    pub const EventType = enum {
+        run_started,
+        run_completed,
+        run_failed,
+        run_interrupted,
+        run_cancelled,
+        step_started,
+        step_completed,
+        step_failed,
+        step_retrying,
+        agent_turn_started,
+        agent_turn_completed,
+        workflow_reloaded,
+        checkpoint_created,
+        state_injected,
+    };
+
+    pub fn eventKindString(et: EventType) []const u8 {
+        return switch (et) {
+            .run_started => "run.started",
+            .run_completed => "run.completed",
+            .run_failed => "run.failed",
+            .run_interrupted => "run.interrupted",
+            .run_cancelled => "run.cancelled",
+            .step_started => "step.started",
+            .step_completed => "step.completed",
+            .step_failed => "step.failed",
+            .step_retrying => "step.retrying",
+            .agent_turn_started => "agent_turn.started",
+            .agent_turn_completed => "agent_turn.completed",
+            .workflow_reloaded => "workflow.reloaded",
+            .checkpoint_created => "checkpoint.created",
+            .state_injected => "state.injected",
+        };
+    }
+
+    pub fn toJson(self: OrchestratorEvent, alloc: std.mem.Allocator) ?[]const u8 {
+        return std.fmt.allocPrint(alloc,
+            \\{{"event_type":"{s}","run_id":"{s}","step_id":"{s}","node_name":"{s}","timestamp_ms":{d}}}
+        , .{
+            eventKindString(self.event_type),
+            self.run_id orelse "",
+            self.step_id orelse "",
+            self.node_name orelse "",
+            self.timestamp_ms,
+        }) catch null;
+    }
+};
 
 // ── Engine ───────────────────────────────────────────────────────────
 
@@ -49,6 +109,14 @@ pub const RuntimeConfig = struct {
     retry_max_elapsed_ms: i64 = 900_000,
 };
 
+pub const RateLimitInfo = struct {
+    worker_id: []const u8,
+    remaining: i64,
+    limit: i64,
+    reset_ms: i64,
+    updated_at_ms: i64,
+};
+
 pub const Engine = struct {
     store: *Store,
     allocator: std.mem.Allocator,
@@ -59,6 +127,8 @@ pub const Engine = struct {
     metrics: ?*metrics_mod.Metrics,
     response_queue: ?*async_dispatch.ResponseQueue,
     sse_hub: ?*sse_mod.SseHub = null,
+    workflow_watcher: ?*workflow_loader.WorkflowWatcher = null,
+    rate_limits: std.StringHashMap(RateLimitInfo),
 
     pub fn init(store: *Store, allocator: std.mem.Allocator, poll_interval_ms: u64) Engine {
         return .{
@@ -71,6 +141,8 @@ pub const Engine = struct {
             .metrics = null,
             .response_queue = null,
             .sse_hub = null,
+            .workflow_watcher = null,
+            .rate_limits = std.StringHashMap(RateLimitInfo).init(allocator),
         };
     }
 
@@ -94,12 +166,92 @@ pub const Engine = struct {
         log.info("engine stopped", .{});
     }
 
+    // ── Config Validation ────────────────────────────────────────────
+
+    /// Validate that the engine configuration is healthy before dispatching
+    /// new work. Returns true if workers exist and the store is reachable.
+    fn validateConfig(self: *Engine) bool {
+        // Check: at least one worker registered and active
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        const workers = self.store.listWorkers(alloc) catch {
+            log.warn("config validation: store query failed (listWorkers)", .{});
+            return false;
+        };
+
+        if (workers.len == 0) {
+            log.warn("config validation: no workers registered", .{});
+            return false;
+        }
+
+        // Check: store connection healthy (simple query)
+        _ = self.store.getActiveRuns(alloc) catch {
+            log.warn("config validation: store connection unhealthy", .{});
+            return false;
+        };
+
+        return true;
+    }
+
+    // ── Structured Event Emission ────────────────────────────────────
+
+    /// Emit a structured OrchestratorEvent: persist to the events table and
+    /// broadcast via SseHub for real-time consumption.
+    fn emitEvent(
+        self: *Engine,
+        alloc: std.mem.Allocator,
+        event_type: OrchestratorEvent.EventType,
+        run_id: ?[]const u8,
+        step_id: ?[]const u8,
+        node_name: ?[]const u8,
+        metadata_json: ?[]const u8,
+    ) void {
+        const ev = OrchestratorEvent{
+            .event_type = event_type,
+            .run_id = run_id,
+            .step_id = step_id,
+            .node_name = node_name,
+            .timestamp_ms = ids.nowMs(),
+            .metadata_json = metadata_json,
+        };
+
+        const kind = OrchestratorEvent.eventKindString(event_type);
+        const data = ev.toJson(alloc) orelse "{}";
+
+        // Persist to events table
+        if (run_id) |rid| {
+            self.store.insertEvent(rid, step_id, kind, data) catch |err| {
+                log.warn("failed to persist event {s}: {}", .{ kind, err });
+            };
+        }
+
+        // Broadcast via SSE
+        if (self.sse_hub) |hub| {
+            if (run_id) |rid| {
+                hub.broadcast(rid, .{ .event_type = kind, .data = data });
+            }
+        }
+    }
+
     // ── tick — single scheduler iteration ────────────────────────────
 
     fn tick(self: *Engine) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const alloc = arena.allocator();
+
+        // Validate config before processing — skip dispatch if unhealthy
+        if (!self.validateConfig()) {
+            log.warn("config validation failed, skipping dispatch this tick", .{});
+            return;
+        }
+
+        // Check for hot-reloaded workflow files
+        if (self.workflow_watcher) |watcher| {
+            watcher.checkForChanges();
+        }
 
         const now_ms = ids.nowMs();
         if (now_ms >= self.next_health_check_at_ms) {
@@ -166,6 +318,9 @@ pub const Engine = struct {
     }
 
     fn processRunWithDepth(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, recursion_depth: u32) !void {
+        // Emit run_started event
+        self.emitEvent(alloc, .run_started, run_row.id, null, null, null);
+
         // 1. Load current state
         var current_state = run_row.state_json orelse "{}";
 
@@ -516,6 +671,7 @@ pub const Engine = struct {
                                 }
                                 if (dms > retry_max_ms) dms = retry_max_ms;
                                 log.info("task node {s} attempt {d}/{d} failed, retrying in {d}ms", .{ node_name, attempt + 1, max_attempts, dms });
+                                self.emitEvent(alloc, .step_retrying, run_row.id, null, node_name, null);
                                 std.Thread.sleep(dms * std.time.ns_per_ms);
                                 continue;
                             }
@@ -717,6 +873,9 @@ pub const Engine = struct {
             try self.store.incrementCheckpointCount(run_row.id);
             try self.store.updateRunState(run_row.id, running_state);
 
+            // Emit structured checkpoint event
+            self.emitEvent(alloc, .checkpoint_created, run_row.id, null, node_name, null);
+
             // Broadcast rich SSE events for all modes
             if (self.sse_hub) |hub| {
                 const node_json_for_sse = getNodeJson(alloc, workflow_json, node_name);
@@ -848,6 +1007,7 @@ pub const Engine = struct {
         const step_id = try alloc.dupe(u8, &step_id_buf);
         try self.store.insertStep(step_id, run_row.id, node_name, node_type, "running", state_json, 1, null, null, null);
         try self.store.insertEvent(run_row.id, step_id, "step.running", "{}");
+        self.emitEvent(alloc, .step_started, run_row.id, step_id, node_name, null);
 
         if (self.metrics) |m| {
             metrics_mod.Metrics.incr(&m.steps_claimed_total);
@@ -881,10 +1041,20 @@ pub const Engine = struct {
         if (result.success) {
             var final_output = result.output;
 
+            // Track cumulative token usage (Gap 2)
+            var total_input_tokens: i64 = 0;
+            var total_output_tokens: i64 = 0;
+            if (result.usage) |usage| {
+                total_input_tokens += usage.input_tokens;
+                total_output_tokens += usage.output_tokens;
+            }
+
             // 7a. Multi-turn continuation for agent nodes
             if (is_agent_node) {
                 const max_turns_val = getNodeFieldInt(alloc, node_json, "max_turns");
                 const continuation_prompt = getNodeField(alloc, node_json, "continuation_prompt");
+                const turn_timeout_ms_val = getNodeFieldInt(alloc, node_json, "turn_timeout_ms");
+                const turn_start_ms = ids.nowMs();
 
                 if (max_turns_val != null and continuation_prompt != null) {
                     const mt = max_turns_val.?;
@@ -892,6 +1062,15 @@ pub const Engine = struct {
                     if (max_turns > 1) {
                         var turn: u32 = 1;
                         while (turn < max_turns) : (turn += 1) {
+                            // Check turn timeout (Gap 4)
+                            if (turn_timeout_ms_val) |timeout_ms| {
+                                const elapsed = ids.nowMs() - turn_start_ms;
+                                if (elapsed > timeout_ms) {
+                                    log.info("agent node {s} turn timeout after {d}ms (limit={d}ms)", .{ node_name, elapsed, timeout_ms });
+                                    break;
+                                }
+                            }
+
                             // Consume pending injections between turns
                             const injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
                             _ = injections;
@@ -912,15 +1091,43 @@ pub const Engine = struct {
 
                             if (!cont_result.success) break;
                             final_output = cont_result.output;
+
+                            // Accumulate token usage from continuation turns
+                            if (cont_result.usage) |usage| {
+                                total_input_tokens += usage.input_tokens;
+                                total_output_tokens += usage.output_tokens;
+                            }
                         }
                         log.info("agent node {s} completed {d} turns", .{ node_name, turn });
                     }
                 }
             }
 
+            // Record token usage (Gap 2)
+            if (total_input_tokens > 0 or total_output_tokens > 0) {
+                self.store.updateStepTokens(step_id, total_input_tokens, total_output_tokens) catch |err| {
+                    log.warn("failed to update step tokens: {}", .{err});
+                };
+                self.store.updateRunTokens(run_row.id, total_input_tokens, total_output_tokens) catch |err| {
+                    log.warn("failed to update run tokens: {}", .{err});
+                };
+            }
+
+            // Store rate limit info (Gap 3)
+            if (result.rate_limit) |rl| {
+                self.rate_limits.put(worker.id, RateLimitInfo{
+                    .worker_id = worker.id,
+                    .remaining = rl.remaining,
+                    .limit = rl.limit,
+                    .reset_ms = rl.reset_ms,
+                    .updated_at_ms = ids.nowMs(),
+                }) catch {};
+            }
+
             const output_json = try wrapOutput(alloc, final_output);
             try self.store.updateStepStatus(step_id, "completed", worker.id, output_json, null, 1);
             try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
+            self.emitEvent(alloc, .step_completed, run_row.id, step_id, node_name, null);
             try self.store.markWorkerSuccess(worker.id, ids.nowMs());
 
             if (self.metrics) |m| {
@@ -941,6 +1148,7 @@ pub const Engine = struct {
             const err_text = result.error_text orelse "dispatch failed";
             try self.store.updateStepStatus(step_id, "failed", worker.id, null, err_text, 1);
             try self.store.insertEvent(run_row.id, step_id, "step.failed", "{}");
+            self.emitEvent(alloc, .step_failed, run_row.id, step_id, node_name, null);
 
             const now_ms = ids.nowMs();
             const circuit_until = now_ms + self.runtime_cfg.worker_circuit_breaker_ms;
@@ -2652,4 +2860,58 @@ test "engine: workflow version stored in checkpoint metadata" {
     try std.testing.expect(latest_cp.metadata_json != null);
     try std.testing.expect(std.mem.indexOf(u8, latest_cp.metadata_json.?, "workflow_version") != null);
     try std.testing.expect(std.mem.indexOf(u8, latest_cp.metadata_json.?, "2") != null);
+}
+
+test "OrchestratorEvent: eventKindString returns correct strings" {
+    try std.testing.expectEqualStrings("run.started", OrchestratorEvent.eventKindString(.run_started));
+    try std.testing.expectEqualStrings("run.completed", OrchestratorEvent.eventKindString(.run_completed));
+    try std.testing.expectEqualStrings("run.failed", OrchestratorEvent.eventKindString(.run_failed));
+    try std.testing.expectEqualStrings("run.interrupted", OrchestratorEvent.eventKindString(.run_interrupted));
+    try std.testing.expectEqualStrings("run.cancelled", OrchestratorEvent.eventKindString(.run_cancelled));
+    try std.testing.expectEqualStrings("step.started", OrchestratorEvent.eventKindString(.step_started));
+    try std.testing.expectEqualStrings("step.completed", OrchestratorEvent.eventKindString(.step_completed));
+    try std.testing.expectEqualStrings("step.failed", OrchestratorEvent.eventKindString(.step_failed));
+    try std.testing.expectEqualStrings("step.retrying", OrchestratorEvent.eventKindString(.step_retrying));
+    try std.testing.expectEqualStrings("checkpoint.created", OrchestratorEvent.eventKindString(.checkpoint_created));
+    try std.testing.expectEqualStrings("state.injected", OrchestratorEvent.eventKindString(.state_injected));
+}
+
+test "OrchestratorEvent: toJson serializes correctly" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const ev = OrchestratorEvent{
+        .event_type = .run_started,
+        .run_id = "run-123",
+        .step_id = null,
+        .node_name = "analyze",
+        .timestamp_ms = 1700000000000,
+        .metadata_json = null,
+    };
+
+    const json_str = ev.toJson(arena.allocator());
+    try std.testing.expect(json_str != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str.?, "run.started") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str.?, "run-123") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str.?, "analyze") != null);
+}
+
+test "engine: validateConfig returns false with no workers" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var engine = Engine.init(&store, allocator, 500);
+    try std.testing.expect(!engine.validateConfig());
+}
+
+test "engine: validateConfig returns true with registered workers" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    try store.insertWorker("w1", "http://localhost:9000", "", "webhook", null, "[]", 5, "config");
+    var engine = Engine.init(&store, allocator, 500);
+    try std.testing.expect(engine.validateConfig());
 }

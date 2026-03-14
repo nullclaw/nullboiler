@@ -244,6 +244,14 @@ pub fn main() !void {
 
     // Start DAG engine on a background thread
     const poll_ms: u64 = cfg.engine.poll_interval_ms;
+    // Hot reload watcher for workflow definitions
+    var wf_watcher: ?workflow_loader.WorkflowWatcher = null;
+    if (cfg.tracker) |tracker_cfg| {
+        if (tracker_cfg.workflows_dir.len > 0) {
+            wf_watcher = workflow_loader.WorkflowWatcher.init(allocator, tracker_cfg.workflows_dir, &store);
+        }
+    }
+
     var engine = engine_mod.Engine.init(&store, allocator, poll_ms);
     engine.configure(.{
         .health_check_interval_ms = @as(i64, @intCast(cfg.engine.health_check_interval_ms)),
@@ -255,6 +263,9 @@ pub fn main() !void {
         .retry_max_elapsed_ms = @as(i64, @intCast(cfg.engine.retry_max_elapsed_ms)),
     }, &metrics);
     engine.response_queue = &response_queue;
+    if (wf_watcher != null) {
+        engine.workflow_watcher = &wf_watcher.?;
+    }
     const engine_thread = try std.Thread.spawn(.{}, engine_mod.Engine.run, .{&engine});
 
     // Spawn listener threads for async protocols
@@ -341,6 +352,9 @@ pub fn main() !void {
         if (tracker_instance) |*ti| {
             ti.deinit();
         }
+        if (wf_watcher) |*ww| {
+            ww.deinit();
+        }
     }
 
     while (true) {
@@ -392,6 +406,7 @@ pub fn main() !void {
             .tracker_state = if (tracker_instance) |*ti| &ti.state else null,
             .tracker_cfg = if (cfg.tracker) |*tc| tc else null,
             .sse_hub = &sse_hub,
+            .rate_limits = &engine.rate_limits,
         };
         const response = api.handleRequest(&ctx, request.method, request.target, request.body);
 
