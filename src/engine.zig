@@ -149,6 +149,8 @@ pub const Engine = struct {
     rate_limits: std.StringHashMap(RateLimitInfo),
     store_fetcher: templates.StoreFetcher,
     store_writer: StoreWriter,
+    trusted_tracker_url: ?[]const u8 = null,
+    trusted_tracker_api_token: ?[]const u8 = null,
     config_valid: bool = false,
     last_config_check_ms: i64 = 0,
 
@@ -170,6 +172,8 @@ pub const Engine = struct {
             .rate_limits = std.StringHashMap(RateLimitInfo).init(allocator),
             .store_fetcher = templates.fetchStoreValueHttp,
             .store_writer = putStoreValueViaHttp,
+            .trusted_tracker_url = null,
+            .trusted_tracker_api_token = null,
             .config_valid = false,
             .last_config_check_ms = 0,
         };
@@ -178,6 +182,11 @@ pub const Engine = struct {
     pub fn configure(self: *Engine, runtime_cfg: RuntimeConfig, metrics: ?*metrics_mod.Metrics) void {
         self.runtime_cfg = runtime_cfg;
         self.metrics = metrics;
+    }
+
+    pub fn setTrustedTrackerAccess(self: *Engine, base_url: ?[]const u8, api_token: ?[]const u8) void {
+        self.trusted_tracker_url = base_url;
+        self.trusted_tracker_api_token = api_token;
     }
 
     pub fn stop(self: *Engine) void {
@@ -405,8 +414,7 @@ pub const Engine = struct {
         // 2d. Collect deferred nodes (Gap 6)
         const deferred_nodes = collectDeferredNodes(alloc, workflow_json);
 
-        // 2c. Get tracker URL / task id for reconciliation and store access.
-        const tracker_url = getRuntimeStringSetting(alloc, current_state, workflow_json, &.{ "tracker_url", "nulltickets_url" });
+        // 2c. Get task id for reconciliation.
         const task_id = getRuntimeStringSetting(alloc, current_state, workflow_json, &.{"task_id"});
 
         // 3. Get completed nodes from latest checkpoint
@@ -991,8 +999,8 @@ pub const Engine = struct {
                 }
 
                 // Reconciliation: check tracker task status between steps
-                if (tracker_url != null and task_id != null) {
-                    if (!reconcileWithTracker(alloc, tracker_url.?, task_id.?)) {
+                if (self.trusted_tracker_url != null and task_id != null) {
+                    if (!reconcileWithTracker(alloc, self.trusted_tracker_url.?, self.trusted_tracker_api_token, task_id.?)) {
                         log.info("run {s} cancelled by reconciliation", .{run_row.id});
                         try self.store.updateRunStatus(run_row.id, "failed", "cancelled by tracker reconciliation");
                         try self.store.insertEvent(run_row.id, null, "run.failed", "{\"reason\":\"tracker_cancelled\"}");
@@ -1535,11 +1543,13 @@ pub const Engine = struct {
     }
 
     fn resolveRuntimeStoreAccess(self: *Engine, alloc: std.mem.Allocator, workflow_json: []const u8, state_json: []const u8) ?templates.StoreAccess {
-        const base_url = getRuntimeStringSetting(alloc, state_json, workflow_json, &.{ "tracker_url", "nulltickets_url" }) orelse return null;
-        const api_token = getRuntimeStringSetting(alloc, state_json, workflow_json, &.{ "tracker_api_token", "nulltickets_api_token" });
+        _ = alloc;
+        _ = workflow_json;
+        _ = state_json;
+        const base_url = self.trusted_tracker_url orelse return null;
         return .{
             .base_url = base_url,
-            .api_token = api_token,
+            .api_token = self.trusted_tracker_api_token,
             .fetcher = self.store_fetcher,
         };
     }
@@ -1925,6 +1935,28 @@ fn putStoreValueViaHttp(
     if (!ok) return error.StoreWriteFailed;
 }
 
+fn encodePathSegment(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    for (value) |byte| {
+        if ((byte >= 'A' and byte <= 'Z') or
+            (byte >= 'a' and byte <= 'z') or
+            (byte >= '0' and byte <= '9') or
+            byte == '-' or
+            byte == '_' or
+            byte == '.' or
+            byte == '~')
+        {
+            try buf.append(allocator, byte);
+        } else {
+            try buf.writer(allocator).print("%{X:0>2}", .{byte});
+        }
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
 var test_store_write_base_url: []const u8 = "";
 var test_store_write_api_token: ?[]const u8 = null;
 var test_store_write_namespace: []const u8 = "";
@@ -2298,8 +2330,11 @@ fn buildSubgraphInput(alloc: std.mem.Allocator, parent_state: []const u8, input_
 
 /// Reconcile with nulltickets: check if associated task has been cancelled.
 /// Returns true if the run should continue, false if it should be cancelled.
-fn reconcileWithTracker(alloc: std.mem.Allocator, tracker_url: []const u8, task_id: []const u8) bool {
-    const url = std.fmt.allocPrint(alloc, "{s}/tasks/{s}", .{ tracker_url, task_id }) catch return true;
+fn reconcileWithTracker(alloc: std.mem.Allocator, tracker_url: []const u8, tracker_api_token: ?[]const u8, task_id: []const u8) bool {
+    const task_id_enc = encodePathSegment(alloc, task_id) catch return true;
+    defer alloc.free(task_id_enc);
+
+    const url = std.fmt.allocPrint(alloc, "{s}/tasks/{s}", .{ tracker_url, task_id_enc }) catch return true;
     defer alloc.free(url);
 
     var client: std.http.Client = .{ .allocator = alloc };
@@ -2308,10 +2343,20 @@ fn reconcileWithTracker(alloc: std.mem.Allocator, tracker_url: []const u8, task_
     var response_body: std.io.Writer.Allocating = .init(alloc);
     defer response_body.deinit();
 
+    var auth_header: ?[]const u8 = null;
+    defer if (auth_header) |value| alloc.free(value);
+    var headers_buf: [1]std.http.Header = undefined;
+    const extra_headers: []const std.http.Header = if (tracker_api_token) |token| blk: {
+        auth_header = std.fmt.allocPrint(alloc, "Bearer {s}", .{token}) catch return true;
+        headers_buf[0] = .{ .name = "Authorization", .value = auth_header.? };
+        break :blk headers_buf[0..1];
+    } else &.{};
+
     const result = client.fetch(.{
         .location = .{ .url = url },
         .method = .GET,
         .response_writer = &response_body.writer,
+        .extra_headers = extra_headers,
     }) catch return true; // network errors -> continue
 
     const status_code = @intFromEnum(result.status);
@@ -3306,7 +3351,7 @@ test "engine: configurable runs inject __config" {
     }
 }
 
-test "engine: transform store_updates writes updated state value using config tracker settings" {
+test "engine: transform store_updates uses trusted tracker settings" {
     const allocator = std.testing.allocator;
     var store = try Store.init(allocator, ":memory:");
     defer store.deinit();
@@ -3322,11 +3367,11 @@ test "engine: transform store_updates writes updated state value using config tr
     ;
 
     try store.createRunWithState("r1", null, wf, "{}", "{}");
-    try store.setConfigJson("r1", "{\"tracker_url\":\"http://tickets.test\",\"tracker_api_token\":\"secret-token\"}");
     try store.updateRunStatus("r1", "running", null);
 
     var engine = Engine.init(&store, allocator, 500);
     engine.store_writer = mockStoreWriter;
+    engine.setTrustedTrackerAccess("http://tickets.test", "secret-token");
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -3342,6 +3387,46 @@ test "engine: transform store_updates writes updated state value using config tr
     try std.testing.expectEqualStrings("project_context", test_store_write_namespace);
     try std.testing.expectEqualStrings("latest_review", test_store_write_key);
     try std.testing.expectEqualStrings("{\"grade\":\"approved\"}", test_store_write_value_json);
+}
+
+test "engine: workflow cannot override trusted tracker settings" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    test_store_write_base_url = "";
+    test_store_write_api_token = null;
+    test_store_write_namespace = "";
+    test_store_write_key = "";
+    test_store_write_value_json = "";
+
+    const wf =
+        \\{"tracker_url":"http://evil.test","tracker_api_token":"evil-token","nodes":{"save":{"type":"transform","updates":"{\"review_result\":{\"grade\":\"approved\"}}","store_updates":{"namespace":"project_context","key":"latest_review","value":"state.review_result"}}},"edges":[["__start__","save"],["save","__end__"]],"schema":{"review_result":{"type":"object","reducer":"last_value"}}}
+    ;
+
+    try store.createRunWithState("r1", null, wf, "{}", "{}");
+    try store.updateRunStatus("r1", "running", null);
+
+    var engine = Engine.init(&store, allocator, 500);
+    engine.store_writer = mockStoreWriter;
+    engine.setTrustedTrackerAccess("http://tickets.test", "secret-token");
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const run_row = (try store.getRun(arena.allocator(), "r1")).?;
+    try engine.processRun(arena.allocator(), run_row);
+
+    try std.testing.expectEqualStrings("http://tickets.test", test_store_write_base_url);
+    try std.testing.expect(test_store_write_api_token != null);
+    try std.testing.expectEqualStrings("secret-token", test_store_write_api_token.?);
+}
+
+test "encodePathSegment percent-encodes reserved characters" {
+    const encoded = try encodePathSegment(std.testing.allocator, "task/alpha beta");
+    defer std.testing.allocator.free(encoded);
+
+    try std.testing.expectEqualStrings("task%2Falpha%20beta", encoded);
 }
 
 test "getWorkflowVersion: extracts version" {

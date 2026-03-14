@@ -262,6 +262,9 @@ pub fn main() !void {
         .retry_jitter_ms = @as(i64, @intCast(cfg.engine.retry_jitter_ms)),
         .retry_max_elapsed_ms = @as(i64, @intCast(cfg.engine.retry_max_elapsed_ms)),
     }, &metrics);
+    if (cfg.tracker) |tracker_cfg| {
+        engine.setTrustedTrackerAccess(tracker_cfg.url, tracker_cfg.api_token);
+    }
     engine.response_queue = &response_queue;
     if (wf_watcher != null) {
         engine.workflow_watcher = &wf_watcher.?;
