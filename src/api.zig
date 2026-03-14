@@ -727,6 +727,10 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
         const ik_json = jsonQuoted(ctx.allocator, ik) catch "";
         break :blk std.fmt.allocPrint(ctx.allocator, ",\"idempotency_key\":{s}", .{ik_json}) catch "";
     } else "";
+    const workflow_id_field = if (run.workflow_id) |wid| blk: {
+        const wid_json = jsonQuoted(ctx.allocator, wid) catch "";
+        break :blk std.fmt.allocPrint(ctx.allocator, ",\"workflow_id\":{s}", .{wid_json}) catch "";
+    } else "";
 
     // Include state_json if present
     const state_field = if (run.state_json) |sj|
@@ -753,13 +757,14 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
     const run_id_json = jsonQuoted(ctx.allocator, run.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const run_status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s},"steps":{s}}}
+        \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}{s}{s}{s}{s}{s}{s}{s},"steps":{s}}}
     , .{
         run_id_json,
         run_status_json,
         idempotency_field,
         run.created_at_ms,
         run.updated_at_ms,
+        workflow_id_field,
         error_field,
         started_field,
         ended_field,
@@ -773,11 +778,12 @@ fn handleGetRun(ctx: *Context, id: []const u8) HttpResponse {
 
 fn handleListRuns(ctx: *Context, target: []const u8) HttpResponse {
     const status_filter = getQueryParam(target, "status");
+    const workflow_id_filter = getQueryParam(target, "workflow_id");
     const limit = parseQueryInt(target, "limit", 100, 1, 1000);
     const offset = parseQueryInt(target, "offset", 0, 0, 1_000_000_000);
 
     // Fetch one extra row to compute has_more.
-    const runs = ctx.store.listRuns(ctx.allocator, status_filter, limit + 1, offset) catch {
+    const runs = ctx.store.listRuns(ctx.allocator, status_filter, workflow_id_filter, limit + 1, offset) catch {
         return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to list runs\"}}");
     };
 
@@ -797,12 +803,17 @@ fn handleListRuns(ctx: *Context, target: []const u8) HttpResponse {
             const ik_json = jsonQuoted(ctx.allocator, ik) catch "";
             break :blk std.fmt.allocPrint(ctx.allocator, ",\"idempotency_key\":{s}", .{ik_json}) catch "";
         } else "";
+        const workflow_id_field = if (r.workflow_id) |wid| blk: {
+            const wid_json = jsonQuoted(ctx.allocator, wid) catch "";
+            break :blk std.fmt.allocPrint(ctx.allocator, ",\"workflow_id\":{s}", .{wid_json}) catch "";
+        } else "";
         const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":{s},"status":{s}{s},"created_at_ms":{d},"updated_at_ms":{d}}}
+            \\{{"id":{s},"status":{s}{s}{s},"created_at_ms":{d},"updated_at_ms":{d}}}
         , .{
             run_id_json,
             run_status_json,
             idempotency_field,
+            workflow_id_field,
             r.created_at_ms,
             r.updated_at_ms,
         }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
@@ -2595,6 +2606,30 @@ test "API: metrics endpoint returns text format" {
     try std.testing.expectEqual(@as(u16, 200), resp.status_code);
     try std.testing.expect(std.mem.startsWith(u8, resp.content_type, "text/plain"));
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "nullboiler_http_requests_total") != null);
+}
+
+test "API: list runs supports workflow_id filter" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try store.createWorkflowWithVersion("wf_1", "WF 1", "{\"nodes\":{},\"edges\":[]}", 1);
+    try store.createWorkflowWithVersion("wf_2", "WF 2", "{\"nodes\":{},\"edges\":[]}", 1);
+    try store.createRunWithStateAndStatus("r1", "wf_1", "{\"nodes\":{},\"edges\":[]}", "{}", "{}", "running");
+    try store.createRunWithStateAndStatus("r2", "wf_2", "{\"nodes\":{},\"edges\":[]}", "{}", "{}", "running");
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const resp = handleRequest(&ctx, "GET", "/runs?workflow_id=wf_1", "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"workflow_id\":\"wf_1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"workflow_id\":\"wf_2\"") == null);
 }
 
 test "API: replay run from checkpoint" {

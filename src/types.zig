@@ -147,6 +147,7 @@ pub const RunRow = struct {
     id: []const u8,
     idempotency_key: ?[]const u8,
     status: []const u8,
+    workflow_id: ?[]const u8 = null,
     workflow_json: []const u8,
     input_json: []const u8,
     callbacks_json: []const u8,

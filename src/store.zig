@@ -403,7 +403,7 @@ pub const Store = struct {
     }
 
     pub fn getRun(self: *Self, allocator: std.mem.Allocator, id: []const u8) !?types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE id = ?";
+        const sql = "SELECT id, idempotency_key, status, workflow_id, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE id = ?";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -418,22 +418,23 @@ pub const Store = struct {
             .id = try allocStr(allocator, stmt, 0),
             .idempotency_key = try allocStrOpt(allocator, stmt, 1),
             .status = try allocStr(allocator, stmt, 2),
-            .workflow_json = try allocStr(allocator, stmt, 3),
-            .input_json = try allocStr(allocator, stmt, 4),
-            .callbacks_json = try allocStr(allocator, stmt, 5),
-            .error_text = try allocStrOpt(allocator, stmt, 6),
-            .created_at_ms = colInt(stmt, 7),
-            .updated_at_ms = colInt(stmt, 8),
-            .started_at_ms = colIntOpt(stmt, 9),
-            .ended_at_ms = colIntOpt(stmt, 10),
-            .state_json = try allocStrOpt(allocator, stmt, 11),
-            .config_json = try allocStrOpt(allocator, stmt, 12),
-            .parent_run_id = try allocStrOpt(allocator, stmt, 13),
+            .workflow_id = try allocStrOpt(allocator, stmt, 3),
+            .workflow_json = try allocStr(allocator, stmt, 4),
+            .input_json = try allocStr(allocator, stmt, 5),
+            .callbacks_json = try allocStr(allocator, stmt, 6),
+            .error_text = try allocStrOpt(allocator, stmt, 7),
+            .created_at_ms = colInt(stmt, 8),
+            .updated_at_ms = colInt(stmt, 9),
+            .started_at_ms = colIntOpt(stmt, 10),
+            .ended_at_ms = colIntOpt(stmt, 11),
+            .state_json = try allocStrOpt(allocator, stmt, 12),
+            .config_json = try allocStrOpt(allocator, stmt, 13),
+            .parent_run_id = try allocStrOpt(allocator, stmt, 14),
         };
     }
 
     pub fn getRunByIdempotencyKey(self: *Self, allocator: std.mem.Allocator, key: []const u8) !?types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE idempotency_key = ? ORDER BY created_at_ms DESC LIMIT 1";
+        const sql = "SELECT id, idempotency_key, status, workflow_id, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE idempotency_key = ? ORDER BY created_at_ms DESC LIMIT 1";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -447,38 +448,45 @@ pub const Store = struct {
             .id = try allocStr(allocator, stmt, 0),
             .idempotency_key = try allocStrOpt(allocator, stmt, 1),
             .status = try allocStr(allocator, stmt, 2),
-            .workflow_json = try allocStr(allocator, stmt, 3),
-            .input_json = try allocStr(allocator, stmt, 4),
-            .callbacks_json = try allocStr(allocator, stmt, 5),
-            .error_text = try allocStrOpt(allocator, stmt, 6),
-            .created_at_ms = colInt(stmt, 7),
-            .updated_at_ms = colInt(stmt, 8),
-            .started_at_ms = colIntOpt(stmt, 9),
-            .ended_at_ms = colIntOpt(stmt, 10),
-            .state_json = try allocStrOpt(allocator, stmt, 11),
-            .config_json = try allocStrOpt(allocator, stmt, 12),
-            .parent_run_id = try allocStrOpt(allocator, stmt, 13),
+            .workflow_id = try allocStrOpt(allocator, stmt, 3),
+            .workflow_json = try allocStr(allocator, stmt, 4),
+            .input_json = try allocStr(allocator, stmt, 5),
+            .callbacks_json = try allocStr(allocator, stmt, 6),
+            .error_text = try allocStrOpt(allocator, stmt, 7),
+            .created_at_ms = colInt(stmt, 8),
+            .updated_at_ms = colInt(stmt, 9),
+            .started_at_ms = colIntOpt(stmt, 10),
+            .ended_at_ms = colIntOpt(stmt, 11),
+            .state_json = try allocStrOpt(allocator, stmt, 12),
+            .config_json = try allocStrOpt(allocator, stmt, 13),
+            .parent_run_id = try allocStrOpt(allocator, stmt, 14),
         };
     }
 
-    pub fn listRuns(self: *Self, allocator: std.mem.Allocator, status_filter: ?[]const u8, limit: i64, offset: i64) ![]types.RunRow {
+    pub fn listRuns(self: *Self, allocator: std.mem.Allocator, status_filter: ?[]const u8, workflow_id_filter: ?[]const u8, limit: i64, offset: i64) ![]types.RunRow {
         var stmt: ?*c.sqlite3_stmt = null;
-        if (status_filter != null) {
-            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE status = ? ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
-            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-                return error.SqlitePrepareFailed;
-            }
-            _ = c.sqlite3_bind_text(stmt, 1, status_filter.?.ptr, @intCast(status_filter.?.len), SQLITE_STATIC);
-            _ = c.sqlite3_bind_int64(stmt, 2, limit);
-            _ = c.sqlite3_bind_int64(stmt, 3, offset);
-        } else {
-            const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
-            if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
-                return error.SqlitePrepareFailed;
-            }
-            _ = c.sqlite3_bind_int64(stmt, 1, limit);
-            _ = c.sqlite3_bind_int64(stmt, 2, offset);
+        const sql =
+            "SELECT id, idempotency_key, status, workflow_id, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id " ++
+            "FROM runs WHERE (? IS NULL OR status = ?) AND (? IS NULL OR workflow_id = ?) ORDER BY created_at_ms DESC LIMIT ? OFFSET ?";
+        if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
+            return error.SqlitePrepareFailed;
         }
+        if (status_filter) |status| {
+            _ = c.sqlite3_bind_text(stmt, 1, status.ptr, @intCast(status.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_text(stmt, 2, status.ptr, @intCast(status.len), SQLITE_STATIC);
+        } else {
+            _ = c.sqlite3_bind_null(stmt, 1);
+            _ = c.sqlite3_bind_null(stmt, 2);
+        }
+        if (workflow_id_filter) |workflow_id| {
+            _ = c.sqlite3_bind_text(stmt, 3, workflow_id.ptr, @intCast(workflow_id.len), SQLITE_STATIC);
+            _ = c.sqlite3_bind_text(stmt, 4, workflow_id.ptr, @intCast(workflow_id.len), SQLITE_STATIC);
+        } else {
+            _ = c.sqlite3_bind_null(stmt, 3);
+            _ = c.sqlite3_bind_null(stmt, 4);
+        }
+        _ = c.sqlite3_bind_int64(stmt, 5, limit);
+        _ = c.sqlite3_bind_int64(stmt, 6, offset);
         defer _ = c.sqlite3_finalize(stmt);
 
         var list: std.ArrayListUnmanaged(types.RunRow) = .empty;
@@ -487,17 +495,18 @@ pub const Store = struct {
                 .id = try allocStr(allocator, stmt, 0),
                 .idempotency_key = try allocStrOpt(allocator, stmt, 1),
                 .status = try allocStr(allocator, stmt, 2),
-                .workflow_json = try allocStr(allocator, stmt, 3),
-                .input_json = try allocStr(allocator, stmt, 4),
-                .callbacks_json = try allocStr(allocator, stmt, 5),
-                .error_text = try allocStrOpt(allocator, stmt, 6),
-                .created_at_ms = colInt(stmt, 7),
-                .updated_at_ms = colInt(stmt, 8),
-                .started_at_ms = colIntOpt(stmt, 9),
-                .ended_at_ms = colIntOpt(stmt, 10),
-                .state_json = try allocStrOpt(allocator, stmt, 11),
-                .config_json = try allocStrOpt(allocator, stmt, 12),
-                .parent_run_id = try allocStrOpt(allocator, stmt, 13),
+                .workflow_id = try allocStrOpt(allocator, stmt, 3),
+                .workflow_json = try allocStr(allocator, stmt, 4),
+                .input_json = try allocStr(allocator, stmt, 5),
+                .callbacks_json = try allocStr(allocator, stmt, 6),
+                .error_text = try allocStrOpt(allocator, stmt, 7),
+                .created_at_ms = colInt(stmt, 8),
+                .updated_at_ms = colInt(stmt, 9),
+                .started_at_ms = colIntOpt(stmt, 10),
+                .ended_at_ms = colIntOpt(stmt, 11),
+                .state_json = try allocStrOpt(allocator, stmt, 12),
+                .config_json = try allocStrOpt(allocator, stmt, 13),
+                .parent_run_id = try allocStrOpt(allocator, stmt, 14),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -522,7 +531,7 @@ pub const Store = struct {
     }
 
     pub fn getActiveRuns(self: *Self, allocator: std.mem.Allocator) ![]types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE status = 'running' ORDER BY created_at_ms DESC";
+        const sql = "SELECT id, idempotency_key, status, workflow_id, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE status = 'running' ORDER BY created_at_ms DESC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -535,17 +544,18 @@ pub const Store = struct {
                 .id = try allocStr(allocator, stmt, 0),
                 .idempotency_key = try allocStrOpt(allocator, stmt, 1),
                 .status = try allocStr(allocator, stmt, 2),
-                .workflow_json = try allocStr(allocator, stmt, 3),
-                .input_json = try allocStr(allocator, stmt, 4),
-                .callbacks_json = try allocStr(allocator, stmt, 5),
-                .error_text = try allocStrOpt(allocator, stmt, 6),
-                .created_at_ms = colInt(stmt, 7),
-                .updated_at_ms = colInt(stmt, 8),
-                .started_at_ms = colIntOpt(stmt, 9),
-                .ended_at_ms = colIntOpt(stmt, 10),
-                .state_json = try allocStrOpt(allocator, stmt, 11),
-                .config_json = try allocStrOpt(allocator, stmt, 12),
-                .parent_run_id = try allocStrOpt(allocator, stmt, 13),
+                .workflow_id = try allocStrOpt(allocator, stmt, 3),
+                .workflow_json = try allocStr(allocator, stmt, 4),
+                .input_json = try allocStr(allocator, stmt, 5),
+                .callbacks_json = try allocStr(allocator, stmt, 6),
+                .error_text = try allocStrOpt(allocator, stmt, 7),
+                .created_at_ms = colInt(stmt, 8),
+                .updated_at_ms = colInt(stmt, 9),
+                .started_at_ms = colIntOpt(stmt, 10),
+                .ended_at_ms = colIntOpt(stmt, 11),
+                .state_json = try allocStrOpt(allocator, stmt, 12),
+                .config_json = try allocStrOpt(allocator, stmt, 13),
+                .parent_run_id = try allocStrOpt(allocator, stmt, 14),
             });
         }
         return list.toOwnedSlice(allocator);
@@ -1896,6 +1906,7 @@ test "Store: insert and get run" {
         allocator.free(run.id);
         if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
+        if (run.workflow_id) |wid| allocator.free(wid);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
         allocator.free(run.callbacks_json);
@@ -1931,6 +1942,7 @@ test "Store: transaction commit persists inserted run" {
         allocator.free(run.id);
         if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
+        if (run.workflow_id) |wid| allocator.free(wid);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
         allocator.free(run.callbacks_json);
@@ -1945,34 +1957,67 @@ test "Store: list runs with filter" {
     try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertRun("r2", null, "pending", "{}", "{}", "[]");
     try s.insertRun("r3", null, "running", "{}", "{}", "[]");
+    try s.createWorkflow("wf_filter", "Filter WF", "{\"nodes\":{}}");
+    try s.createRunWithState("r4", "wf_filter", "{\"nodes\":{}}", "{}", "{}");
 
-    const running = try s.listRuns(allocator, "running", 100, 0);
+    const running = try s.listRuns(allocator, "running", null, 100, 0);
     defer {
         for (running) |r| {
             allocator.free(r.id);
             if (r.idempotency_key) |ik| allocator.free(ik);
             allocator.free(r.status);
+            if (r.workflow_id) |wid| allocator.free(wid);
             allocator.free(r.workflow_json);
             allocator.free(r.input_json);
             allocator.free(r.callbacks_json);
+            if (r.error_text) |et| allocator.free(et);
+            if (r.state_json) |sj| allocator.free(sj);
+            if (r.config_json) |cj| allocator.free(cj);
+            if (r.parent_run_id) |pid| allocator.free(pid);
         }
         allocator.free(running);
     }
     try std.testing.expectEqual(@as(usize, 2), running.len);
 
-    const all = try s.listRuns(allocator, null, 100, 0);
+    const all = try s.listRuns(allocator, null, null, 100, 0);
     defer {
         for (all) |r| {
             allocator.free(r.id);
             if (r.idempotency_key) |ik| allocator.free(ik);
             allocator.free(r.status);
+            if (r.workflow_id) |wid| allocator.free(wid);
             allocator.free(r.workflow_json);
             allocator.free(r.input_json);
             allocator.free(r.callbacks_json);
+            if (r.error_text) |et| allocator.free(et);
+            if (r.state_json) |sj| allocator.free(sj);
+            if (r.config_json) |cj| allocator.free(cj);
+            if (r.parent_run_id) |pid| allocator.free(pid);
         }
         allocator.free(all);
     }
-    try std.testing.expectEqual(@as(usize, 3), all.len);
+    try std.testing.expectEqual(@as(usize, 4), all.len);
+
+    const filtered = try s.listRuns(allocator, null, "wf_filter", 100, 0);
+    defer {
+        for (filtered) |r| {
+            allocator.free(r.id);
+            if (r.idempotency_key) |ik| allocator.free(ik);
+            allocator.free(r.status);
+            if (r.workflow_id) |wid| allocator.free(wid);
+            allocator.free(r.workflow_json);
+            allocator.free(r.input_json);
+            allocator.free(r.callbacks_json);
+            if (r.error_text) |et| allocator.free(et);
+            if (r.state_json) |sj| allocator.free(sj);
+            if (r.config_json) |cj| allocator.free(cj);
+            if (r.parent_run_id) |pid| allocator.free(pid);
+        }
+        allocator.free(filtered);
+    }
+    try std.testing.expectEqual(@as(usize, 1), filtered.len);
+    try std.testing.expectEqualStrings("r4", filtered[0].id);
+    try std.testing.expectEqualStrings("wf_filter", filtered[0].workflow_id.?);
 }
 
 test "Store: update run status" {
@@ -1986,6 +2031,7 @@ test "Store: update run status" {
         allocator.free(run.id);
         if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
+        if (run.workflow_id) |wid| allocator.free(wid);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
         allocator.free(run.callbacks_json);
@@ -2009,9 +2055,14 @@ test "Store: get active runs" {
             allocator.free(r.id);
             if (r.idempotency_key) |ik| allocator.free(ik);
             allocator.free(r.status);
+            if (r.workflow_id) |wid| allocator.free(wid);
             allocator.free(r.workflow_json);
             allocator.free(r.input_json);
             allocator.free(r.callbacks_json);
+            if (r.error_text) |et| allocator.free(et);
+            if (r.state_json) |sj| allocator.free(sj);
+            if (r.config_json) |cj| allocator.free(cj);
+            if (r.parent_run_id) |pid| allocator.free(pid);
         }
         allocator.free(active);
     }
@@ -2460,6 +2511,7 @@ test "run state management" {
         allocator.free(run.id);
         if (run.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run.status);
+        if (run.workflow_id) |wid| allocator.free(wid);
         allocator.free(run.workflow_json);
         allocator.free(run.input_json);
         allocator.free(run.callbacks_json);
@@ -2478,6 +2530,7 @@ test "run state management" {
         allocator.free(run2.id);
         if (run2.idempotency_key) |ik| allocator.free(ik);
         allocator.free(run2.status);
+        if (run2.workflow_id) |wid| allocator.free(wid);
         allocator.free(run2.workflow_json);
         allocator.free(run2.input_json);
         allocator.free(run2.callbacks_json);
@@ -2485,6 +2538,7 @@ test "run state management" {
         if (run2.state_json) |sj| allocator.free(sj);
     }
     try std.testing.expectEqualStrings("r2", run2.id);
+    try std.testing.expectEqualStrings("wf1", run2.workflow_id.?);
 
     // Update run state
     try s.updateRunState("r1", "{\"counter\":42}");
@@ -2501,6 +2555,7 @@ test "run state management" {
         allocator.free(forked.id);
         if (forked.idempotency_key) |ik| allocator.free(ik);
         allocator.free(forked.status);
+        if (forked.workflow_id) |wid| allocator.free(wid);
         allocator.free(forked.workflow_json);
         allocator.free(forked.input_json);
         allocator.free(forked.callbacks_json);
