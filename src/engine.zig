@@ -633,7 +633,7 @@ pub const Engine = struct {
                 // Execute based on type
                 if (std.mem.eql(u8, node_type, "route")) {
                     // Route: evaluate routing logic, no worker dispatch
-                    const result = try self.executeRouteNode(alloc, node_name, node_json, running_state);
+                    const result = try executeRouteNode(alloc, node_json, running_state);
                     if (result.route_value) |rv| {
                         try route_results.put(try alloc.dupe(u8, node_name), rv);
                     }
@@ -1070,10 +1070,7 @@ pub const Engine = struct {
 
     // ── executeRouteNode ─────────────────────────────────────────────
 
-    fn executeRouteNode(self: *Engine, alloc: std.mem.Allocator, node_name: []const u8, node_json: []const u8, state_json: []const u8) !RouteNodeResult {
-        _ = self;
-        _ = node_name;
-
+    fn executeRouteNode(alloc: std.mem.Allocator, node_json: []const u8, state_json: []const u8) !RouteNodeResult {
         // Get the input path to read from state
         const input_path = getNodeField(alloc, node_json, "input") orelse "state.route_input";
         const default_route = getNodeField(alloc, node_json, "default");
@@ -1092,6 +1089,26 @@ pub const Engine = struct {
         return RouteNodeResult{ .route_value = resolveDeclaredRouteValue(alloc, node_json, route_key) };
     }
 
+    fn buildWorkerInfos(self: *Engine, alloc: std.mem.Allocator) ![]dispatch.WorkerInfo {
+        const workers = try self.store.listWorkers(alloc);
+        var worker_infos: std.ArrayListUnmanaged(dispatch.WorkerInfo) = .empty;
+        for (workers) |worker| {
+            const current_tasks = self.store.countRunningStepsByWorker(worker.id) catch 0;
+            try worker_infos.append(alloc, .{
+                .id = worker.id,
+                .url = worker.url,
+                .token = worker.token,
+                .protocol = worker.protocol,
+                .model = worker.model,
+                .tags_json = worker.tags_json,
+                .max_concurrent = worker.max_concurrent,
+                .status = worker.status,
+                .current_tasks = current_tasks,
+            });
+        }
+        return worker_infos.toOwnedSlice(alloc);
+    }
+
     // ── executeTaskNode ──────────────────────────────────────────────
 
     fn executeTaskNode(self: *Engine, alloc: std.mem.Allocator, run_row: types.RunRow, node_name: []const u8, node_json: []const u8, state_json: []const u8) !TaskNodeResult {
@@ -1108,22 +1125,7 @@ pub const Engine = struct {
         };
 
         // 3. Get workers and select one
-        const workers = try self.store.listWorkers(alloc);
-        var worker_infos: std.ArrayListUnmanaged(dispatch.WorkerInfo) = .empty;
-        for (workers) |w| {
-            const current_tasks = self.store.countRunningStepsByWorker(w.id) catch 0;
-            try worker_infos.append(alloc, .{
-                .id = w.id,
-                .url = w.url,
-                .token = w.token,
-                .protocol = w.protocol,
-                .model = w.model,
-                .tags_json = w.tags_json,
-                .max_concurrent = w.max_concurrent,
-                .status = w.status,
-                .current_tasks = current_tasks,
-            });
-        }
+        const worker_infos = try self.buildWorkerInfos(alloc);
 
         const required_tags = getNodeTags(alloc, node_json);
         const node_type = getNodeField(alloc, node_json, "type") orelse "task";
@@ -1134,7 +1136,7 @@ pub const Engine = struct {
         if (is_agent_node) {
             // Filter to A2A workers only
             var a2a_workers: std.ArrayListUnmanaged(dispatch.WorkerInfo) = .empty;
-            for (worker_infos.items) |w| {
+            for (worker_infos) |w| {
                 if (std.mem.eql(u8, w.protocol, "a2a")) {
                     try a2a_workers.append(alloc, w);
                 }
@@ -1145,7 +1147,7 @@ pub const Engine = struct {
         }
         // Fall back to any protocol if no A2A worker found (or not an agent node)
         if (selected_worker == null) {
-            selected_worker = try dispatch.selectWorker(alloc, worker_infos.items, required_tags);
+            selected_worker = try dispatch.selectWorker(alloc, worker_infos, required_tags);
         }
         if (selected_worker == null) {
             return TaskNodeResult{ .no_worker = {} };
@@ -1444,22 +1446,7 @@ pub const Engine = struct {
         }
 
         // Build worker list once before iterating items
-        const workers = try self.store.listWorkers(alloc);
-        var worker_infos: std.ArrayListUnmanaged(dispatch.WorkerInfo) = .empty;
-        for (workers) |w| {
-            const current_tasks = self.store.countRunningStepsByWorker(w.id) catch 0;
-            try worker_infos.append(alloc, .{
-                .id = w.id,
-                .url = w.url,
-                .token = w.token,
-                .protocol = w.protocol,
-                .model = w.model,
-                .tags_json = w.tags_json,
-                .max_concurrent = w.max_concurrent,
-                .status = w.status,
-                .current_tasks = current_tasks,
-            });
-        }
+        const worker_infos = try self.buildWorkerInfos(alloc);
         const required_tags = getNodeTags(alloc, target_json);
 
         // For each item, execute the target node
@@ -1474,7 +1461,7 @@ pub const Engine = struct {
             // Render with item
             const rendered = self.renderWorkflowTemplate(alloc, run_row.workflow_json, prompt_template, state_json, run_row.input_json, item_str) catch continue;
 
-            const selected_worker = try dispatch.selectWorker(alloc, worker_infos.items, required_tags);
+            const selected_worker = try dispatch.selectWorker(alloc, worker_infos, required_tags);
             if (selected_worker == null) {
                 try results.append(alloc, "null");
                 continue;
