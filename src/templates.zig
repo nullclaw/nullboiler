@@ -1,13 +1,18 @@
 /// Template engine for prompt rendering.
 /// Resolves `{{...}}` expressions against workflow context.
 ///
-/// Supported expressions:
+/// Legacy Context + render():
 ///   - `{{input.X}}`          -- look up key X in the workflow input JSON
 ///   - `{{input.X.Y}}`        -- nested object lookups inside workflow input JSON
-///   - `{{steps.ID.output}}`  -- output of a single completed step
-///   - `{{steps.ID.outputs}}` -- JSON array of outputs from map/fan_out child steps
 ///   - `{{item}}`             -- current item string for map iterations
-///   - `{{task.X}}`           -- look up field X in the NullTickets task JSON (supports nested paths like `task.metadata.repo_url`)
+///   - `{{task.X}}`           -- look up field X in the NullTickets task JSON
+///   - `{{attempt}}`          -- current retry attempt number
+///
+/// State-based renderTemplate():
+///   - `{{state.X}}`          -- look up key X in the unified state JSON
+///   - `{{state.X.Y}}`        -- nested paths with optional [-1] array indexing
+///   - `{{input.X}}`          -- look up key X in the workflow input JSON
+///   - `{{item}}`             -- current item string for send iterations
 ///
 /// Conditional blocks:
 ///   - `{% if <expr> %}...{% endif %}`
@@ -21,18 +26,14 @@ const std = @import("std");
 
 pub const Context = struct {
     input_json: []const u8, // raw JSON string of workflow input
-    step_outputs: []const StepOutput, // completed step outputs
-    item: ?[]const u8, // current map item (null if not in map)
-    debate_responses: ?[]const u8 = null, // JSON array string for debate judge template
-    chat_history: ?[]const u8 = null, // formatted chat transcript for group_chat round_template
-    role: ?[]const u8 = null, // participant role for group_chat round_template
+    step_outputs: []const StepOutput, // completed step outputs (legacy, for tracker.zig)
+    item: ?[]const u8, // current item string (null if not in map/send)
     task_json: ?[]const u8 = null, // raw JSON string of NullTickets task data
     attempt: ?u32 = null, // current retry attempt number
 
     pub const StepOutput = struct {
         step_id: []const u8,
         output: ?[]const u8, // single output (for task steps)
-        outputs: ?[]const []const u8, // array of outputs (for fan_out/map parent)
     };
 };
 
@@ -222,27 +223,6 @@ fn resolveExpression(allocator: std.mem.Allocator, expr: []const u8, ctx: Contex
         return error.ItemNotAvailable;
     }
 
-    if (std.mem.eql(u8, expr, "debate_responses")) {
-        if (ctx.debate_responses) |dr| {
-            return allocator.dupe(u8, dr) catch return error.OutOfMemory;
-        }
-        return allocator.dupe(u8, "[]") catch return error.OutOfMemory;
-    }
-
-    if (std.mem.eql(u8, expr, "chat_history")) {
-        if (ctx.chat_history) |ch| {
-            return allocator.dupe(u8, ch) catch return error.OutOfMemory;
-        }
-        return allocator.dupe(u8, "") catch return error.OutOfMemory;
-    }
-
-    if (std.mem.eql(u8, expr, "role")) {
-        if (ctx.role) |r| {
-            return allocator.dupe(u8, r) catch return error.OutOfMemory;
-        }
-        return allocator.dupe(u8, "") catch return error.OutOfMemory;
-    }
-
     if (std.mem.eql(u8, expr, "attempt")) {
         if (ctx.attempt) |a| {
             return std.fmt.allocPrint(allocator, "{d}", .{a}) catch return error.OutOfMemory;
@@ -292,7 +272,7 @@ fn resolveInputField(allocator: std.mem.Allocator, input_json: []const u8, field
 }
 
 fn resolveStepRef(allocator: std.mem.Allocator, rest: []const u8, step_outputs: []const Context.StepOutput) RenderError![]const u8 {
-    // rest is "ID.output" or "ID.outputs"
+    // rest is "ID.output"
     const dot_pos = std.mem.lastIndexOfScalar(u8, rest, '.') orelse return error.UnknownExpression;
     const step_id = rest[0..dot_pos];
     const field = rest[dot_pos + 1 ..];
@@ -305,9 +285,6 @@ fn resolveStepRef(allocator: std.mem.Allocator, rest: []const u8, step_outputs: 
                     return allocator.dupe(u8, output) catch return error.OutOfMemory;
                 }
                 return allocator.dupe(u8, "") catch return error.OutOfMemory;
-            }
-            if (std.mem.eql(u8, field, "outputs")) {
-                return serializeOutputs(allocator, so.outputs);
             }
             return error.UnknownExpression;
         }
@@ -334,38 +311,6 @@ fn resolveTaskField(allocator: std.mem.Allocator, task_json: []const u8, field_p
     }
 
     return jsonValueToString(allocator, current);
-}
-
-fn serializeOutputs(allocator: std.mem.Allocator, outputs: ?[]const []const u8) RenderError![]const u8 {
-    const items = outputs orelse {
-        return allocator.dupe(u8, "[]") catch return error.OutOfMemory;
-    };
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    buf.append(allocator, '[') catch return error.OutOfMemory;
-    for (items, 0..) |item, i| {
-        if (i > 0) {
-            buf.append(allocator, ',') catch return error.OutOfMemory;
-        }
-        // Write JSON-escaped string
-        buf.append(allocator, '"') catch return error.OutOfMemory;
-        for (item) |c| {
-            switch (c) {
-                '"' => buf.appendSlice(allocator, "\\\"") catch return error.OutOfMemory,
-                '\\' => buf.appendSlice(allocator, "\\\\") catch return error.OutOfMemory,
-                '\n' => buf.appendSlice(allocator, "\\n") catch return error.OutOfMemory,
-                '\r' => buf.appendSlice(allocator, "\\r") catch return error.OutOfMemory,
-                '\t' => buf.appendSlice(allocator, "\\t") catch return error.OutOfMemory,
-                else => buf.append(allocator, c) catch return error.OutOfMemory,
-            }
-        }
-        buf.append(allocator, '"') catch return error.OutOfMemory;
-    }
-    buf.append(allocator, ']') catch return error.OutOfMemory;
-
-    return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
 fn jsonValueToString(allocator: std.mem.Allocator, val: std.json.Value) RenderError![]const u8 {
@@ -780,28 +725,12 @@ test "render step output" {
     const result = try render(allocator, "Result: {{steps.s1.output}}", .{
         .input_json = "{}",
         .step_outputs = &.{
-            .{ .step_id = "s1", .output = "found data", .outputs = null },
+            .{ .step_id = "s1", .output = "found data" },
         },
         .item = null,
     });
     defer allocator.free(result);
     try std.testing.expectEqualStrings("Result: found data", result);
-}
-
-test "render step outputs array" {
-    const allocator = std.testing.allocator;
-    const outputs: []const []const u8 = &.{ "result1", "result2" };
-    const result = try render(allocator, "All: {{steps.s1.outputs}}", .{
-        .input_json = "{}",
-        .step_outputs = &.{
-            .{ .step_id = "s1", .output = null, .outputs = outputs },
-        },
-        .item = null,
-    });
-    defer allocator.free(result);
-    // Should produce a JSON array like: ["result1","result2"]
-    try std.testing.expect(std.mem.indexOf(u8, result, "result1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "result2") != null);
 }
 
 test "render item in map context" {
@@ -910,43 +839,6 @@ test "item without map context returns error" {
         .item = null,
     });
     try std.testing.expectError(error.ItemNotAvailable, err);
-}
-
-test "render debate_responses expression" {
-    const allocator = std.testing.allocator;
-    const result = try render(allocator, "Pick best:\n{{debate_responses}}", .{
-        .input_json = "{}",
-        .step_outputs = &.{},
-        .item = null,
-        .debate_responses = "[\"resp1\",\"resp2\"]",
-    });
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "resp1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "resp2") != null);
-}
-
-test "render chat_history and role expressions" {
-    const allocator = std.testing.allocator;
-    const result = try render(allocator, "Previous:\n{{chat_history}}\nYour role: {{role}}", .{
-        .input_json = "{}",
-        .step_outputs = &.{},
-        .item = null,
-        .chat_history = "Architect: design first",
-        .role = "Frontend Dev",
-    });
-    defer allocator.free(result);
-    try std.testing.expectEqualStrings("Previous:\nArchitect: design first\nYour role: Frontend Dev", result);
-}
-
-test "debate_responses defaults to empty array when not set" {
-    const allocator = std.testing.allocator;
-    const result = try render(allocator, "{{debate_responses}}", .{
-        .input_json = "{}",
-        .step_outputs = &.{},
-        .item = null,
-    });
-    defer allocator.free(result);
-    try std.testing.expectEqualStrings("[]", result);
 }
 
 test "render task.title variable" {

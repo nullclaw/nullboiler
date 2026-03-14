@@ -12,16 +12,6 @@ pub const ValidateError = error{
     DependsOnItemNotString,
     DependsOnDuplicate,
     DependsOnUnknownStepId,
-    LoopBodyRequired,
-    SubWorkflowRequired,
-    WaitConditionRequired,
-    WaitDurationInvalid,
-    WaitUntilInvalid,
-    WaitSignalInvalid,
-    RouterRoutesRequired,
-    SagaBodyRequired,
-    DebateCountRequired,
-    GroupChatParticipantsRequired,
     RetryMustBeObject,
     MaxAttemptsMustBePositiveInteger,
     TimeoutMsMustBePositiveInteger,
@@ -70,47 +60,9 @@ fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 }
 
 fn validateStepTypeRules(step_type: []const u8, step_obj: std.json.ObjectMap) ValidateError!void {
-    if (std.mem.eql(u8, step_type, "loop") and step_obj.get("body") == null) {
-        return error.LoopBodyRequired;
-    }
-    if (std.mem.eql(u8, step_type, "sub_workflow") and step_obj.get("workflow") == null) {
-        return error.SubWorkflowRequired;
-    }
-    if (std.mem.eql(u8, step_type, "wait")) {
-        if (step_obj.get("duration_ms") == null and step_obj.get("until_ms") == null and step_obj.get("signal") == null) {
-            return error.WaitConditionRequired;
-        }
-        if (step_obj.get("duration_ms")) |duration_val| {
-            switch (duration_val) {
-                .integer => {
-                    if (duration_val.integer < 0) return error.WaitDurationInvalid;
-                },
-                else => return error.WaitDurationInvalid,
-            }
-        }
-        if (step_obj.get("until_ms")) |until_val| {
-            if (until_val != .integer or until_val.integer < 0) {
-                return error.WaitUntilInvalid;
-            }
-        }
-        if (step_obj.get("signal")) |signal_val| {
-            if (signal_val != .string or signal_val.string.len == 0) {
-                return error.WaitSignalInvalid;
-            }
-        }
-    }
-    if (std.mem.eql(u8, step_type, "router") and step_obj.get("routes") == null) {
-        return error.RouterRoutesRequired;
-    }
-    if (std.mem.eql(u8, step_type, "saga") and step_obj.get("body") == null) {
-        return error.SagaBodyRequired;
-    }
-    if (std.mem.eql(u8, step_type, "debate") and step_obj.get("count") == null) {
-        return error.DebateCountRequired;
-    }
-    if (std.mem.eql(u8, step_type, "group_chat") and step_obj.get("participants") == null) {
-        return error.GroupChatParticipantsRequired;
-    }
+    // No specific rules for current step types (task, route, interrupt, agent, send, transform, subgraph)
+    _ = step_type;
+    _ = step_obj;
 }
 
 fn validateDependsOnTypes(allocator: std.mem.Allocator, step_obj: std.json.ObjectMap) ValidateError!void {
@@ -723,58 +675,6 @@ test "validateStepsForCreateRun: rejects duplicate depends_on item" {
     try std.testing.expectError(error.DependsOnDuplicate, validateStepsForCreateRun(allocator, parsed.value.array.items));
 }
 
-test "validateStepsForCreateRun: rejects missing sub_workflow workflow field" {
-    const allocator = std.testing.allocator;
-    const payload =
-        \\[
-        \\  {"id":"sw","type":"sub_workflow"}
-        \\]
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    try std.testing.expectError(error.SubWorkflowRequired, validateStepsForCreateRun(allocator, parsed.value.array.items));
-}
-
-test "validateStepsForCreateRun: rejects missing saga body field" {
-    const allocator = std.testing.allocator;
-    const payload =
-        \\[
-        \\  {"id":"sg","type":"saga"}
-        \\]
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    try std.testing.expectError(error.SagaBodyRequired, validateStepsForCreateRun(allocator, parsed.value.array.items));
-}
-
-test "validateStepsForCreateRun: rejects missing debate count field" {
-    const allocator = std.testing.allocator;
-    const payload =
-        \\[
-        \\  {"id":"db","type":"debate","prompt_template":"x"}
-        \\]
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    try std.testing.expectError(error.DebateCountRequired, validateStepsForCreateRun(allocator, parsed.value.array.items));
-}
-
-test "validateStepsForCreateRun: rejects missing group_chat participants field" {
-    const allocator = std.testing.allocator;
-    const payload =
-        \\[
-        \\  {"id":"gc","type":"group_chat","prompt_template":"x"}
-        \\]
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    try std.testing.expectError(error.GroupChatParticipantsRequired, validateStepsForCreateRun(allocator, parsed.value.array.items));
-}
-
 test "validateStepsForCreateRun: rejects non-object retry field" {
     const allocator = std.testing.allocator;
     const payload =
@@ -812,45 +712,6 @@ test "validateStepsForCreateRun: rejects non-positive timeout_ms" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
     defer parsed.deinit();
     try std.testing.expectError(error.TimeoutMsMustBePositiveInteger, validateStepsForCreateRun(allocator, parsed.value.array.items));
-}
-
-test "validateStepsForCreateRun: rejects invalid wait duration string" {
-    const allocator = std.testing.allocator;
-    const payload =
-        \\[
-        \\  {"id":"w","type":"wait","duration_ms":"abc"}
-        \\]
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    try std.testing.expectError(error.WaitDurationInvalid, validateStepsForCreateRun(allocator, parsed.value.array.items));
-}
-
-test "validateStepsForCreateRun: rejects negative wait duration" {
-    const allocator = std.testing.allocator;
-    const payload =
-        \\[
-        \\  {"id":"w","type":"wait","duration_ms":-1}
-        \\]
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    try std.testing.expectError(error.WaitDurationInvalid, validateStepsForCreateRun(allocator, parsed.value.array.items));
-}
-
-test "validateStepsForCreateRun: rejects invalid wait signal type" {
-    const allocator = std.testing.allocator;
-    const payload =
-        \\[
-        \\  {"id":"w","type":"wait","signal":1}
-        \\]
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
-    defer parsed.deinit();
-    try std.testing.expectError(error.WaitSignalInvalid, validateStepsForCreateRun(allocator, parsed.value.array.items));
 }
 
 // ── Tests: new graph validation ────────────────────────────────────────

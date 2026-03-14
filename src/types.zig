@@ -203,17 +203,6 @@ pub const ArtifactRow = struct {
     created_at_ms: i64,
 };
 
-pub const ChatMessageRow = struct {
-    id: i64,
-    run_id: []const u8,
-    step_id: []const u8,
-    round: i64,
-    role: []const u8,
-    worker_id: ?[]const u8,
-    message: []const u8,
-    ts_ms: i64,
-};
-
 pub const TrackerRunRow = struct {
     task_id: []const u8,
     tracker_run_id: []const u8,
@@ -233,14 +222,6 @@ pub const TrackerRunRow = struct {
     lease_expires_at_ms: ?i64,
     completed_at_ms: ?i64,
     last_error_text: ?[]const u8,
-};
-
-pub const SagaStateRow = struct {
-    run_id: []const u8,
-    saga_step_id: []const u8,
-    body_step_id: []const u8,
-    compensation_step_id: ?[]const u8,
-    status: []const u8,
 };
 
 pub const WorkflowRow = struct {

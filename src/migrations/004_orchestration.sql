@@ -1,5 +1,5 @@
--- Note: step_deps, cycle_state, saga_state kept for backward compatibility
--- until engine.zig is rewritten (Task 8). They will be removed then.
+-- Note: step_deps table is kept for legacy POST /runs endpoint backward compatibility.
+-- cycle_state, chat_messages, saga_state tables are legacy (unused by current engine).
 
 -- Saved workflow definitions
 CREATE TABLE IF NOT EXISTS workflows (

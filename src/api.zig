@@ -107,19 +107,14 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
         return handleGetStep(ctx, seg1.?, seg3.?);
     }
 
-    // POST /runs/{id}/steps/{step_id}/approve
+    // POST /runs/{id}/steps/{step_id}/approve (legacy, removed)
     if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "approve") and seg5 == null) {
-        return handleApproveStep(ctx, seg1.?, seg3.?);
+        return jsonResponse(410, "{\"error\":{\"code\":\"gone\",\"message\":\"approval steps have been removed; use interrupt + resume instead\"}}");
     }
 
-    // POST /runs/{id}/steps/{step_id}/reject
+    // POST /runs/{id}/steps/{step_id}/reject (legacy, removed)
     if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "reject") and seg5 == null) {
-        return handleRejectStep(ctx, seg1.?, seg3.?);
-    }
-
-    // GET /runs/{id}/steps/{step_id}/chat
-    if (is_get and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "chat") and seg5 == null) {
-        return handleGetChatTranscript(ctx, seg1.?, seg3.?);
+        return jsonResponse(410, "{\"error\":{\"code\":\"gone\",\"message\":\"approval steps have been removed; use interrupt + resume instead\"}}");
     }
 
     // GET /runs/{id}/events
@@ -967,66 +962,6 @@ fn handleRetryRun(ctx: *Context, run_id: []const u8) HttpResponse {
     const resp = std.fmt.allocPrint(ctx.allocator,
         \\{{"id":"{s}","status":"running"}}
     , .{run_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    return jsonResponse(200, resp);
-}
-
-fn handleApproveStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
-    // 1. Get step from store
-    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
-        .ok => |s| s,
-        .err => |resp| return resp,
-    };
-
-    // 2. Must be "waiting_approval"
-    if (!std.mem.eql(u8, step.status, "waiting_approval")) {
-        const resp = std.fmt.allocPrint(ctx.allocator,
-            \\{{"error":{{"code":"conflict","message":"step is not waiting_approval (current: {s})"}}}}
-        , .{step.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"step is not waiting_approval\"}}");
-        return jsonResponse(409, resp);
-    }
-
-    // 3. Update status to "completed"
-    ctx.store.updateStepStatus(step_id, "completed", null, null, null, step.attempt) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
-    };
-
-    // 4. Insert event
-    ctx.store.insertEvent(run_id, step_id, "step.approved", "{}") catch {};
-
-    // 5. Return 200
-    const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"step_id":"{s}","status":"completed"}}
-    , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    return jsonResponse(200, resp);
-}
-
-fn handleRejectStep(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
-    // 1. Get step from store
-    const step = switch (lookupStepInRun(ctx, run_id, step_id)) {
-        .ok => |s| s,
-        .err => |resp| return resp,
-    };
-
-    // 2. Must be "waiting_approval"
-    if (!std.mem.eql(u8, step.status, "waiting_approval")) {
-        const resp = std.fmt.allocPrint(ctx.allocator,
-            \\{{"error":{{"code":"conflict","message":"step is not waiting_approval (current: {s})"}}}}
-        , .{step.status}) catch return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"step is not waiting_approval\"}}");
-        return jsonResponse(409, resp);
-    }
-
-    // 3. Update status to "failed", set error_text
-    ctx.store.updateStepStatus(step_id, "failed", null, null, "rejected by user", step.attempt) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update step\"}}");
-    };
-
-    // 4. Insert event
-    ctx.store.insertEvent(run_id, step_id, "step.rejected", "{}") catch {};
-
-    // 5. Return 200
-    const resp = std.fmt.allocPrint(ctx.allocator,
-        \\{{"step_id":"{s}","status":"failed"}}
-    , .{step_id}) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, resp);
 }
 
@@ -1900,56 +1835,6 @@ fn getSchemaFromRun(ctx: *Context, run: types.RunRow) []const u8 {
     return "{}";
 }
 
-// ── Chat Transcript Handler ──────────────────────────────────────────
-
-fn handleGetChatTranscript(ctx: *Context, run_id: []const u8, step_id: []const u8) HttpResponse {
-    _ = switch (lookupStepInRun(ctx, run_id, step_id)) {
-        .ok => |s| s,
-        .err => |resp| return resp,
-    };
-
-    const messages = ctx.store.getChatMessages(ctx.allocator, step_id) catch {
-        return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to get chat messages\"}}");
-    };
-
-    // Build JSON array of chat messages
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
-    for (messages, 0..) |msg, i| {
-        if (i > 0) {
-            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        }
-
-        const worker_field = if (msg.worker_id) |wid| blk: {
-            const wid_json = jsonQuoted(ctx.allocator, wid) catch "";
-            break :blk std.fmt.allocPrint(ctx.allocator, ",\"worker_id\":{s}", .{wid_json}) catch "";
-        } else "";
-        const msg_run_id_json = jsonQuoted(ctx.allocator, msg.run_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        const msg_step_id_json = jsonQuoted(ctx.allocator, msg.step_id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        const role_json = jsonQuoted(ctx.allocator, msg.role) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        const message_json = jsonQuoted(ctx.allocator, msg.message) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
-        const entry = std.fmt.allocPrint(ctx.allocator,
-            \\{{"id":{d},"run_id":{s},"step_id":{s},"round":{d},"role":{s}{s},"message":{s},"ts_ms":{d}}}
-        , .{
-            msg.id,
-            msg_run_id_json,
-            msg_step_id_json,
-            msg.round,
-            role_json,
-            worker_field,
-            message_json,
-            msg.ts_ms,
-        }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    }
-
-    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    return jsonResponse(200, json_body);
-}
-
 // ── Tracker Handlers ─────────────────────────────────────────────────
 
 fn formatRunningTask(allocator: std.mem.Allocator, task: tracker_mod.RunningTask) ![]const u8 {
@@ -2115,16 +2000,6 @@ fn validationErrorResponse(err: workflow_validation.ValidateError) HttpResponse 
         error.DependsOnItemNotString => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on items must be strings\"}}"),
         error.DependsOnDuplicate => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on contains duplicate step id\"}}"),
         error.DependsOnUnknownStepId => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"depends_on references unknown step id\"}}"),
-        error.LoopBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"loop step requires 'body' field\"}}"),
-        error.SubWorkflowRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"sub_workflow step requires 'workflow' field\"}}"),
-        error.WaitConditionRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait step requires 'duration_ms', 'until_ms', or 'signal'\"}}"),
-        error.WaitDurationInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.duration_ms must be a non-negative integer\"}}"),
-        error.WaitUntilInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.until_ms must be a non-negative integer\"}}"),
-        error.WaitSignalInvalid => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"wait.signal must be a non-empty string\"}}"),
-        error.RouterRoutesRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"router step requires 'routes' field\"}}"),
-        error.SagaBodyRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"saga step requires 'body' field\"}}"),
-        error.DebateCountRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"debate step requires 'count' field\"}}"),
-        error.GroupChatParticipantsRequired => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"group_chat step requires 'participants' field\"}}"),
         error.RetryMustBeObject => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"retry must be an object\"}}"),
         error.MaxAttemptsMustBePositiveInteger => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"retry.max_attempts must be a positive integer\"}}"),
         error.TimeoutMsMustBePositiveInteger => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"timeout_ms must be a positive integer\"}}"),
@@ -2508,48 +2383,6 @@ test "API: create run rejects non-positive timeout_ms" {
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
 }
 
-test "API: create run rejects invalid wait duration string" {
-    const allocator = std.testing.allocator;
-    var store = try Store.init(allocator, ":memory:");
-    defer store.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var ctx = Context{
-        .store = &store,
-        .allocator = arena.allocator(),
-    };
-
-    const body =
-        \\{"steps":[{"id":"w1","type":"wait","duration_ms":"abc"}]}
-    ;
-
-    const resp = handleRequest(&ctx, "POST", "/runs", body);
-    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
-}
-
-test "API: create run rejects invalid wait signal type" {
-    const allocator = std.testing.allocator;
-    var store = try Store.init(allocator, ":memory:");
-    defer store.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var ctx = Context{
-        .store = &store,
-        .allocator = arena.allocator(),
-    };
-
-    const body =
-        \\{"steps":[{"id":"w1","type":"wait","signal":1}]}
-    ;
-
-    const resp = handleRequest(&ctx, "POST", "/runs", body);
-    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
-}
-
 test "API: create run rejects duplicate depends_on items" {
     const allocator = std.testing.allocator;
     var store = try Store.init(allocator, ":memory:");
@@ -2591,14 +2424,10 @@ test "API: get step enforces run ownership" {
     try std.testing.expectEqual(@as(u16, 404), resp.status_code);
 }
 
-test "API: chat transcript escapes message content" {
+test "API: approve endpoint returns 410 gone" {
     const allocator = std.testing.allocator;
     var store = try Store.init(allocator, ":memory:");
     defer store.deinit();
-
-    try store.insertRun("run-chat", null, "running", "{\"steps\":[]}", "{}", "[]");
-    try store.insertStep("step-chat-1", "run-chat", "chat", "group_chat", "completed", "{}", 1, null, null, null);
-    try store.insertChatMessage("run-chat", "step-chat-1", 1, "agent", null, "He said \"go\"\\nline");
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -2608,15 +2437,8 @@ test "API: chat transcript escapes message content" {
         .allocator = arena.allocator(),
     };
 
-    const resp = handleRequest(&ctx, "GET", "/runs/run-chat/steps/step-chat-1/chat", "");
-    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp.body, .{});
-    defer parsed.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
-    const msg = parsed.value.array.items[0].object.get("message").?;
-    try std.testing.expectEqualStrings("He said \"go\"\\nline", msg.string);
+    const resp = handleRequest(&ctx, "POST", "/runs/run-1/steps/step-1/approve", "");
+    try std.testing.expectEqual(@as(u16, 410), resp.status_code);
 }
 
 test "API: register worker rejects non-array tags" {
