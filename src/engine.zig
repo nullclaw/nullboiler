@@ -36,6 +36,7 @@ const metrics_mod = @import("metrics.zig");
 const async_dispatch = @import("async_dispatch.zig");
 const state_mod = @import("state.zig");
 const sse_mod = @import("sse.zig");
+const tracker_client = @import("tracker_client.zig");
 const workflow_loader = @import("workflow_loader.zig");
 
 // ── Structured Events ────────────────────────────────────────────────
@@ -105,6 +106,15 @@ const max_nodes_per_tick: u32 = 1000;
 /// Maximum inline subgraph recursion depth.
 const max_subgraph_depth: u32 = 10;
 
+const StoreWriter = *const fn (
+    alloc: std.mem.Allocator,
+    base_url: []const u8,
+    api_token: ?[]const u8,
+    namespace: []const u8,
+    key: []const u8,
+    value_json: []const u8,
+) anyerror!void;
+
 // ── Engine ───────────────────────────────────────────────────────────
 
 pub const RuntimeConfig = struct {
@@ -137,6 +147,8 @@ pub const Engine = struct {
     sse_hub: ?*sse_mod.SseHub = null,
     workflow_watcher: ?*workflow_loader.WorkflowWatcher = null,
     rate_limits: std.StringHashMap(RateLimitInfo),
+    store_fetcher: templates.StoreFetcher,
+    store_writer: StoreWriter,
     config_valid: bool = false,
     last_config_check_ms: i64 = 0,
 
@@ -156,6 +168,8 @@ pub const Engine = struct {
             .sse_hub = null,
             .workflow_watcher = null,
             .rate_limits = std.StringHashMap(RateLimitInfo).init(allocator),
+            .store_fetcher = templates.fetchStoreValueHttp,
+            .store_writer = putStoreValueViaHttp,
             .config_valid = false,
             .last_config_check_ms = 0,
         };
@@ -391,9 +405,9 @@ pub const Engine = struct {
         // 2d. Collect deferred nodes (Gap 6)
         const deferred_nodes = collectDeferredNodes(alloc, workflow_json);
 
-        // 2c. Get tracker URL for reconciliation
-        const tracker_url = getWorkflowField(alloc, workflow_json, "tracker_url");
-        const task_id = getWorkflowField(alloc, workflow_json, "task_id");
+        // 2c. Get tracker URL / task id for reconciliation and store access.
+        const tracker_url = getRuntimeStringSetting(alloc, current_state, workflow_json, &.{ "tracker_url", "nulltickets_url" });
+        const task_id = getRuntimeStringSetting(alloc, current_state, workflow_json, &.{"task_id"});
 
         // 3. Get completed nodes from latest checkpoint
         var completed_nodes = std.StringHashMap(void).init(alloc);
@@ -528,10 +542,10 @@ pub const Engine = struct {
                     // Gap 6: Execute deferred nodes before completing
                     for (deferred_nodes) |deferred_name| {
                         if (completed_nodes.get(deferred_name) != null) continue;
-    
+
                         const def_node_json = getNodeJson(alloc, workflow_json, deferred_name) orelse continue;
                         const def_node_type = getNodeField(alloc, def_node_json, "type") orelse "task";
-    
+
                         if (std.mem.eql(u8, def_node_type, "transform")) {
                             const def_updates = getNodeField(alloc, def_node_json, "updates") orelse "{}";
                             const def_schema = cached_schema_json;
@@ -550,15 +564,15 @@ pub const Engine = struct {
                                 else => {},
                             }
                         }
-    
+
                         try completed_nodes.put(try alloc.dupe(u8, deferred_name), {});
                         log.info("deferred node {s} completed for run {s}", .{ deferred_name, run_row.id });
                     }
-    
+
                     // Mark __end__ as completed
                     try completed_nodes.put("__end__", {});
                     version += 1;
-    
+
                     // Save checkpoint
                     const cp_id_buf = ids.generateId();
                     const cp_id = try alloc.dupe(u8, &cp_id_buf);
@@ -577,7 +591,7 @@ pub const Engine = struct {
                     log.info("run {s} completed", .{run_row.id});
                     return;
                 }
-    
+
                 // Breakpoint: interrupt_before check
                 if (isInBreakpointList(node_name, interrupt_before)) {
                     log.info("breakpoint interrupt_before at node {s} for run {s}", .{ node_name, run_row.id });
@@ -597,17 +611,17 @@ pub const Engine = struct {
                     callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
                     return;
                 }
-    
+
                 // Get node definition from workflow
                 const node_json = getNodeJson(alloc, workflow_json, node_name) orelse {
                     log.err("node {s} not found in workflow for run {s}", .{ node_name, run_row.id });
                     try self.store.updateRunStatus(run_row.id, "failed", "node not found in workflow");
                     return;
                 };
-    
+
                 // Get node type
                 const node_type = getNodeField(alloc, node_json, "type") orelse "task";
-    
+
                 // Execute based on type
                 if (std.mem.eql(u8, node_type, "route")) {
                     // Route: evaluate routing logic, no worker dispatch
@@ -616,7 +630,7 @@ pub const Engine = struct {
                         try route_results.put(try alloc.dupe(u8, node_name), rv);
                     }
                     try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-    
+
                     // Create step record
                     const step_id_buf = ids.generateId();
                     const step_id = try alloc.dupe(u8, &step_id_buf);
@@ -624,19 +638,19 @@ pub const Engine = struct {
                     const route_output = try std.fmt.allocPrint(alloc, "{{\"route\":\"{s}\"}}", .{result.route_value orelse "default"});
                     try self.store.updateStepStatus(step_id, "completed", null, route_output, null, 1);
                     try self.store.insertEvent(run_row.id, step_id, "step.completed", route_output);
-    
+
                     log.info("route node {s} -> {s}", .{ node_name, result.route_value orelse "default" });
                 } else if (std.mem.eql(u8, node_type, "interrupt")) {
                     // Interrupt: save checkpoint, set run to interrupted
                     try completed_nodes.put(try alloc.dupe(u8, node_name), {});
                     version += 1;
-    
+
                     const step_id_buf = ids.generateId();
                     const step_id = try alloc.dupe(u8, &step_id_buf);
                     try self.store.insertStep(step_id, run_row.id, node_name, "interrupt", "completed", "{}", 1, null, null, null);
                     try self.store.updateStepStatus(step_id, "completed", null, "{\"interrupted\":true}", null, 1);
                     try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
-    
+
                     const cp_id_buf = ids.generateId();
                     const cp_id = try alloc.dupe(u8, &cp_id_buf);
                     const cn_json = try serializeCompletedNodes(alloc, &completed_nodes);
@@ -655,10 +669,10 @@ pub const Engine = struct {
                 } else if (std.mem.eql(u8, node_type, "transform")) {
                     // Transform: apply static updates, no worker dispatch
                     const state_updates = getNodeField(alloc, node_json, "updates") orelse "{}";
-    
+
                     // Get schema from workflow
                     const schema_json = cached_schema_json;
-    
+
                     // Apply updates via reducers
                     const new_state = state_mod.applyUpdates(alloc, running_state, state_updates, schema_json) catch |err| {
                         log.err("transform node {s} failed to apply updates: {}", .{ node_name, err });
@@ -666,26 +680,34 @@ pub const Engine = struct {
                         return;
                     };
                     running_state = new_state;
-    
+
+                    if (getNodeField(alloc, node_json, "store_updates")) |store_updates_json| {
+                        self.applyStoreUpdates(alloc, workflow_json, running_state, store_updates_json) catch |err| {
+                            log.err("transform node {s} failed to write store updates: {}", .{ node_name, err });
+                            try self.store.updateRunStatus(run_row.id, "failed", "transform store update failed");
+                            return;
+                        };
+                    }
+
                     try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-    
+
                     // Create step record
                     const step_id_buf = ids.generateId();
                     const step_id = try alloc.dupe(u8, &step_id_buf);
                     try self.store.insertStep(step_id, run_row.id, node_name, "transform", "completed", "{}", 1, null, null, null);
                     try self.store.updateStepStatus(step_id, "completed", null, state_updates, null, 1);
                     try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
-    
+
                     log.info("transform node {s} completed", .{node_name});
                 } else if (std.mem.eql(u8, node_type, "task") or std.mem.eql(u8, node_type, "agent")) {
                     // Gap 7: Inject __meta managed values
                     const state_with_meta = injectMeta(alloc, running_state, run_row.id, node_name, version, @as(i64, @intCast(max_iterations))) catch running_state;
-    
+
                     // Gap 3: Check cache before executing
                     const cache_ttl = parseCacheTtlMs(alloc, node_json);
                     if (cache_ttl != null) cache_check: {
                         const pt_c = getNodeField(alloc, node_json, "prompt_template") orelse break :cache_check;
-                        const rnd_c = templates.renderTemplate(alloc, pt_c, state_with_meta, run_row.input_json, null) catch break :cache_check;
+                        const rnd_c = self.renderWorkflowTemplate(alloc, workflow_json, pt_c, state_with_meta, run_row.input_json, null) catch break :cache_check;
                         const ck_c = computeCacheKey(alloc, node_name, rnd_c) catch break :cache_check;
                         const cached = self.store.getCachedResult(alloc, ck_c) catch break :cache_check;
                         if (cached) |cached_upd| {
@@ -707,7 +729,7 @@ pub const Engine = struct {
                             continue;
                         }
                     }
-    
+
                     // Gap 2: Non-blocking retry — check for pending retry step
                     const max_attempts = parseRetryMaxAttempts(alloc, node_json) orelse 1;
                     const retry_init_ms = parseRetryInitialMs(alloc, node_json) orelse 500;
@@ -789,12 +811,12 @@ pub const Engine = struct {
                         },
                         else => result,
                     };
-    
+
                     switch (result_after_retry) {
                         .completed => |cr| {
                             // Gap 7: Strip __meta (don't persist)
                             running_state = stripMeta(alloc, running_state) catch running_state;
-    
+
                             if (cr.state_updates) |updates| {
                                 const schema_json = cached_schema_json;
                                 const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
@@ -803,28 +825,28 @@ pub const Engine = struct {
                                     return;
                                 };
                                 running_state = new_state;
-    
+
                                 // Gap 3: Store result in cache
                                 if (cache_ttl) |ttl| cache_store: {
                                     const pt_s = getNodeField(alloc, node_json, "prompt_template") orelse break :cache_store;
-                                    const rnd_s = templates.renderTemplate(alloc, pt_s, state_with_meta, run_row.input_json, null) catch break :cache_store;
+                                    const rnd_s = self.renderWorkflowTemplate(alloc, workflow_json, pt_s, state_with_meta, run_row.input_json, null) catch break :cache_store;
                                     const ck_s = computeCacheKey(alloc, node_name, rnd_s) catch break :cache_store;
                                     self.store.setCachedResult(ck_s, node_name, updates, ttl) catch |cerr| {
                                         log.warn("failed to cache result for node {s}: {}", .{ node_name, cerr });
                                     };
                                 }
-    
+
                                 // Gap 4: Save as pending write
                                 self.store.savePendingWrite(run_row.id, node_name, node_name, updates) catch |perr| {
                                     log.warn("failed to save pending write for node {s}: {}", .{ node_name, perr });
                                 };
                             }
-    
+
                             // Apply UI messages to state (__ui_messages key)
                             if (cr.raw_output) |raw_out| {
                                 running_state = applyUiMessagesToState(alloc, running_state, raw_out) catch running_state;
                             }
-    
+
                             // Consume pending injections
                             const injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
                             for (injections) |injection| {
@@ -835,9 +857,9 @@ pub const Engine = struct {
                                 };
                                 running_state = new_state;
                             }
-    
+
                             try completed_nodes.put(try alloc.dupe(u8, node_name), {});
-    
+
                             if (cr.goto_targets) |targets| {
                                 var valid_targets: std.ArrayListUnmanaged([]const u8) = .empty;
                                 for (targets) |target| {
@@ -852,10 +874,10 @@ pub const Engine = struct {
                                     log.info("task node {s} goto: {d} targets", .{ node_name, goto_override.?.len });
                                 }
                             }
-    
+
                             // Gap 4: Clear pending writes
                             self.store.clearPendingWrites(run_row.id) catch {};
-    
+
                             log.info("task node {s} completed for run {s}", .{ node_name, run_row.id });
                         },
                         .async_pending => {
@@ -903,7 +925,7 @@ pub const Engine = struct {
                 } else if (std.mem.eql(u8, node_type, "subgraph")) {
                     // Subgraph: execute child workflow inline
                     const result = try self.executeSubgraphNode(alloc, run_row, node_name, node_json, running_state, recursion_depth);
-    
+
                     switch (result) {
                         .completed => |cr| {
                             if (cr.state_updates) |updates| {
@@ -946,7 +968,7 @@ pub const Engine = struct {
                     try self.store.updateRunStatus(run_row.id, "failed", "unknown node type");
                     return;
                 }
-    
+
                 // Breakpoint: interrupt_after check
                 if (isInBreakpointList(node_name, interrupt_after)) {
                     log.info("breakpoint interrupt_after at node {s} for run {s}", .{ node_name, run_row.id });
@@ -967,7 +989,7 @@ pub const Engine = struct {
                     callbacks.fireCallbacks(alloc, run_row.callbacks_json, "run.interrupted", run_row.id, null, "{}", self.metrics);
                     return;
                 }
-    
+
                 // Reconciliation: check tracker task status between steps
                 if (tracker_url != null and task_id != null) {
                     if (!reconcileWithTracker(alloc, tracker_url.?, task_id.?)) {
@@ -978,11 +1000,11 @@ pub const Engine = struct {
                         return;
                     }
                 }
-    
+
                 // Strip ephemeral keys before checkpoint persistence
                 const schema_for_eph = cached_schema_json;
                 running_state = state_mod.stripEphemeralKeys(alloc, running_state, schema_for_eph) catch running_state;
-    
+
                 // Save checkpoint after each node
                 made_progress = true;
                 version += 1;
@@ -995,10 +1017,10 @@ pub const Engine = struct {
                 try self.store.incrementCheckpointCount(run_row.id);
                 try self.store.updateRunState(run_row.id, running_state);
                 latest_checkpoint_id = cp_id;
-    
+
                 // Emit structured checkpoint event
                 self.emitEvent(alloc, .checkpoint_created, run_row.id, null, node_name, null);
-    
+
                 // Broadcast rich SSE events for all modes
                 if (self.sse_hub) |hub| {
                     const node_json_for_sse = getNodeJson(alloc, workflow_json, node_name);
@@ -1075,8 +1097,8 @@ pub const Engine = struct {
             return TaskNodeResult{ .completed = .{ .state_updates = null } };
         };
 
-        // 2. Render prompt using new templates.renderTemplate
-        const rendered_prompt = templates.renderTemplate(alloc, prompt_template, state_json, run_row.input_json, null) catch |err| {
+        // 2. Render prompt with graph template interpolation and optional store access.
+        const rendered_prompt = self.renderWorkflowTemplate(alloc, run_row.workflow_json, prompt_template, state_json, run_row.input_json, null) catch |err| {
             log.err("template render failed for node {s}: {}", .{ node_name, err });
             return TaskNodeResult{ .failed = "template render failed" };
         };
@@ -1204,7 +1226,7 @@ pub const Engine = struct {
                             }
 
                             // Render continuation prompt
-                            const cont_rendered = templates.renderTemplate(alloc, continuation_prompt.?, state_json, run_row.input_json, null) catch break;
+                            const cont_rendered = self.renderWorkflowTemplate(alloc, run_row.workflow_json, continuation_prompt.?, state_json, run_row.input_json, null) catch break;
 
                             const cont_result = try dispatch.dispatchStep(
                                 alloc,
@@ -1446,7 +1468,7 @@ pub const Engine = struct {
             const prompt_template = getNodeField(alloc, target_json, "prompt_template") orelse continue;
 
             // Render with item
-            const rendered = templates.renderTemplate(alloc, prompt_template, state_json, run_row.input_json, item_str) catch continue;
+            const rendered = self.renderWorkflowTemplate(alloc, run_row.workflow_json, prompt_template, state_json, run_row.input_json, item_str) catch continue;
 
             const selected_worker = try dispatch.selectWorker(alloc, worker_infos.items, required_tags);
             if (selected_worker == null) {
@@ -1497,6 +1519,56 @@ pub const Engine = struct {
         try self.store.insertEvent(run_row.id, step_id, "step.completed", "{}");
 
         return SendNodeResult{ .state_updates = state_updates };
+    }
+
+    fn renderWorkflowTemplate(
+        self: *Engine,
+        alloc: std.mem.Allocator,
+        workflow_json: []const u8,
+        template: []const u8,
+        state_json: []const u8,
+        input_json: ?[]const u8,
+        item_json: ?[]const u8,
+    ) ![]const u8 {
+        const store_access = self.resolveRuntimeStoreAccess(alloc, workflow_json, state_json);
+        return templates.renderTemplateWithStore(alloc, template, state_json, input_json, item_json, store_access);
+    }
+
+    fn resolveRuntimeStoreAccess(self: *Engine, alloc: std.mem.Allocator, workflow_json: []const u8, state_json: []const u8) ?templates.StoreAccess {
+        const base_url = getRuntimeStringSetting(alloc, state_json, workflow_json, &.{ "tracker_url", "nulltickets_url" }) orelse return null;
+        const api_token = getRuntimeStringSetting(alloc, state_json, workflow_json, &.{ "tracker_api_token", "nulltickets_api_token" });
+        return .{
+            .base_url = base_url,
+            .api_token = api_token,
+            .fetcher = self.store_fetcher,
+        };
+    }
+
+    fn applyStoreUpdates(self: *Engine, alloc: std.mem.Allocator, workflow_json: []const u8, state_json: []const u8, store_updates_json: []const u8) !void {
+        const access = self.resolveRuntimeStoreAccess(alloc, workflow_json, state_json) orelse return error.StoreNotConfigured;
+        const parsed = try json.parseFromSlice(json.Value, alloc, store_updates_json, .{});
+
+        switch (parsed.value) {
+            .object => try self.applySingleStoreUpdate(alloc, access, state_json, parsed.value.object),
+            .array => |arr| {
+                for (arr.items) |item| {
+                    if (item != .object) return error.InvalidStoreUpdates;
+                    try self.applySingleStoreUpdate(alloc, access, state_json, item.object);
+                }
+            },
+            else => return error.InvalidStoreUpdates,
+        }
+    }
+
+    fn applySingleStoreUpdate(self: *Engine, alloc: std.mem.Allocator, access: templates.StoreAccess, state_json: []const u8, obj: json.ObjectMap) !void {
+        const namespace_val = obj.get("namespace") orelse return error.InvalidStoreUpdates;
+        const key_val = obj.get("key") orelse return error.InvalidStoreUpdates;
+        const value_val = obj.get("value") orelse return error.InvalidStoreUpdates;
+
+        if (namespace_val != .string or key_val != .string) return error.InvalidStoreUpdates;
+
+        const value_json = try resolveStoreUpdateValue(alloc, state_json, value_val);
+        try self.store_writer(alloc, access.base_url, access.api_token, namespace_val.string, key_val.string, value_json);
     }
 
     // ── Async polling ────────────────────────────────────────────────
@@ -1801,6 +1873,78 @@ fn getWorkflowField(alloc: std.mem.Allocator, workflow_json: []const u8, field: 
     const val = parsed.value.object.get(field) orelse return null;
     if (val == .string) return alloc.dupe(u8, val.string) catch null;
     return serializeJsonValue(alloc, val) catch null;
+}
+
+fn getRuntimeStringSetting(
+    alloc: std.mem.Allocator,
+    state_json: []const u8,
+    workflow_json: []const u8,
+    field_names: []const []const u8,
+) ?[]const u8 {
+    for (field_names) |field_name| {
+        if (getConfigString(alloc, state_json, field_name)) |value| return value;
+    }
+    for (field_names) |field_name| {
+        if (getWorkflowField(alloc, workflow_json, field_name)) |value| return value;
+    }
+    return null;
+}
+
+fn getConfigString(alloc: std.mem.Allocator, state_json: []const u8, field_name: []const u8) ?[]const u8 {
+    const path = std.fmt.allocPrint(alloc, "state.__config.{s}", .{field_name}) catch return null;
+    defer alloc.free(path);
+
+    const raw = state_mod.getStateValue(alloc, state_json, path) catch return null;
+    const raw_value = raw orelse return null;
+    defer alloc.free(raw_value);
+
+    const parsed = json.parseFromSlice(json.Value, alloc, raw_value, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .string) return null;
+    return alloc.dupe(u8, parsed.value.string) catch null;
+}
+
+fn resolveStoreUpdateValue(alloc: std.mem.Allocator, state_json: []const u8, value: json.Value) ![]const u8 {
+    if (value == .string and std.mem.startsWith(u8, value.string, "state.")) {
+        const raw = try state_mod.getStateValue(alloc, state_json, value.string);
+        return raw orelse try alloc.dupe(u8, "null");
+    }
+    return serializeJsonValue(alloc, value);
+}
+
+fn putStoreValueViaHttp(
+    alloc: std.mem.Allocator,
+    base_url: []const u8,
+    api_token: ?[]const u8,
+    namespace: []const u8,
+    key: []const u8,
+    value_json: []const u8,
+) !void {
+    var client = tracker_client.TrackerClient.init(alloc, base_url, api_token);
+    const ok = try client.storePutValue(namespace, key, value_json);
+    if (!ok) return error.StoreWriteFailed;
+}
+
+var test_store_write_base_url: []const u8 = "";
+var test_store_write_api_token: ?[]const u8 = null;
+var test_store_write_namespace: []const u8 = "";
+var test_store_write_key: []const u8 = "";
+var test_store_write_value_json: []const u8 = "";
+
+fn mockStoreWriter(
+    alloc: std.mem.Allocator,
+    base_url: []const u8,
+    api_token: ?[]const u8,
+    namespace: []const u8,
+    key: []const u8,
+    value_json: []const u8,
+) !void {
+    _ = alloc;
+    test_store_write_base_url = base_url;
+    test_store_write_api_token = api_token;
+    test_store_write_namespace = namespace;
+    test_store_write_key = key;
+    test_store_write_value_json = value_json;
 }
 
 /// Get worker tags from node definition.
@@ -3160,6 +3304,44 @@ test "engine: configurable runs inject __config" {
         try std.testing.expect(std.mem.indexOf(u8, sj, "__config") != null);
         try std.testing.expect(std.mem.indexOf(u8, sj, "gpt-4") != null);
     }
+}
+
+test "engine: transform store_updates writes updated state value using config tracker settings" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    test_store_write_base_url = "";
+    test_store_write_api_token = null;
+    test_store_write_namespace = "";
+    test_store_write_key = "";
+    test_store_write_value_json = "";
+
+    const wf =
+        \\{"nodes":{"save":{"type":"transform","updates":"{\"review_result\":{\"grade\":\"approved\"}}","store_updates":{"namespace":"project_context","key":"latest_review","value":"state.review_result"}}},"edges":[["__start__","save"],["save","__end__"]],"schema":{"review_result":{"type":"object","reducer":"last_value"},"__config":{"type":"object","reducer":"last_value"}}}
+    ;
+
+    try store.createRunWithState("r1", null, wf, "{}", "{}");
+    try store.setConfigJson("r1", "{\"tracker_url\":\"http://tickets.test\",\"tracker_api_token\":\"secret-token\"}");
+    try store.updateRunStatus("r1", "running", null);
+
+    var engine = Engine.init(&store, allocator, 500);
+    engine.store_writer = mockStoreWriter;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const run_row = (try store.getRun(arena.allocator(), "r1")).?;
+    try engine.processRun(arena.allocator(), run_row);
+
+    const updated_run = (try store.getRun(arena.allocator(), "r1")).?;
+    try std.testing.expectEqualStrings("completed", updated_run.status);
+    try std.testing.expectEqualStrings("http://tickets.test", test_store_write_base_url);
+    try std.testing.expect(test_store_write_api_token != null);
+    try std.testing.expectEqualStrings("secret-token", test_store_write_api_token.?);
+    try std.testing.expectEqualStrings("project_context", test_store_write_namespace);
+    try std.testing.expectEqualStrings("latest_review", test_store_write_key);
+    try std.testing.expectEqualStrings("{\"grade\":\"approved\"}", test_store_write_value_json);
 }
 
 test "getWorkflowVersion: extracts version" {

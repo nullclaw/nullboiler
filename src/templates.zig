@@ -13,13 +13,13 @@
 ///   - `{{state.X.Y}}`        -- nested paths with optional [-1] array indexing
 ///   - `{{input.X}}`          -- look up key X in the workflow input JSON
 ///   - `{{item}}`             -- current item string for send iterations
+///   - `{{store.ns.key}}`     -- fetch NullTickets store entry value
 ///
 /// Conditional blocks:
 ///   - `{% if <expr> %}...{% endif %}`
 ///   - `{% if <expr> %}...{% else %}...{% endif %}`
 ///   Conditionals are processed before expression substitution.
 ///   Truthiness: non-null, non-empty, not "false", not "null" string values are truthy.
-
 const std = @import("std");
 
 // ── Context ───────────────────────────────────────────────────────────
@@ -351,7 +351,33 @@ fn jsonValueToString(allocator: std.mem.Allocator, val: std.json.Value) RenderEr
 // ── New state-based template engine ───────────────────────────────────
 
 const state_mod = @import("state.zig");
+const tracker_client = @import("tracker_client.zig");
 const Allocator = std.mem.Allocator;
+
+pub const StoreFetcher = *const fn (
+    alloc: Allocator,
+    base_url: []const u8,
+    api_token: ?[]const u8,
+    namespace: []const u8,
+    key: []const u8,
+) anyerror!?[]const u8;
+
+pub const StoreAccess = struct {
+    base_url: []const u8,
+    api_token: ?[]const u8 = null,
+    fetcher: StoreFetcher,
+};
+
+pub fn fetchStoreValueHttp(
+    alloc: Allocator,
+    base_url: []const u8,
+    api_token: ?[]const u8,
+    namespace: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    var client = tracker_client.TrackerClient.init(alloc, base_url, api_token);
+    return client.storeGetValue(namespace, key);
+}
 
 /// Strip surrounding double quotes from a JSON string value.
 /// `"hello"` -> `hello`, `42` -> `42`, `[1,2]` -> `[1,2]`
@@ -378,6 +404,7 @@ fn resolveNewExpression(
     state_json: []const u8,
     input_json: ?[]const u8,
     item_json: ?[]const u8,
+    store_access: ?StoreAccess,
 ) ![]const u8 {
     if (std.mem.startsWith(u8, expr, "state.")) {
         // Use getStateValue which handles "state." prefix, nested paths, [-1] indexing
@@ -457,6 +484,27 @@ fn resolveNewExpression(
         return alloc.dupe(u8, "") catch return error.OutOfMemory;
     }
 
+    if (std.mem.startsWith(u8, expr, "store.")) {
+        const access = store_access orelse return error.StoreNotConfigured;
+        const store_expr = expr["store.".len..];
+        const dot = std.mem.indexOfScalar(u8, store_expr, '.') orelse return error.InvalidStoreExpression;
+        const namespace = store_expr[0..dot];
+        const key = store_expr[dot + 1 ..];
+        if (namespace.len == 0 or key.len == 0) return error.InvalidStoreExpression;
+
+        const raw = try access.fetcher(alloc, access.base_url, access.api_token, namespace, key);
+        if (raw) |r| {
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+    }
+
     // Unknown expression — return empty
     return alloc.dupe(u8, "") catch return error.OutOfMemory;
 }
@@ -469,8 +517,9 @@ fn isNewTruthy(
     state_json: []const u8,
     input_json: ?[]const u8,
     item_json: ?[]const u8,
+    store_access: ?StoreAccess,
 ) bool {
-    const value = resolveNewExpression(alloc, expr, state_json, input_json, item_json) catch return false;
+    const value = resolveNewExpression(alloc, expr, state_json, input_json, item_json, store_access) catch return false;
     defer alloc.free(value);
 
     if (value.len == 0) return false;
@@ -488,6 +537,7 @@ fn processNewConditionals(
     state_json: []const u8,
     input_json: ?[]const u8,
     item_json: ?[]const u8,
+    store_access: ?StoreAccess,
 ) ![]const u8 {
     var result: std.ArrayListUnmanaged(u8) = .empty;
     errdefer result.deinit(alloc);
@@ -550,18 +600,18 @@ fn processNewConditionals(
                     return error.OutOfMemory;
                 }
 
-                const truthy = isNewTruthy(alloc, expr, state_json, input_json, item_json);
+                const truthy = isNewTruthy(alloc, expr, state_json, input_json, item_json, store_access);
 
                 if (truthy) {
                     const branch_end = else_start orelse endif_start.?;
                     const branch = template[after_tag..branch_end];
-                    const processed = try processNewConditionals(alloc, branch, state_json, input_json, item_json);
+                    const processed = try processNewConditionals(alloc, branch, state_json, input_json, item_json, store_access);
                     defer alloc.free(processed);
                     result.appendSlice(alloc, processed) catch return error.OutOfMemory;
                 } else {
                     if (else_end) |ee| {
                         const branch = template[ee..endif_start.?];
-                        const processed = try processNewConditionals(alloc, branch, state_json, input_json, item_json);
+                        const processed = try processNewConditionals(alloc, branch, state_json, input_json, item_json, store_access);
                         defer alloc.free(processed);
                         result.appendSlice(alloc, processed) catch return error.OutOfMemory;
                     }
@@ -602,8 +652,19 @@ pub fn renderTemplate(
     input_json: ?[]const u8,
     item_json: ?[]const u8,
 ) ![]const u8 {
+    return renderTemplateWithStore(alloc, template, state_json, input_json, item_json, null);
+}
+
+pub fn renderTemplateWithStore(
+    alloc: Allocator,
+    template: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+    store_access: ?StoreAccess,
+) ![]const u8 {
     // Phase 1: Process conditional blocks
-    const preprocessed = try processNewConditionals(alloc, template, state_json, input_json, item_json);
+    const preprocessed = try processNewConditionals(alloc, template, state_json, input_json, item_json, store_access);
     defer alloc.free(preprocessed);
 
     // Phase 2: Resolve {{expression}} substitutions
@@ -621,7 +682,7 @@ pub fn renderTemplate(
                 const raw_expr = preprocessed[after_open..close];
                 const expr = std.mem.trim(u8, raw_expr, " \t\n\r");
 
-                const value = try resolveNewExpression(alloc, expr, state_json, input_json, item_json);
+                const value = try resolveNewExpression(alloc, expr, state_json, input_json, item_json, store_access);
                 defer alloc.free(value);
 
                 result.appendSlice(alloc, value) catch return error.OutOfMemory;
@@ -683,6 +744,47 @@ test "template no interpolation" {
     const result = try renderTemplate(alloc, "plain text", "{}", null, null);
     defer alloc.free(result);
     try std.testing.expectEqualStrings("plain text", result);
+}
+
+fn mockStoreFetcher(
+    alloc: Allocator,
+    base_url: []const u8,
+    api_token: ?[]const u8,
+    namespace: []const u8,
+    key: []const u8,
+) !?[]const u8 {
+    _ = base_url;
+    _ = api_token;
+    if (std.mem.eql(u8, namespace, "prefs") and std.mem.eql(u8, key, "theme")) {
+        return try alloc.dupe(u8, "\"dark\"");
+    }
+    return null;
+}
+
+test "template store interpolation" {
+    const alloc = std.testing.allocator;
+    const result = try renderTemplateWithStore(
+        alloc,
+        "Theme: {{store.prefs.theme}}",
+        "{}",
+        null,
+        null,
+        .{
+            .base_url = "http://example.test",
+            .fetcher = mockStoreFetcher,
+        },
+    );
+    defer alloc.free(result);
+
+    try std.testing.expectEqualStrings("Theme: dark", result);
+}
+
+test "template store interpolation errors without store access" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(
+        error.StoreNotConfigured,
+        renderTemplateWithStore(alloc, "Theme: {{store.prefs.theme}}", "{}", null, null, null),
+    );
 }
 
 // ── Old template engine tests ─────────────────────────────────────────
