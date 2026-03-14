@@ -362,8 +362,27 @@ pub const Engine = struct {
             }
         }
 
-        // 2. Load workflow definition
+        // 2. Load and parse workflow definition once for the entire tick.
+        // Helper functions still accept raw JSON strings for external callers,
+        // but we pre-extract commonly used values here to avoid redundant parsing.
         const workflow_json = run_row.workflow_json;
+        const wf_parsed = json.parseFromSlice(json.Value, alloc, workflow_json, .{}) catch {
+            log.err("failed to parse workflow_json for run {s}", .{run_row.id});
+            try self.store.updateRunStatus(run_row.id, "failed", "invalid workflow JSON");
+            return;
+        };
+        const wf_root = wf_parsed.value;
+
+        // Pre-extract schema (used many times in the loop)
+        const cached_schema_json = if (wf_root == .object) blk: {
+            if (wf_root.object.get("state_schema")) |ss| {
+                break :blk serializeJsonValue(alloc, ss) catch "{}";
+            }
+            if (wf_root.object.get("schema")) |ss| {
+                break :blk serializeJsonValue(alloc, ss) catch "{}";
+            }
+            break :blk "{}";
+        } else "{}";
 
         // 2b. Parse breakpoint lists from workflow definition
         const interrupt_before = parseBreakpointList(alloc, workflow_json, "interrupt_before");
@@ -515,7 +534,7 @@ pub const Engine = struct {
     
                         if (std.mem.eql(u8, def_node_type, "transform")) {
                             const def_updates = getNodeField(alloc, def_node_json, "updates") orelse "{}";
-                            const def_schema = getSchemaJson(alloc, workflow_json);
+                            const def_schema = cached_schema_json;
                             const def_new_state = state_mod.applyUpdates(alloc, running_state, def_updates, def_schema) catch running_state;
                             running_state = def_new_state;
                         } else if (std.mem.eql(u8, def_node_type, "task") or std.mem.eql(u8, def_node_type, "agent")) {
@@ -523,7 +542,7 @@ pub const Engine = struct {
                             switch (def_result) {
                                 .completed => |cr| {
                                     if (cr.state_updates) |updates| {
-                                        const def_schema = getSchemaJson(alloc, workflow_json);
+                                        const def_schema = cached_schema_json;
                                         const def_new_state = state_mod.applyUpdates(alloc, running_state, updates, def_schema) catch running_state;
                                         running_state = def_new_state;
                                     }
@@ -638,7 +657,7 @@ pub const Engine = struct {
                     const state_updates = getNodeField(alloc, node_json, "updates") orelse "{}";
     
                     // Get schema from workflow
-                    const schema_json = getSchemaJson(alloc, workflow_json);
+                    const schema_json = cached_schema_json;
     
                     // Apply updates via reducers
                     const new_state = state_mod.applyUpdates(alloc, running_state, state_updates, schema_json) catch |err| {
@@ -670,7 +689,7 @@ pub const Engine = struct {
                         const ck_c = computeCacheKey(alloc, node_name, rnd_c) catch break :cache_check;
                         const cached = self.store.getCachedResult(alloc, ck_c) catch break :cache_check;
                         if (cached) |cached_upd| {
-                            const cs = getSchemaJson(alloc, workflow_json);
+                            const cs = cached_schema_json;
                             running_state = state_mod.applyUpdates(alloc, running_state, cached_upd, cs) catch running_state;
                             try completed_nodes.put(try alloc.dupe(u8, node_name), {});
                             log.info("task node {s} cache hit for run {s}", .{ node_name, run_row.id });
@@ -777,7 +796,7 @@ pub const Engine = struct {
                             running_state = stripMeta(alloc, running_state) catch running_state;
     
                             if (cr.state_updates) |updates| {
-                                const schema_json = getSchemaJson(alloc, workflow_json);
+                                const schema_json = cached_schema_json;
                                 const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
                                     log.err("task node {s} failed to apply updates: {}", .{ node_name, err });
                                     try self.store.updateRunStatus(run_row.id, "failed", "state update failed");
@@ -809,7 +828,7 @@ pub const Engine = struct {
                             // Consume pending injections
                             const injections = self.store.consumePendingInjections(alloc, run_row.id, node_name) catch &.{};
                             for (injections) |injection| {
-                                const schema_json = getSchemaJson(alloc, workflow_json);
+                                const schema_json = cached_schema_json;
                                 const new_state = state_mod.applyUpdates(alloc, running_state, injection.updates_json, schema_json) catch |err| {
                                     log.warn("failed to apply injection for run {s}: {}", .{ run_row.id, err });
                                     continue;
@@ -888,7 +907,7 @@ pub const Engine = struct {
                     switch (result) {
                         .completed => |cr| {
                             if (cr.state_updates) |updates| {
-                                const schema_json = getSchemaJson(alloc, workflow_json);
+                                const schema_json = cached_schema_json;
                                 const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
                                     log.err("subgraph node {s} failed to apply updates: {}", .{ node_name, err });
                                     try self.store.updateRunStatus(run_row.id, "failed", "subgraph state update failed");
@@ -912,7 +931,7 @@ pub const Engine = struct {
                     // Send: read items from state, dispatch target_node per item
                     const result = try self.executeSendNode(alloc, run_row, node_name, node_json, running_state);
                     if (result.state_updates) |updates| {
-                        const schema_json = getSchemaJson(alloc, workflow_json);
+                        const schema_json = cached_schema_json;
                         const new_state = state_mod.applyUpdates(alloc, running_state, updates, schema_json) catch |err| {
                             log.err("send node {s} failed to apply updates: {}", .{ node_name, err });
                             try self.store.updateRunStatus(run_row.id, "failed", "send state update failed");
@@ -961,7 +980,7 @@ pub const Engine = struct {
                 }
     
                 // Strip ephemeral keys before checkpoint persistence
-                const schema_for_eph = getSchemaJson(alloc, workflow_json);
+                const schema_for_eph = cached_schema_json;
                 running_state = state_mod.stripEphemeralKeys(alloc, running_state, schema_for_eph) catch running_state;
     
                 // Save checkpoint after each node
