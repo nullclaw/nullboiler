@@ -139,7 +139,13 @@ Response for GET:
 
 New template syntax: `{{store.namespace.key}}` — engine fetches from nulltickets Store API during prompt rendering.
 
-New node type isn't needed — `task` nodes can read via template, and `transform` nodes can write via a new `store_updates` field:
+Runtime resolution:
+
+- NullTickets base URL comes from workflow-level `tracker_url` / `nulltickets_url`, or from run config (`config.tracker_url`, surfaced as `state.__config.tracker_url`).
+- Optional auth token comes from `tracker_api_token` / `nulltickets_api_token` on the workflow or run config.
+- Missing store keys render as empty strings in templates.
+
+New node type isn't needed — `task` nodes can read via template, and `transform` nodes can write via a `store_updates` field (single object or array of objects):
 
 ```json
 {
@@ -155,7 +161,9 @@ New node type isn't needed — `task` nodes can read via template, and `transfor
 }
 ```
 
-Engine calls nulltickets `PUT /store/{namespace}/{key}` when `store_updates` is present.
+`store_updates.value` can point at a state path such as `state.review_result`, or it can be inline JSON that will be written as-is.
+
+Engine calls nulltickets `PUT /store/{namespace}/{key}` after `updates` are applied, so writes can reference the node's freshly updated state.
 
 ---
 
