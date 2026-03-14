@@ -107,16 +107,6 @@ pub fn handleRequest(ctx: *Context, method: []const u8, target: []const u8, body
         return handleGetStep(ctx, seg1.?, seg3.?);
     }
 
-    // POST /runs/{id}/steps/{step_id}/approve (legacy, removed)
-    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "approve") and seg5 == null) {
-        return jsonResponse(410, "{\"error\":{\"code\":\"gone\",\"message\":\"approval steps have been removed; use interrupt + resume instead\"}}");
-    }
-
-    // POST /runs/{id}/steps/{step_id}/reject (legacy, removed)
-    if (is_post and eql(seg0, "runs") and seg1 != null and eql(seg2, "steps") and seg3 != null and eql(seg4, "reject") and seg5 == null) {
-        return jsonResponse(410, "{\"error\":{\"code\":\"gone\",\"message\":\"approval steps have been removed; use interrupt + resume instead\"}}");
-    }
-
     // GET /runs/{id}/events
     if (is_get and eql(seg0, "runs") and seg1 != null and eql(seg2, "events") and seg3 == null) {
         return handleListEvents(ctx, seg1.?);
@@ -2363,23 +2353,6 @@ test "API: get step enforces run ownership" {
 
     const resp = handleRequest(&ctx, "GET", "/runs/run-a/steps/step-b-1", "");
     try std.testing.expectEqual(@as(u16, 404), resp.status_code);
-}
-
-test "API: approve endpoint returns 410 gone" {
-    const allocator = std.testing.allocator;
-    var store = try Store.init(allocator, ":memory:");
-    defer store.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var ctx = Context{
-        .store = &store,
-        .allocator = arena.allocator(),
-    };
-
-    const resp = handleRequest(&ctx, "POST", "/runs/run-1/steps/step-1/approve", "");
-    try std.testing.expectEqual(@as(u16, 410), resp.status_code);
 }
 
 test "API: register worker rejects non-array tags" {

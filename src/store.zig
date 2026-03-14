@@ -522,7 +522,7 @@ pub const Store = struct {
     }
 
     pub fn getActiveRuns(self: *Self, allocator: std.mem.Allocator) ![]types.RunRow {
-        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE status IN ('running', 'paused') ORDER BY created_at_ms DESC";
+        const sql = "SELECT id, idempotency_key, status, workflow_json, input_json, callbacks_json, error_text, created_at_ms, updated_at_ms, started_at_ms, ended_at_ms, state_json, config_json, parent_run_id FROM runs WHERE status = 'running' ORDER BY created_at_ms DESC";
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null) != c.SQLITE_OK) {
             return error.SqlitePrepareFailed;
@@ -1940,8 +1940,7 @@ test "Store: get active runs" {
     defer s.deinit();
     try s.insertRun("r1", null, "running", "{}", "{}", "[]");
     try s.insertRun("r2", null, "pending", "{}", "{}", "[]");
-    try s.insertRun("r3", null, "paused", "{}", "{}", "[]");
-    try s.insertRun("r4", null, "completed", "{}", "{}", "[]");
+    try s.insertRun("r3", null, "completed", "{}", "{}", "[]");
 
     const active = try s.getActiveRuns(allocator);
     defer {
@@ -1955,7 +1954,7 @@ test "Store: get active runs" {
         }
         allocator.free(active);
     }
-    try std.testing.expectEqual(@as(usize, 2), active.len);
+    try std.testing.expectEqual(@as(usize, 1), active.len);
 }
 
 test "Store: count steps by status" {
