@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta http-equiv="content-security-policy" content="default-src 'self'; base-uri 'self'; connect-src 'self' https://api.github.com; font-src 'self'; form-action 'self'; frame-src 'none'; img-src 'self' data:; manifest-src 'self'; media-src 'self'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'sha256-Hgl25ENv1AqnD+ake29iKuZKV21riYE/F/SAJR3WIwQ=' 'sha256-IRprildjLL+3SuNhpxASNxA3FHtF9vaMbtB0cdufpr4=' 'sha256-LcNTxu29EVfjSk9ivTAiurS0+hgFtTQHTIpEu3XUnxw='; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:" data-null-security-policy>
+		<meta name="referrer" content="strict-origin-when-cross-origin" data-null-security-policy>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="theme-color" content="#0c0a08" />
+		<script>
+			document.documentElement.classList.add('js');
+			// Resolve the shared theme mode before first paint.
+			(function () {
+				var key = 'nullmenu-theme';
+				var valid = function (value) {
+					return value === 'system' || value === 'light' || value === 'dark';
+				};
+				var cookieMode = null;
+				try {
+					var cookie = document.cookie
+						.split(';')
+						.map(function (part) { return part.trim(); })
+						.find(function (part) { return part.indexOf(key + '=') === 0; });
+					if (cookie) {
+						try { cookieMode = decodeURIComponent(cookie.slice(key.length + 1)); } catch (e) {}
+					}
+				} catch (e) {}
+				var localMode = null;
+				try { localMode = localStorage.getItem(key); } catch (e) {}
+				var mode = valid(cookieMode) ? cookieMode : valid(localMode) ? localMode : 'system';
+				var theme = mode === 'system'
+					? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+					: mode;
+				document.documentElement.dataset.themeMode = mode;
+				document.documentElement.dataset.theme = theme;
+				if (theme === 'light') {
+					document.querySelector('meta[name="theme-color"]').content = '#f2ead8';
+				}
+			})();
+		</script>
+		<link rel="icon" href="../../../favicon.svg" type="image/svg+xml" />
+		<link
+			rel="preload"
+			href="../../../fonts/InstrumentSerif-normal-400-latin.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link
+			rel="preload"
+			href="../../../fonts/InstrumentSerif-italic-400-latin.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link
+			rel="preload"
+			href="../../../fonts/Geist-normal-300_700-latin.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link
+			rel="preload"
+			href="../../../fonts/GeistMono-normal-400_600-latin.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link href="../../../_app/immutable/entry/start.D6R0mWux.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/B-pXrDi8.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/Bneb2paa.js" rel="modulepreload">
+		<link href="../../../_app/immutable/entry/app.DBMZA7cE.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/HclGiUj8.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/xihTtKlq.js" rel="modulepreload">
+		<link href="../../../_app/immutable/nodes/0.KTGgZPxQ.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/DIs7c8UJ.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/Bw9V50Kl.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/DsBvvBRv.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/Bc0JvcBg.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/3dok05DY.js" rel="modulepreload">
+		<link href="../../../_app/immutable/nodes/2.C8LFJkdQ.js" rel="modulepreload">
+		<link href="../../../_app/immutable/nodes/5.Dp1PLP_h.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/F-iJ1YYI.js" rel="modulepreload">
+		<!--12qhfyh--><!----><style>:root:root{--spice:#d97742;--spice-dim:#94512d;}</style><!----> <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%2312100d%22%2F%3E%3Ccircle%20cx%3D%2216%22%20cy%3D%2216%22%20r%3D%229%22%20stroke%3D%22%23ece5d8%22%20stroke-width%3D%223.4%22%20fill%3D%22none%22%2F%3E%3Cline%20x1%3D%228.5%22%20y1%3D%2225.5%22%20x2%3D%2223.5%22%20y2%3D%226.5%22%20stroke%3D%22%23d97742%22%20stroke-width%3D%223.6%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fsvg%3E" type="image/svg+xml"/><!----><!--gsrl61--><meta name="description" content="All 36 operations — runs, steps, checkpoints, workers, workflows, tracker bridge and admin."/> <link rel="canonical" href="https://boiler.nullmenu.ai/docs/reference/api/"/> <meta property="og:type" content="article"/> <meta property="og:site_name" content="NullBoiler"/> <meta property="og:title" content="HTTP API — NullBoiler docs"/> <meta property="og:description" content="All 36 operations — runs, steps, checkpoints, workers, workflows, tracker bridge and admin."/> <meta property="og:url" content="https://boiler.nullmenu.ai/docs/reference/api/"/> <meta property="og:image" content="https://boiler.nullmenu.ai/og/boiler.png"/> <meta property="og:image:alt" content="Social preview for NullBoiler: HTTP API — NullBoiler docs"/> <meta property="og:image:width" content="1200"/> <meta property="og:image:height" content="630"/> <meta name="twitter:card" content="summary_large_image"/> <meta name="twitter:title" content="HTTP API — NullBoiler docs"/> <meta name="twitter:description" content="All 36 operations — runs, steps, checkpoints, workers, workflows, tracker bridge and admin."/> <meta name="twitter:image" content="https://boiler.nullmenu.ai/og/boiler.png"/> <meta name="twitter:image:alt" content="Social preview for NullBoiler: HTTP API — NullBoiler docs"/> <!----><script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://nullmenu.ai/#organization","name":"Null ecosystem","url":"https://nullmenu.ai/","sameAs":["https://github.com/nullclaw"]},{"@type":"TechArticle","@id":"https://boiler.nullmenu.ai/docs/reference/api/#article","headline":"HTTP API — NullBoiler docs","description":"All 36 operations — runs, steps, checkpoints, workers, workflows, tracker bridge and admin.","url":"https://boiler.nullmenu.ai/docs/reference/api/","image":"https://boiler.nullmenu.ai/og/boiler.png","inLanguage":"en","articleSection":"Reference","version":"v2026.5.29","dateModified":"2026-07-17","mainEntityOfPage":"https://boiler.nullmenu.ai/docs/reference/api/","author":{"@id":"https://nullmenu.ai/#organization"},"publisher":{"@id":"https://nullmenu.ai/#organization"}},{"@type":"BreadcrumbList","@id":"https://boiler.nullmenu.ai/docs/reference/api/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"NullBoiler","item":"https://boiler.nullmenu.ai/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://boiler.nullmenu.ai/docs/"},{"@type":"ListItem","position":3,"name":"HTTP API","item":"https://boiler.nullmenu.ai/docs/reference/api/"}]}]}</script><!----><!----><title>HTTP API — NullBoiler docs</title>
+		<link href="../../../_app/immutable/assets/0.b4SYXXpF.css" rel="stylesheet">
+		<link href="../../../_app/immutable/assets/2.D_3iEgFB.css" rel="stylesheet">
+		<link href="../../../_app/immutable/assets/5.s1K1snEQ.css" rel="stylesheet">
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents"><!--[--><!--[0--><!--[--><a class="skip mono svelte-12qhfyh" href="#main">Skip to content</a> <span id="sr-status" class="sr-status" role="status" aria-live="polite"></span> <header class="svelte-1elxaub"><div class="inner container svelte-1elxaub"><div class="left svelte-1elxaub"><a class="brand svelte-1elxaub" href="/" aria-label="NullBoiler home"><svg width="24" height="24" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="16" cy="16" r="10.5" stroke="currentColor" stroke-width="1.75"></circle><line class="slash" x1="7" y1="27" x2="25" y2="5" stroke="var(--accent)" stroke-width="1.75" stroke-linecap="round"></line></svg><!----> <span class="word mono svelte-1elxaub">null<span class="suffix serif-i svelte-1elxaub">·boiler</span></span></a> <!--[0--><a class="version mono svelte-1elxaub" href="https://github.com/nullclaw/nullboiler/releases/tag/v2026.5.29" target="_blank" rel="noopener" aria-label="Published release v2026.5.29 (opens in a new tab)">v2026.5.29<!----><svg class="functional-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></a><!--]--></div> <nav class="desktop svelte-1elxaub" aria-label="Main"><!--[--><a href="/docs/" class="nav-link mono svelte-1elxaub active" aria-current="page">Docs<!--[-1--><!--]--></a><a href="https://nullmenu.ai" class="nav-link mono svelte-1elxaub">The menu<!--[-1--><!--]--></a><a href="https://github.com/nullclaw/nullboiler" class="nav-link mono svelte-1elxaub" target="_blank" rel="noopener">GitHub<!--[0--><span class="ext svelte-1elxaub"><!----><svg class="functional-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></span><!--]--></a><!--]--> <button class="search-btn mono svelte-1elxaub" aria-label="Search docs"><!----><svg class="functional-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="5.75"></circle><path d="m14.8 14.8 4.7 4.7"></path></g></svg><!----><!----> <kbd class="svelte-1elxaub">Ctrl K</kbd></button> <button class="theme-toggle svelte-1elxaub" aria-label="Theme: system (dark). Switch to light theme" title="Theme: system (dark). Switch to light theme"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" class="svelte-1elxaub"><circle cx="9" cy="9" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5"></circle><path class="half" d="M9 2.25 a6.75 6.75 0 0 1 0 13.5 Z" fill="currentColor"></path></svg> <span class="theme-mode mono svelte-1elxaub" aria-hidden="true">system</span></button></nav> <button class="burger svelte-1elxaub" aria-expanded="false" aria-controls="mobile-navigation" aria-label="Open navigation"><span class="svelte-1elxaub"></span><span class="svelte-1elxaub"></span></button></div> <details class="nojs-navigation svelte-1elxaub" data-pagefind-ignore=""><summary class="mono svelte-1elxaub">Menu</summary> <nav aria-label="Main navigation" class="svelte-1elxaub"><!--[--><a href="/docs/" class="mono svelte-1elxaub">Docs<!--[-1--><!--]--></a><a href="https://nullmenu.ai" class="mono svelte-1elxaub">The menu<!--[-1--><!--]--></a><a href="https://github.com/nullclaw/nullboiler" class="mono svelte-1elxaub" target="_blank" rel="noopener">GitHub<!--[0--><span class="ext svelte-1elxaub"><!----><svg class="functional-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></span><!--]--></a><!--]--></nav></details> <!--[-1--><!--]--></header><!----> <!--[-1--><!--]--><!----> <main id="main" class="svelte-12qhfyh"><!--[0--><!--[--><div class="docs container svelte-1bpnej"><button class="nav-toggle mono svelte-1bpnej" aria-expanded="false" aria-controls="docs-navigation">menu — docs</button> <details class="nojs-docs-navigation svelte-1bpnej" data-pagefind-ignore=""><summary class="mono svelte-1bpnej">Browse documentation</summary> <nav aria-label="Documentation navigation" class="svelte-1bpnej"><a href="/docs/" class="serif-i svelte-1bpnej">Docs home</a> <!--[--><div class="nojs-group svelte-1bpnej"><h2 class="label svelte-1bpnej">Start</h2> <!--[--><a href="/docs/start/install/" class="svelte-1bpnej">Install</a><a href="/docs/start/quickstart/" class="svelte-1bpnej">Quickstart</a><!--]--></div><div class="nojs-group svelte-1bpnej"><h2 class="label svelte-1bpnej">Guides</h2> <!--[--><a href="/docs/guides/workflow-graphs/" class="svelte-1bpnej">Workflow graphs</a><a href="/docs/guides/workers-and-dispatch/" class="svelte-1bpnej">Workers and dispatch</a><!--]--></div><div class="nojs-group svelte-1bpnej"><h2 class="label svelte-1bpnej">Reference</h2> <!--[--><a href="/docs/reference/api/" class="svelte-1bpnej">HTTP API</a><a href="/docs/reference/configuration/" class="svelte-1bpnej">Configuration</a><!--]--></div><!--]--> <!--[-1--><!--]--></nav></details> <!--[-1--><!--]--> <div id="docs-navigation" class="sidebar svelte-1bpnej" role="navigation" aria-label="Documentation"><div class="drawer-head mono svelte-1bpnej"><div class="svelte-1bpnej"><span class="drawer-kicker svelte-1bpnej">Browse</span> <span id="docs-navigation-title" class="drawer-title svelte-1bpnej">Documentation</span></div> <button class="drawer-close svelte-1bpnej"><span>close</span><!----><svg class="functional-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m7 7 10 10"></path><path d="M17 7 7 17"></path></g></svg><!----><!----></button></div> <a href="/docs/" class="cookbook-link serif-i svelte-1bpnej">Docs home</a> <!--[--><div class="group svelte-1bpnej"><h2 class="label svelte-1bpnej">Start</h2> <ul class="svelte-1bpnej"><!--[--><li class="svelte-1bpnej"><a href="/docs/start/install/" class="svelte-1bpnej">Install</a></li><li class="svelte-1bpnej"><a href="/docs/start/quickstart/" class="svelte-1bpnej">Quickstart</a></li><!--]--></ul></div><div class="group svelte-1bpnej"><h2 class="label svelte-1bpnej">Guides</h2> <ul class="svelte-1bpnej"><!--[--><li class="svelte-1bpnej"><a href="/docs/guides/workflow-graphs/" class="svelte-1bpnej">Workflow graphs</a></li><li class="svelte-1bpnej"><a href="/docs/guides/workers-and-dispatch/" class="svelte-1bpnej">Workers and dispatch</a></li><!--]--></ul></div><div class="group svelte-1bpnej"><h2 class="label svelte-1bpnej">Reference</h2> <ul class="svelte-1bpnej"><!--[--><li class="svelte-1bpnej"><a href="/docs/reference/api/" aria-current="page" class="svelte-1bpnej active">HTTP API</a></li><li class="svelte-1bpnej"><a href="/docs/reference/configuration/" class="svelte-1bpnej">Configuration</a></li><!--]--></ul></div><!--]--> <!--[-1--><!--]--></div> <div class="content svelte-1bpnej"><!--[--><!----> <div class="page svelte-5oqt2y has-toc"><article data-pagefind-body=""><p class="label label--accent" data-pagefind-ignore="">Reference</p> <h1 class="serif svelte-5oqt2y">HTTP API</h1> <div class="meta mono svelte-5oqt2y" data-pagefind-ignore=""><!--[0--><span class="chip svelte-5oqt2y" title="Last verified with this release">verified · v2026.5.29</span><!--]--> <button class="meta-link svelte-5oqt2y"><!--[-1-->copy as markdown<!--]--></button> <a class="meta-link svelte-5oqt2y" href="https://github.com/nullclaw/nullmenu/edit/main/content/boiler/docs/reference/api.md" target="_blank" rel="noopener">edit on github <!----><svg class="functional-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></a></div> <!--[0--><details class="mobile-toc svelte-5oqt2y" data-pagefind-ignore=""><summary class="svelte-5oqt2y"><span class="label">On this page</span> <span class="toc-count mono svelte-5oqt2y">10 sections <!----><svg class="functional-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.5v11"></path><path d="M6.5 12h11"></path></g></svg><!----><!----></span></summary> <nav aria-label="On this page" class="svelte-5oqt2y"><ul class="svelte-5oqt2y"><!--[--><li class="d2 svelte-5oqt2y"><a href="#conventions" class="svelte-5oqt2y">Conventions</a></li><li class="d2 svelte-5oqt2y"><a href="#health-and-metrics" class="svelte-5oqt2y">Health and metrics</a></li><li class="d2 svelte-5oqt2y"><a href="#runs" class="svelte-5oqt2y">Runs</a></li><li class="d2 svelte-5oqt2y"><a href="#steps-events-stream" class="svelte-5oqt2y">Steps, events, stream</a></li><li class="d2 svelte-5oqt2y"><a href="#checkpoints" class="svelte-5oqt2y">Checkpoints</a></li><li class="d2 svelte-5oqt2y"><a href="#workers" class="svelte-5oqt2y">Workers</a></li><li class="d2 svelte-5oqt2y"><a href="#workflows" class="svelte-5oqt2y">Workflows</a></li><li class="d2 svelte-5oqt2y"><a href="#tracker-bridge" class="svelte-5oqt2y">Tracker bridge</a></li><li class="d2 svelte-5oqt2y"><a href="#admin-and-internal" class="svelte-5oqt2y">Admin and internal</a></li><li class="d2 svelte-5oqt2y"><a href="#working-with-the-spec" class="svelte-5oqt2y">Working with the spec</a></li><!--]--></ul></nav></details><!--]--> <div class="prose"><!----><p>NullBoiler exposes 36 HTTP operations, specified in OpenAPI 3.1 at <code>docs/openapi.yaml</code> in the repo. The spec is authored against the route table in <code>src/api.zig</code> and is the contract of record; this page is the map.</p>
+<h2 id="conventions" aria-labelledby="heading-label-conventions"><span id="heading-label-conventions">Conventions</span><a class="heading-anchor" href="#conventions" aria-label="Permalink to Conventions" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<ul>
+<li><strong>Auth</strong> — bearer token, set via <code>api_token</code> in config or the <code>--token</code> flag. <code>GET /health</code> and <code>GET /metrics</code> are public so load balancers and Prometheus can reach them without a token.</li>
+<li><strong>Ids</strong> — opaque strings; do not parse them.</li>
+<li><strong>Timestamps</strong> — <code>*_ms</code> fields are milliseconds since the Unix epoch (UTC).</li>
+<li><strong>Errors</strong> — every 4xx/5xx uses one envelope:</li>
+</ul>
+<figure class="code-figure" data-lang="json"><pre class="shiki null-kitchen" style="background-color:#0a0806;color:#d9d1c3" tabindex="0"><code><span class="line"><span style="color:#8D8375">{</span><span style="color:#8D8375">"</span><span style="color:#ECE5D8">error</span><span style="color:#8D8375">"</span><span style="color:#8D8375">:</span><span style="color:#8D8375"> {</span><span style="color:#8D8375">"</span><span style="color:#ECE5D8">code</span><span style="color:#8D8375">"</span><span style="color:#8D8375">:</span><span style="color:#C9B795"> "&#x3C;code>"</span><span style="color:#8D8375">,</span><span style="color:#8D8375"> "</span><span style="color:#ECE5D8">message</span><span style="color:#8D8375">"</span><span style="color:#8D8375">:</span><span style="color:#C9B795"> "&#x3C;human readable>"</span><span style="color:#8D8375">}}</span></span></code></pre><button class="code-copy" type="button" data-code data-pagefind-ignore aria-live="polite">copy</button></figure>
+<ul>
+<li><strong>Idempotency</strong> — <code>POST /runs</code> honors an <code>Idempotency-Key</code> header (preferred) or an <code>idempotency_key</code> body field. Replays return the stored run with <code>idempotent_replay: true</code>. <code>POST /workflows/{id}/run</code> does not currently implement idempotency.</li>
+<li><strong>Body size</strong> — request bodies are capped at 8 MiB.</li>
+</ul>
+<h2 id="health-and-metrics" aria-labelledby="heading-label-health-and-metrics"><span id="heading-label-health-and-metrics">Health and metrics</span><a class="heading-anchor" href="#health-and-metrics" aria-label="Permalink to Health and metrics" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Method, Path, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/health</code></td>
+<td>Version and counters; always 200</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/metrics</code></td>
+<td>Prometheus text exposition</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="runs" aria-labelledby="heading-label-runs"><span id="heading-label-runs">Runs</span><a class="heading-anchor" href="#runs" aria-label="Permalink to Runs" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Method, Path, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/runs</code></td>
+<td>Create a run from inline steps; supports <code>strategy</code>, <code>input</code>, <code>config</code>, <code>callbacks</code>, <code>reduce</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/runs</code></td>
+<td>Paginated list; filters: <code>status</code>, <code>workflow_id</code>, <code>limit</code>, <code>offset</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/runs/{id}</code></td>
+<td>Full detail: steps, workflow snapshot, input, state</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/runs/{id}/cancel</code></td>
+<td>Cancel</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/runs/{id}/retry</code></td>
+<td>Retry</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/runs/{id}/resume</code></td>
+<td>Resume after an interrupt or breakpoint</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/runs/{id}/replay</code></td>
+<td>Re-execute from a checkpoint</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/runs/{id}/state</code></td>
+<td>Inject state; <code>apply_after_step</code> defers the update</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/runs/fork</code></td>
+<td>Branch a new run from a checkpoint</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="steps-events-stream" aria-labelledby="heading-label-steps-events-stream"><span id="heading-label-steps-events-stream">Steps, events, stream</span><a class="heading-anchor" href="#steps-events-stream" aria-label="Permalink to Steps, events, stream" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Method, Path, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/runs/{id}/steps</code></td>
+<td>All steps of a run</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/runs/{id}/steps/{step_id}</code></td>
+<td>One step</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/runs/{id}/events</code></td>
+<td>Persisted events</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/runs/{id}/stream</code></td>
+<td>Stream snapshot: status, state, buffered events</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code>/stream</code> takes <code>mode</code> (comma-separated: <code>values</code>, <code>updates</code>, <code>debug</code>) and <code>after_seq</code> to page through buffered events without shared cursor state.</p>
+<h2 id="checkpoints" aria-labelledby="heading-label-checkpoints"><span id="heading-label-checkpoints">Checkpoints</span><a class="heading-anchor" href="#checkpoints" aria-label="Permalink to Checkpoints" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Method, Path, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/runs/{id}/checkpoints</code></td>
+<td>List checkpoints (one after every node)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/runs/{id}/checkpoints/{cp_id}</code></td>
+<td>One checkpoint</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="workers" aria-labelledby="heading-label-workers"><span id="heading-label-workers">Workers</span><a class="heading-anchor" href="#workers" aria-label="Permalink to Workers" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Method, Path, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/workers</code></td>
+<td>Register a worker at runtime</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/workers</code></td>
+<td>List workers with status, failures, circuit state</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/workers/{id}</code></td>
+<td>Remove a registered worker</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="workflows" aria-labelledby="heading-label-workflows"><span id="heading-label-workflows">Workflows</span><a class="heading-anchor" href="#workflows" aria-label="Permalink to Workflows" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Method, Path, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/workflows</code></td>
+<td>Store a reusable graph definition</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/workflows</code></td>
+<td>List stored workflows with definitions</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/workflows/{id}</code></td>
+<td>Get one, full definition</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/workflows/{id}</code></td>
+<td>Replace definition; existing runs keep their frozen snapshot</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/workflows/{id}</code></td>
+<td>Delete</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/workflows/{id}/validate</code></td>
+<td>Validation errors (empty array on success) plus a Mermaid diagram</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/workflows/{id}/mermaid</code></td>
+<td>Mermaid <code>flowchart</code> source</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/workflows/{id}/run</code></td>
+<td>Launch a run from the stored definition, optional <code>input</code></td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="tracker-bridge" aria-labelledby="heading-label-tracker-bridge"><span id="heading-label-tracker-bridge">Tracker bridge</span><a class="heading-anchor" href="#tracker-bridge" aria-label="Permalink to Tracker bridge" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<p>Available when the <code>tracker</code> config section points at a <a href="https://tickets.nullmenu.ai/" target="_blank" rel="noopener" aria-label="NullTickets (opens in a new tab)">NullTickets<svg class="functional-icon external-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg></a> instance:</p>
+<div class="table-scroll" role="region" aria-label="Data table: Method, Path, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/tracker/status</code></td>
+<td>Pull-mode status</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/tracker/tasks</code></td>
+<td>Tasks the orchestrator sees</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/tracker/tasks/{task_id}</code></td>
+<td>One task</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/tracker/stats</code></td>
+<td>Counters</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/tracker/refresh</code></td>
+<td>Force a poll</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="admin-and-internal" aria-labelledby="heading-label-admin-and-internal"><span id="heading-label-admin-and-internal">Admin and internal</span><a class="heading-anchor" href="#admin-and-internal" aria-label="Permalink to Admin and internal" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Method, Path, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/admin/drain</code></td>
+<td>Stop accepting new runs; finish in-flight work</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/rate-limits</code></td>
+<td>Current rate-limit state</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/internal/agent-events/{run_id}/{step_id}</code></td>
+<td>Worker callback endpoint</td>
+</tr>
+</tbody>
+</table>
+</div>
+<aside class="callout callout--note"><div class="callout-title">Note</div><p>The OpenAPI spec names the step-level worker selector <code>tags</code>, but the engine and the repo&#39;s own integration guides use <code>worker_tags</code>. Use <code>worker_tags</code> — unknown fields are accepted, so a <code>tags</code> selector fails silently.</p>
+</aside>
+<h2 id="working-with-the-spec" aria-labelledby="heading-label-working-with-the-spec"><span id="heading-label-working-with-the-spec">Working with the spec</span><a class="heading-anchor" href="#working-with-the-spec" aria-label="Permalink to Working with the spec" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<p>Real commands from the repo docs:</p>
+<figure class="code-figure" data-lang="bash"><pre class="shiki null-kitchen" style="background-color:#0a0806;color:#d9d1c3" tabindex="0"><code><span class="line"><span style="color:#877E6F;font-style:italic"># preview</span></span>
+<span class="line"><span style="color:#ECE5D8">npx</span><span style="color:#C9B795"> @redocly/cli</span><span style="color:#C9B795"> preview-docs</span><span style="color:#C9B795"> docs/openapi.yaml</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#877E6F;font-style:italic"># validate</span></span>
+<span class="line"><span style="color:#ECE5D8">python</span><span style="color:#C9B795"> -m</span><span style="color:#C9B795"> openapi_spec_validator</span><span style="color:#C9B795"> docs/openapi.yaml</span></span>
+<span class="line"><span style="color:#ECE5D8">npx</span><span style="color:#C9B795"> @apidevtools/swagger-cli</span><span style="color:#C9B795"> validate</span><span style="color:#C9B795"> docs/openapi.yaml</span></span></code></pre><button class="code-copy" type="button" data-code data-pagefind-ignore aria-live="polite">copy</button></figure>
+<p>The spec also works with <code>openapi-generator-cli</code> for TypeScript, Python and Go clients; the repo&#39;s <code>docs/api/README.md</code> lists the exact generator invocations.</p>
+<!----></div> <nav class="pager svelte-5oqt2y" aria-label="Previous and next" data-pagefind-ignore=""><!--[0--><a class="pager-link prev svelte-5oqt2y" href="/docs/guides/workers-and-dispatch/"><span class="dir mono svelte-5oqt2y"><!----><svg class="functional-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m10.5 7-5 5 5 5"></path><path d="M6 12h12.5"></path></g></svg><!----><!----> previous</span> <span class="serif-i svelte-5oqt2y">Workers and dispatch</span></a><!--]--> <!--[0--><a class="pager-link next svelte-5oqt2y" href="/docs/reference/configuration/"><span class="dir mono svelte-5oqt2y">next <!----><svg class="functional-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m13.5 7 5 5-5 5"></path><path d="M18 12H5.5"></path></g></svg><!----><!----></span> <span class="serif-i svelte-5oqt2y">Configuration</span></a><!--]--></nav></article> <!--[0--><aside class="toc svelte-5oqt2y" aria-label="On this page"><h2 class="label svelte-5oqt2y">On this page</h2> <ul class="svelte-5oqt2y"><!--[--><li class="d2 svelte-5oqt2y"><a href="#conventions" class="svelte-5oqt2y">Conventions</a></li><li class="d2 svelte-5oqt2y"><a href="#health-and-metrics" class="svelte-5oqt2y">Health and metrics</a></li><li class="d2 svelte-5oqt2y"><a href="#runs" class="svelte-5oqt2y">Runs</a></li><li class="d2 svelte-5oqt2y"><a href="#steps-events-stream" class="svelte-5oqt2y">Steps, events, stream</a></li><li class="d2 svelte-5oqt2y"><a href="#checkpoints" class="svelte-5oqt2y">Checkpoints</a></li><li class="d2 svelte-5oqt2y"><a href="#workers" class="svelte-5oqt2y">Workers</a></li><li class="d2 svelte-5oqt2y"><a href="#workflows" class="svelte-5oqt2y">Workflows</a></li><li class="d2 svelte-5oqt2y"><a href="#tracker-bridge" class="svelte-5oqt2y">Tracker bridge</a></li><li class="d2 svelte-5oqt2y"><a href="#admin-and-internal" class="svelte-5oqt2y">Admin and internal</a></li><li class="d2 svelte-5oqt2y"><a href="#working-with-the-spec" class="svelte-5oqt2y">Working with the spec</a></li><!--]--></ul></aside><!--]--></div><!--]--><!----></div></div><!--]--><!--]--><!----></main> <footer class="svelte-jz8lnl"><div class="container"><div class="signoff svelte-jz8lnl"><p class="serif-i big svelte-jz8lnl">Built for your hardware.</p> <p class="sub svelte-jz8lnl">Single-binary Zig tools for running and supervising AI agents locally.</p></div> <div class="cols svelte-jz8lnl"><div class="col svelte-jz8lnl"><h3 class="label svelte-jz8lnl">Products</h3> <ul class="svelte-jz8lnl"><!--[--><li><a href="https://hub.nullmenu.ai" class="mono svelte-jz8lnl">nullhub</a></li><li><a href="https://claw.nullmenu.ai" class="mono svelte-jz8lnl">nullclaw</a></li><li><a href="https://boiler.nullmenu.ai" class="mono svelte-jz8lnl">nullboiler</a></li><li><a href="https://tickets.nullmenu.ai" class="mono svelte-jz8lnl">nulltickets</a></li><li><a href="https://watch.nullmenu.ai" class="mono svelte-jz8lnl">nullwatch</a></li><li><a href="https://pantry.nullmenu.ai" class="mono svelte-jz8lnl">nullpantry</a></li><li><a href="https://clw.nullmenu.ai" class="mono svelte-jz8lnl">nllclw</a></li><li><a href="https://desk.nullmenu.ai" class="mono svelte-jz8lnl">nulldesk</a></li><li><a href="https://cap.nullmenu.ai" class="mono svelte-jz8lnl">nullcap</a></li><li><a href="https://builder.nullmenu.ai" class="mono svelte-jz8lnl">nullbuilder</a></li><!--]--></ul></div> <div class="col svelte-jz8lnl"><h3 class="label svelte-jz8lnl">Explore</h3> <ul class="svelte-jz8lnl"><li><a href="https://nullmenu.ai/products/" class="svelte-jz8lnl">All products</a></li> <li><a href="/docs/" class="svelte-jz8lnl">Documentation</a></li> <li><a href="/llms.txt" class="mono svelte-jz8lnl">llms.txt</a></li></ul></div> <div class="col svelte-jz8lnl"><h3 class="label svelte-jz8lnl">Source</h3> <ul class="svelte-jz8lnl"><li><a href="https://github.com/nullclaw/nullboiler" target="_blank" rel="noopener" class="svelte-jz8lnl">GitHub <!----><svg class="functional-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></a></li> <li><a href="https://github.com/nullclaw" target="_blank" rel="noopener" class="svelte-jz8lnl">nullclaw org <!----><svg class="functional-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></a></li> <!--[0--><li><span class="dim svelte-jz8lnl">MIT licensed</span></li><!--]--> <!--[0--><li><span class="dim mono svelte-jz8lnl">v2026.5.29</span></li><!--]--></ul></div></div> <div class="bottom svelte-jz8lnl"><span class="mark svelte-jz8lnl"><svg width="24" height="24" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="16" cy="16" r="10.5" stroke="currentColor" stroke-width="1.75"></circle><line class="slash" x1="7" y1="27" x2="25" y2="5" stroke="var(--accent)" stroke-width="1.75" stroke-linecap="round"></line></svg><!----></span> <span class="mono note svelte-jz8lnl">© 2026 the Null ecosystem</span> <span class="mono note svelte-jz8lnl">built with Zig 0.16</span> <span class="mono note svelte-jz8lnl">local-first · no cloud</span></div></div></footer><!----> <div class="grain svelte-2z0jyf" aria-hidden="true" style="background-image: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E&quot;);"></div><!----><!--]--><!--]--> <!--[-1--><!--]--><!--]-->
+			
+			<script>
+				{
+					__sveltekit_15pfph0 = {
+						base: new URL("../../..", location).pathname.slice(0, -1)
+					};
+
+					const element = document.currentScript.parentElement;
+
+					Promise.all([
+						import("../../../_app/immutable/entry/start.D6R0mWux.js"),
+						import("../../../_app/immutable/entry/app.DBMZA7cE.js")
+					]).then(([kit, app]) => {
+						kit.start(app, element, {
+							node_ids: [0, 2, 5],
+							data: [null,{type:"data",data:{tree:[{slug:"start",title:"Start",pages:[{siteId:"boiler",section:"start",slug:"install",path:"/content/boiler/docs/start/install.md",title:"Install",description:"Prebuilt binaries for seven targets, source builds with Zig 0.16.0, NullHub, or Docker Compose.",order:1,verified:"v2026.5.29"},{siteId:"boiler",section:"start",slug:"quickstart",path:"/content/boiler/docs/start/quickstart.md",title:"Quickstart",description:"Start the orchestrator, pair one NullClaw worker, and run your first task.",order:2,verified:"v2026.5.29"}]},{slug:"guides",title:"Guides",pages:[{siteId:"boiler",section:"guides",slug:"workflow-graphs",path:"/content/boiler/docs/guides/workflow-graphs.md",title:"Workflow graphs",description:"Nodes, edges, state reducers, checkpoints, replay, forking and interrupts.",order:1,verified:"v2026.5.29"},{siteId:"boiler",section:"guides",slug:"workers-and-dispatch",path:"/content/boiler/docs/guides/workers-and-dispatch.md",title:"Workers and dispatch",description:"Worker protocols, tag-based selection, capacity, health checks and drain mode.",order:2,verified:"v2026.5.29"}]},{slug:"reference",title:"Reference",pages:[{siteId:"boiler",section:"reference",slug:"api",path:"/content/boiler/docs/reference/api.md",title:"HTTP API",description:"All 36 operations — runs, steps, checkpoints, workers, workflows, tracker bridge and admin.",order:1,verified:"v2026.5.29"},{siteId:"boiler",section:"reference",slug:"configuration",path:"/content/boiler/docs/reference/configuration.md",title:"Configuration",description:"Config file resolution, every field with its default, CLI flags and the tracker section.",order:2,verified:"v2026.5.29"}]}]},uses:{}},{type:"data",data:{doc:{siteId:"boiler",section:"reference",slug:"api",path:"/content/boiler/docs/reference/api.md",title:"HTTP API",description:"All 36 operations — runs, steps, checkpoints, workers, workflows, tracker bridge and admin.",order:1,verified:"v2026.5.29",body:"\nNullBoiler exposes 36 HTTP operations, specified in OpenAPI 3.1 at `docs/openapi.yaml` in the repo. The spec is authored against the route table in `src/api.zig` and is the contract of record; this page is the map.\n\n## Conventions\n\n- **Auth** — bearer token, set via `api_token` in config or the `--token` flag. `GET /health` and `GET /metrics` are public so load balancers and Prometheus can reach them without a token.\n- **Ids** — opaque strings; do not parse them.\n- **Timestamps** — `*_ms` fields are milliseconds since the Unix epoch (UTC).\n- **Errors** — every 4xx/5xx uses one envelope:\n\n```json\n{\"error\": {\"code\": \"\u003Ccode>\", \"message\": \"\u003Chuman readable>\"}}\n```\n\n- **Idempotency** — `POST /runs` honors an `Idempotency-Key` header (preferred) or an `idempotency_key` body field. Replays return the stored run with `idempotent_replay: true`. `POST /workflows/{id}/run` does not currently implement idempotency.\n- **Body size** — request bodies are capped at 8 MiB.\n\n## Health and metrics\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| GET | `/health` | Version and counters; always 200 |\n| GET | `/metrics` | Prometheus text exposition |\n\n## Runs\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| POST | `/runs` | Create a run from inline steps; supports `strategy`, `input`, `config`, `callbacks`, `reduce` |\n| GET | `/runs` | Paginated list; filters: `status`, `workflow_id`, `limit`, `offset` |\n| GET | `/runs/{id}` | Full detail: steps, workflow snapshot, input, state |\n| POST | `/runs/{id}/cancel` | Cancel |\n| POST | `/runs/{id}/retry` | Retry |\n| POST | `/runs/{id}/resume` | Resume after an interrupt or breakpoint |\n| POST | `/runs/{id}/replay` | Re-execute from a checkpoint |\n| POST | `/runs/{id}/state` | Inject state; `apply_after_step` defers the update |\n| POST | `/runs/fork` | Branch a new run from a checkpoint |\n\n## Steps, events, stream\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| GET | `/runs/{id}/steps` | All steps of a run |\n| GET | `/runs/{id}/steps/{step_id}` | One step |\n| GET | `/runs/{id}/events` | Persisted events |\n| GET | `/runs/{id}/stream` | Stream snapshot: status, state, buffered events |\n\n`/stream` takes `mode` (comma-separated: `values`, `updates`, `debug`) and `after_seq` to page through buffered events without shared cursor state.\n\n## Checkpoints\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| GET | `/runs/{id}/checkpoints` | List checkpoints (one after every node) |\n| GET | `/runs/{id}/checkpoints/{cp_id}` | One checkpoint |\n\n## Workers\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| POST | `/workers` | Register a worker at runtime |\n| GET | `/workers` | List workers with status, failures, circuit state |\n| DELETE | `/workers/{id}` | Remove a registered worker |\n\n## Workflows\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| POST | `/workflows` | Store a reusable graph definition |\n| GET | `/workflows` | List stored workflows with definitions |\n| GET | `/workflows/{id}` | Get one, full definition |\n| PUT | `/workflows/{id}` | Replace definition; existing runs keep their frozen snapshot |\n| DELETE | `/workflows/{id}` | Delete |\n| POST | `/workflows/{id}/validate` | Validation errors (empty array on success) plus a Mermaid diagram |\n| GET | `/workflows/{id}/mermaid` | Mermaid `flowchart` source |\n| POST | `/workflows/{id}/run` | Launch a run from the stored definition, optional `input` |\n\n## Tracker bridge\n\nAvailable when the `tracker` config section points at a [NullTickets](https://tickets.nullmenu.ai/) instance:\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| GET | `/tracker/status` | Pull-mode status |\n| GET | `/tracker/tasks` | Tasks the orchestrator sees |\n| GET | `/tracker/tasks/{task_id}` | One task |\n| GET | `/tracker/stats` | Counters |\n| POST | `/tracker/refresh` | Force a poll |\n\n## Admin and internal\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| POST | `/admin/drain` | Stop accepting new runs; finish in-flight work |\n| GET | `/rate-limits` | Current rate-limit state |\n| POST | `/internal/agent-events/{run_id}/{step_id}` | Worker callback endpoint |\n\n> [!NOTE]\n> The OpenAPI spec names the step-level worker selector `tags`, but the engine and the repo's own integration guides use `worker_tags`. Use `worker_tags` — unknown fields are accepted, so a `tags` selector fails silently.\n\n## Working with the spec\n\nReal commands from the repo docs:\n\n```bash\n# preview\nnpx @redocly/cli preview-docs docs/openapi.yaml\n\n# validate\npython -m openapi_spec_validator docs/openapi.yaml\nnpx @apidevtools/swagger-cli validate docs/openapi.yaml\n```\n\nThe spec also works with `openapi-generator-cli` for TypeScript, Python and Go clients; the repo's `docs/api/README.md` lists the exact generator invocations.\n",html:"\u003Cp>NullBoiler exposes 36 HTTP operations, specified in OpenAPI 3.1 at \u003Ccode>docs/openapi.yaml\u003C/code> in the repo. The spec is authored against the route table in \u003Ccode>src/api.zig\u003C/code> and is the contract of record; this page is the map.\u003C/p>\n\u003Ch2 id=\"conventions\" aria-labelledby=\"heading-label-conventions\">\u003Cspan id=\"heading-label-conventions\">Conventions\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#conventions\" aria-label=\"Permalink to Conventions\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cul>\n\u003Cli>\u003Cstrong>Auth\u003C/strong> — bearer token, set via \u003Ccode>api_token\u003C/code> in config or the \u003Ccode>--token\u003C/code> flag. \u003Ccode>GET /health\u003C/code> and \u003Ccode>GET /metrics\u003C/code> are public so load balancers and Prometheus can reach them without a token.\u003C/li>\n\u003Cli>\u003Cstrong>Ids\u003C/strong> — opaque strings; do not parse them.\u003C/li>\n\u003Cli>\u003Cstrong>Timestamps\u003C/strong> — \u003Ccode>*_ms\u003C/code> fields are milliseconds since the Unix epoch (UTC).\u003C/li>\n\u003Cli>\u003Cstrong>Errors\u003C/strong> — every 4xx/5xx uses one envelope:\u003C/li>\n\u003C/ul>\n\u003Cfigure class=\"code-figure\" data-lang=\"json\">\u003Cpre class=\"shiki null-kitchen\" style=\"background-color:#0a0806;color:#d9d1c3\" tabindex=\"0\">\u003Ccode>\u003Cspan class=\"line\">\u003Cspan style=\"color:#8D8375\">{\u003C/span>\u003Cspan style=\"color:#8D8375\">\"\u003C/span>\u003Cspan style=\"color:#ECE5D8\">error\u003C/span>\u003Cspan style=\"color:#8D8375\">\"\u003C/span>\u003Cspan style=\"color:#8D8375\">:\u003C/span>\u003Cspan style=\"color:#8D8375\"> {\u003C/span>\u003Cspan style=\"color:#8D8375\">\"\u003C/span>\u003Cspan style=\"color:#ECE5D8\">code\u003C/span>\u003Cspan style=\"color:#8D8375\">\"\u003C/span>\u003Cspan style=\"color:#8D8375\">:\u003C/span>\u003Cspan style=\"color:#C9B795\"> \"&#x3C;code>\"\u003C/span>\u003Cspan style=\"color:#8D8375\">,\u003C/span>\u003Cspan style=\"color:#8D8375\"> \"\u003C/span>\u003Cspan style=\"color:#ECE5D8\">message\u003C/span>\u003Cspan style=\"color:#8D8375\">\"\u003C/span>\u003Cspan style=\"color:#8D8375\">:\u003C/span>\u003Cspan style=\"color:#C9B795\"> \"&#x3C;human readable>\"\u003C/span>\u003Cspan style=\"color:#8D8375\">}}\u003C/span>\u003C/span>\u003C/code>\u003C/pre>\u003Cbutton class=\"code-copy\" type=\"button\" data-code data-pagefind-ignore aria-live=\"polite\">copy\u003C/button>\u003C/figure>\n\u003Cul>\n\u003Cli>\u003Cstrong>Idempotency\u003C/strong> — \u003Ccode>POST /runs\u003C/code> honors an \u003Ccode>Idempotency-Key\u003C/code> header (preferred) or an \u003Ccode>idempotency_key\u003C/code> body field. Replays return the stored run with \u003Ccode>idempotent_replay: true\u003C/code>. \u003Ccode>POST /workflows/{id}/run\u003C/code> does not currently implement idempotency.\u003C/li>\n\u003Cli>\u003Cstrong>Body size\u003C/strong> — request bodies are capped at 8 MiB.\u003C/li>\n\u003C/ul>\n\u003Ch2 id=\"health-and-metrics\" aria-labelledby=\"heading-label-health-and-metrics\">\u003Cspan id=\"heading-label-health-and-metrics\">Health and metrics\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#health-and-metrics\" aria-label=\"Permalink to Health and metrics\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Method, Path, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Method\u003C/th>\n\u003Cth>Path\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/health\u003C/code>\u003C/td>\n\u003Ctd>Version and counters; always 200\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/metrics\u003C/code>\u003C/td>\n\u003Ctd>Prometheus text exposition\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"runs\" aria-labelledby=\"heading-label-runs\">\u003Cspan id=\"heading-label-runs\">Runs\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#runs\" aria-label=\"Permalink to Runs\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Method, Path, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Method\u003C/th>\n\u003Cth>Path\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/runs\u003C/code>\u003C/td>\n\u003Ctd>Create a run from inline steps; supports \u003Ccode>strategy\u003C/code>, \u003Ccode>input\u003C/code>, \u003Ccode>config\u003C/code>, \u003Ccode>callbacks\u003C/code>, \u003Ccode>reduce\u003C/code>\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/runs\u003C/code>\u003C/td>\n\u003Ctd>Paginated list; filters: \u003Ccode>status\u003C/code>, \u003Ccode>workflow_id\u003C/code>, \u003Ccode>limit\u003C/code>, \u003Ccode>offset\u003C/code>\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}\u003C/code>\u003C/td>\n\u003Ctd>Full detail: steps, workflow snapshot, input, state\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/cancel\u003C/code>\u003C/td>\n\u003Ctd>Cancel\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/retry\u003C/code>\u003C/td>\n\u003Ctd>Retry\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/resume\u003C/code>\u003C/td>\n\u003Ctd>Resume after an interrupt or breakpoint\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/replay\u003C/code>\u003C/td>\n\u003Ctd>Re-execute from a checkpoint\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/state\u003C/code>\u003C/td>\n\u003Ctd>Inject state; \u003Ccode>apply_after_step\u003C/code> defers the update\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/runs/fork\u003C/code>\u003C/td>\n\u003Ctd>Branch a new run from a checkpoint\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"steps-events-stream\" aria-labelledby=\"heading-label-steps-events-stream\">\u003Cspan id=\"heading-label-steps-events-stream\">Steps, events, stream\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#steps-events-stream\" aria-label=\"Permalink to Steps, events, stream\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Method, Path, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Method\u003C/th>\n\u003Cth>Path\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/steps\u003C/code>\u003C/td>\n\u003Ctd>All steps of a run\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/steps/{step_id}\u003C/code>\u003C/td>\n\u003Ctd>One step\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/events\u003C/code>\u003C/td>\n\u003Ctd>Persisted events\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/stream\u003C/code>\u003C/td>\n\u003Ctd>Stream snapshot: status, state, buffered events\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Cp>\u003Ccode>/stream\u003C/code> takes \u003Ccode>mode\u003C/code> (comma-separated: \u003Ccode>values\u003C/code>, \u003Ccode>updates\u003C/code>, \u003Ccode>debug\u003C/code>) and \u003Ccode>after_seq\u003C/code> to page through buffered events without shared cursor state.\u003C/p>\n\u003Ch2 id=\"checkpoints\" aria-labelledby=\"heading-label-checkpoints\">\u003Cspan id=\"heading-label-checkpoints\">Checkpoints\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#checkpoints\" aria-label=\"Permalink to Checkpoints\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Method, Path, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Method\u003C/th>\n\u003Cth>Path\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/checkpoints\u003C/code>\u003C/td>\n\u003Ctd>List checkpoints (one after every node)\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/runs/{id}/checkpoints/{cp_id}\u003C/code>\u003C/td>\n\u003Ctd>One checkpoint\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"workers\" aria-labelledby=\"heading-label-workers\">\u003Cspan id=\"heading-label-workers\">Workers\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#workers\" aria-label=\"Permalink to Workers\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Method, Path, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Method\u003C/th>\n\u003Cth>Path\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/workers\u003C/code>\u003C/td>\n\u003Ctd>Register a worker at runtime\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/workers\u003C/code>\u003C/td>\n\u003Ctd>List workers with status, failures, circuit state\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>DELETE\u003C/td>\n\u003Ctd>\u003Ccode>/workers/{id}\u003C/code>\u003C/td>\n\u003Ctd>Remove a registered worker\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"workflows\" aria-labelledby=\"heading-label-workflows\">\u003Cspan id=\"heading-label-workflows\">Workflows\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#workflows\" aria-label=\"Permalink to Workflows\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Method, Path, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Method\u003C/th>\n\u003Cth>Path\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/workflows\u003C/code>\u003C/td>\n\u003Ctd>Store a reusable graph definition\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/workflows\u003C/code>\u003C/td>\n\u003Ctd>List stored workflows with definitions\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/workflows/{id}\u003C/code>\u003C/td>\n\u003Ctd>Get one, full definition\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>PUT\u003C/td>\n\u003Ctd>\u003Ccode>/workflows/{id}\u003C/code>\u003C/td>\n\u003Ctd>Replace definition; existing runs keep their frozen snapshot\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>DELETE\u003C/td>\n\u003Ctd>\u003Ccode>/workflows/{id}\u003C/code>\u003C/td>\n\u003Ctd>Delete\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/workflows/{id}/validate\u003C/code>\u003C/td>\n\u003Ctd>Validation errors (empty array on success) plus a Mermaid diagram\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/workflows/{id}/mermaid\u003C/code>\u003C/td>\n\u003Ctd>Mermaid \u003Ccode>flowchart\u003C/code> source\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/workflows/{id}/run\u003C/code>\u003C/td>\n\u003Ctd>Launch a run from the stored definition, optional \u003Ccode>input\u003C/code>\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"tracker-bridge\" aria-labelledby=\"heading-label-tracker-bridge\">\u003Cspan id=\"heading-label-tracker-bridge\">Tracker bridge\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#tracker-bridge\" aria-label=\"Permalink to Tracker bridge\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cp>Available when the \u003Ccode>tracker\u003C/code> config section points at a \u003Ca href=\"https://tickets.nullmenu.ai/\" target=\"_blank\" rel=\"noopener\" aria-label=\"NullTickets (opens in a new tab)\">NullTickets\u003Csvg class=\"functional-icon external-icon\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\" focusable=\"false\">\u003Cg stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\u003Cpath d=\"M8 16 16 8\">\u003C/path>\u003Cpath d=\"M10 8h6v6\">\u003C/path>\u003C/g>\u003C/svg>\u003C/a> instance:\u003C/p>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Method, Path, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Method\u003C/th>\n\u003Cth>Path\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/tracker/status\u003C/code>\u003C/td>\n\u003Ctd>Pull-mode status\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/tracker/tasks\u003C/code>\u003C/td>\n\u003Ctd>Tasks the orchestrator sees\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/tracker/tasks/{task_id}\u003C/code>\u003C/td>\n\u003Ctd>One task\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/tracker/stats\u003C/code>\u003C/td>\n\u003Ctd>Counters\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/tracker/refresh\u003C/code>\u003C/td>\n\u003Ctd>Force a poll\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"admin-and-internal\" aria-labelledby=\"heading-label-admin-and-internal\">\u003Cspan id=\"heading-label-admin-and-internal\">Admin and internal\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#admin-and-internal\" aria-label=\"Permalink to Admin and internal\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Method, Path, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Method\u003C/th>\n\u003Cth>Path\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/admin/drain\u003C/code>\u003C/td>\n\u003Ctd>Stop accepting new runs; finish in-flight work\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>GET\u003C/td>\n\u003Ctd>\u003Ccode>/rate-limits\u003C/code>\u003C/td>\n\u003Ctd>Current rate-limit state\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>POST\u003C/td>\n\u003Ctd>\u003Ccode>/internal/agent-events/{run_id}/{step_id}\u003C/code>\u003C/td>\n\u003Ctd>Worker callback endpoint\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Caside class=\"callout callout--note\">\u003Cdiv class=\"callout-title\">Note\u003C/div>\u003Cp>The OpenAPI spec names the step-level worker selector \u003Ccode>tags\u003C/code>, but the engine and the repo&#39;s own integration guides use \u003Ccode>worker_tags\u003C/code>. Use \u003Ccode>worker_tags\u003C/code> — unknown fields are accepted, so a \u003Ccode>tags\u003C/code> selector fails silently.\u003C/p>\n\u003C/aside>\n\u003Ch2 id=\"working-with-the-spec\" aria-labelledby=\"heading-label-working-with-the-spec\">\u003Cspan id=\"heading-label-working-with-the-spec\">Working with the spec\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#working-with-the-spec\" aria-label=\"Permalink to Working with the spec\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cp>Real commands from the repo docs:\u003C/p>\n\u003Cfigure class=\"code-figure\" data-lang=\"bash\">\u003Cpre class=\"shiki null-kitchen\" style=\"background-color:#0a0806;color:#d9d1c3\" tabindex=\"0\">\u003Ccode>\u003Cspan class=\"line\">\u003Cspan style=\"color:#877E6F;font-style:italic\"># preview\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan style=\"color:#ECE5D8\">npx\u003C/span>\u003Cspan style=\"color:#C9B795\"> @redocly/cli\u003C/span>\u003Cspan style=\"color:#C9B795\"> preview-docs\u003C/span>\u003Cspan style=\"color:#C9B795\"> docs/openapi.yaml\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan style=\"color:#877E6F;font-style:italic\"># validate\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan style=\"color:#ECE5D8\">python\u003C/span>\u003Cspan style=\"color:#C9B795\"> -m\u003C/span>\u003Cspan style=\"color:#C9B795\"> openapi_spec_validator\u003C/span>\u003Cspan style=\"color:#C9B795\"> docs/openapi.yaml\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan style=\"color:#ECE5D8\">npx\u003C/span>\u003Cspan style=\"color:#C9B795\"> @apidevtools/swagger-cli\u003C/span>\u003Cspan style=\"color:#C9B795\"> validate\u003C/span>\u003Cspan style=\"color:#C9B795\"> docs/openapi.yaml\u003C/span>\u003C/span>\u003C/code>\u003C/pre>\u003Cbutton class=\"code-copy\" type=\"button\" data-code data-pagefind-ignore aria-live=\"polite\">copy\u003C/button>\u003C/figure>\n\u003Cp>The spec also works with \u003Ccode>openapi-generator-cli\u003C/code> for TypeScript, Python and Go clients; the repo&#39;s \u003Ccode>docs/api/README.md\u003C/code> lists the exact generator invocations.\u003C/p>\n",toc:[{id:"conventions",text:"Conventions",depth:2},{id:"health-and-metrics",text:"Health and metrics",depth:2},{id:"runs",text:"Runs",depth:2},{id:"steps-events-stream",text:"Steps, events, stream",depth:2},{id:"checkpoints",text:"Checkpoints",depth:2},{id:"workers",text:"Workers",depth:2},{id:"workflows",text:"Workflows",depth:2},{id:"tracker-bridge",text:"Tracker bridge",depth:2},{id:"admin-and-internal",text:"Admin and internal",depth:2},{id:"working-with-the-spec",text:"Working with the spec",depth:2}]},raw:"\nNullBoiler exposes 36 HTTP operations, specified in OpenAPI 3.1 at `docs/openapi.yaml` in the repo. The spec is authored against the route table in `src/api.zig` and is the contract of record; this page is the map.\n\n## Conventions\n\n- **Auth** — bearer token, set via `api_token` in config or the `--token` flag. `GET /health` and `GET /metrics` are public so load balancers and Prometheus can reach them without a token.\n- **Ids** — opaque strings; do not parse them.\n- **Timestamps** — `*_ms` fields are milliseconds since the Unix epoch (UTC).\n- **Errors** — every 4xx/5xx uses one envelope:\n\n```json\n{\"error\": {\"code\": \"\u003Ccode>\", \"message\": \"\u003Chuman readable>\"}}\n```\n\n- **Idempotency** — `POST /runs` honors an `Idempotency-Key` header (preferred) or an `idempotency_key` body field. Replays return the stored run with `idempotent_replay: true`. `POST /workflows/{id}/run` does not currently implement idempotency.\n- **Body size** — request bodies are capped at 8 MiB.\n\n## Health and metrics\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| GET | `/health` | Version and counters; always 200 |\n| GET | `/metrics` | Prometheus text exposition |\n\n## Runs\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| POST | `/runs` | Create a run from inline steps; supports `strategy`, `input`, `config`, `callbacks`, `reduce` |\n| GET | `/runs` | Paginated list; filters: `status`, `workflow_id`, `limit`, `offset` |\n| GET | `/runs/{id}` | Full detail: steps, workflow snapshot, input, state |\n| POST | `/runs/{id}/cancel` | Cancel |\n| POST | `/runs/{id}/retry` | Retry |\n| POST | `/runs/{id}/resume` | Resume after an interrupt or breakpoint |\n| POST | `/runs/{id}/replay` | Re-execute from a checkpoint |\n| POST | `/runs/{id}/state` | Inject state; `apply_after_step` defers the update |\n| POST | `/runs/fork` | Branch a new run from a checkpoint |\n\n## Steps, events, stream\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| GET | `/runs/{id}/steps` | All steps of a run |\n| GET | `/runs/{id}/steps/{step_id}` | One step |\n| GET | `/runs/{id}/events` | Persisted events |\n| GET | `/runs/{id}/stream` | Stream snapshot: status, state, buffered events |\n\n`/stream` takes `mode` (comma-separated: `values`, `updates`, `debug`) and `after_seq` to page through buffered events without shared cursor state.\n\n## Checkpoints\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| GET | `/runs/{id}/checkpoints` | List checkpoints (one after every node) |\n| GET | `/runs/{id}/checkpoints/{cp_id}` | One checkpoint |\n\n## Workers\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| POST | `/workers` | Register a worker at runtime |\n| GET | `/workers` | List workers with status, failures, circuit state |\n| DELETE | `/workers/{id}` | Remove a registered worker |\n\n## Workflows\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| POST | `/workflows` | Store a reusable graph definition |\n| GET | `/workflows` | List stored workflows with definitions |\n| GET | `/workflows/{id}` | Get one, full definition |\n| PUT | `/workflows/{id}` | Replace definition; existing runs keep their frozen snapshot |\n| DELETE | `/workflows/{id}` | Delete |\n| POST | `/workflows/{id}/validate` | Validation errors (empty array on success) plus a Mermaid diagram |\n| GET | `/workflows/{id}/mermaid` | Mermaid `flowchart` source |\n| POST | `/workflows/{id}/run` | Launch a run from the stored definition, optional `input` |\n\n## Tracker bridge\n\nAvailable when the `tracker` config section points at a [NullTickets](https://tickets.nullmenu.ai/) instance:\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| GET | `/tracker/status` | Pull-mode status |\n| GET | `/tracker/tasks` | Tasks the orchestrator sees |\n| GET | `/tracker/tasks/{task_id}` | One task |\n| GET | `/tracker/stats` | Counters |\n| POST | `/tracker/refresh` | Force a poll |\n\n## Admin and internal\n\n| Method | Path | Purpose |\n| --- | --- | --- |\n| POST | `/admin/drain` | Stop accepting new runs; finish in-flight work |\n| GET | `/rate-limits` | Current rate-limit state |\n| POST | `/internal/agent-events/{run_id}/{step_id}` | Worker callback endpoint |\n\n> [!NOTE]\n> The OpenAPI spec names the step-level worker selector `tags`, but the engine and the repo's own integration guides use `worker_tags`. Use `worker_tags` — unknown fields are accepted, so a `tags` selector fails silently.\n\n## Working with the spec\n\nReal commands from the repo docs:\n\n```bash\n# preview\nnpx @redocly/cli preview-docs docs/openapi.yaml\n\n# validate\npython -m openapi_spec_validator docs/openapi.yaml\nnpx @apidevtools/swagger-cli validate docs/openapi.yaml\n```\n\nThe spec also works with `openapi-generator-cli` for TypeScript, Python and Go clients; the repo's `docs/api/README.md` lists the exact generator invocations.\n",dateModified:"2026-07-17",sectionTitle:"Reference",prev:{siteId:"boiler",section:"guides",slug:"workers-and-dispatch",path:"/content/boiler/docs/guides/workers-and-dispatch.md",title:"Workers and dispatch",description:"Worker protocols, tag-based selection, capacity, health checks and drain mode.",order:2,verified:"v2026.5.29",sectionTitle:"Guides"},next:{siteId:"boiler",section:"reference",slug:"configuration",path:"/content/boiler/docs/reference/configuration.md",title:"Configuration",description:"Config file resolution, every field with its default, CLI flags and the tracker section.",order:2,verified:"v2026.5.29",sectionTitle:"Reference"}},uses:{params:["section","slug"]}}],
+							form: null,
+							error: null
+						});
+					});
+				}
+			</script>
+		</div>
+	</body>
+</html>

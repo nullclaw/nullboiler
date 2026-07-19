@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta http-equiv="content-security-policy" content="default-src 'self'; base-uri 'self'; connect-src 'self' https://api.github.com; font-src 'self'; form-action 'self'; frame-src 'none'; img-src 'self' data:; manifest-src 'self'; media-src 'self'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'sha256-IRprildjLL+3SuNhpxASNxA3FHtF9vaMbtB0cdufpr4=' 'sha256-eoh/Pkt4H1pYtqYNtEvl/6UFsX8LNbJvqcV5c1UUK7Q=' 'sha256-wnPstiN0S9OG1bNFmxALjmfGVjRGvtOdbeZ6hpRpTkw='; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:" data-null-security-policy>
+		<meta name="referrer" content="strict-origin-when-cross-origin" data-null-security-policy>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="theme-color" content="#0c0a08" />
+		<script>
+			document.documentElement.classList.add('js');
+			// Resolve the shared theme mode before first paint.
+			(function () {
+				var key = 'nullmenu-theme';
+				var valid = function (value) {
+					return value === 'system' || value === 'light' || value === 'dark';
+				};
+				var cookieMode = null;
+				try {
+					var cookie = document.cookie
+						.split(';')
+						.map(function (part) { return part.trim(); })
+						.find(function (part) { return part.indexOf(key + '=') === 0; });
+					if (cookie) {
+						try { cookieMode = decodeURIComponent(cookie.slice(key.length + 1)); } catch (e) {}
+					}
+				} catch (e) {}
+				var localMode = null;
+				try { localMode = localStorage.getItem(key); } catch (e) {}
+				var mode = valid(cookieMode) ? cookieMode : valid(localMode) ? localMode : 'system';
+				var theme = mode === 'system'
+					? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+					: mode;
+				document.documentElement.dataset.themeMode = mode;
+				document.documentElement.dataset.theme = theme;
+				if (theme === 'light') {
+					document.querySelector('meta[name="theme-color"]').content = '#f2ead8';
+				}
+			})();
+		</script>
+		<link rel="icon" href="../../../favicon.svg" type="image/svg+xml" />
+		<link
+			rel="preload"
+			href="../../../fonts/InstrumentSerif-normal-400-latin.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link
+			rel="preload"
+			href="../../../fonts/InstrumentSerif-italic-400-latin.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link
+			rel="preload"
+			href="../../../fonts/Geist-normal-300_700-latin.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link
+			rel="preload"
+			href="../../../fonts/GeistMono-normal-400_600-latin.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link href="../../../_app/immutable/entry/start.D6R0mWux.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/B-pXrDi8.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/Bneb2paa.js" rel="modulepreload">
+		<link href="../../../_app/immutable/entry/app.DBMZA7cE.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/HclGiUj8.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/xihTtKlq.js" rel="modulepreload">
+		<link href="../../../_app/immutable/nodes/0.KTGgZPxQ.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/DIs7c8UJ.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/Bw9V50Kl.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/DsBvvBRv.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/Bc0JvcBg.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/3dok05DY.js" rel="modulepreload">
+		<link href="../../../_app/immutable/nodes/2.C8LFJkdQ.js" rel="modulepreload">
+		<link href="../../../_app/immutable/nodes/5.Dp1PLP_h.js" rel="modulepreload">
+		<link href="../../../_app/immutable/chunks/F-iJ1YYI.js" rel="modulepreload">
+		<!--12qhfyh--><!----><style>:root:root{--spice:#d97742;--spice-dim:#94512d;}</style><!----> <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%2312100d%22%2F%3E%3Ccircle%20cx%3D%2216%22%20cy%3D%2216%22%20r%3D%229%22%20stroke%3D%22%23ece5d8%22%20stroke-width%3D%223.4%22%20fill%3D%22none%22%2F%3E%3Cline%20x1%3D%228.5%22%20y1%3D%2225.5%22%20x2%3D%2223.5%22%20y2%3D%226.5%22%20stroke%3D%22%23d97742%22%20stroke-width%3D%223.6%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fsvg%3E" type="image/svg+xml"/><!----><!--gsrl61--><meta name="description" content="Config file resolution, every field with its default, CLI flags and the tracker section."/> <link rel="canonical" href="https://boiler.nullmenu.ai/docs/reference/configuration/"/> <meta property="og:type" content="article"/> <meta property="og:site_name" content="NullBoiler"/> <meta property="og:title" content="Configuration — NullBoiler docs"/> <meta property="og:description" content="Config file resolution, every field with its default, CLI flags and the tracker section."/> <meta property="og:url" content="https://boiler.nullmenu.ai/docs/reference/configuration/"/> <meta property="og:image" content="https://boiler.nullmenu.ai/og/boiler.png"/> <meta property="og:image:alt" content="Social preview for NullBoiler: Configuration — NullBoiler docs"/> <meta property="og:image:width" content="1200"/> <meta property="og:image:height" content="630"/> <meta name="twitter:card" content="summary_large_image"/> <meta name="twitter:title" content="Configuration — NullBoiler docs"/> <meta name="twitter:description" content="Config file resolution, every field with its default, CLI flags and the tracker section."/> <meta name="twitter:image" content="https://boiler.nullmenu.ai/og/boiler.png"/> <meta name="twitter:image:alt" content="Social preview for NullBoiler: Configuration — NullBoiler docs"/> <!----><script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://nullmenu.ai/#organization","name":"Null ecosystem","url":"https://nullmenu.ai/","sameAs":["https://github.com/nullclaw"]},{"@type":"TechArticle","@id":"https://boiler.nullmenu.ai/docs/reference/configuration/#article","headline":"Configuration — NullBoiler docs","description":"Config file resolution, every field with its default, CLI flags and the tracker section.","url":"https://boiler.nullmenu.ai/docs/reference/configuration/","image":"https://boiler.nullmenu.ai/og/boiler.png","inLanguage":"en","articleSection":"Reference","version":"v2026.5.29","dateModified":"2026-07-17","mainEntityOfPage":"https://boiler.nullmenu.ai/docs/reference/configuration/","author":{"@id":"https://nullmenu.ai/#organization"},"publisher":{"@id":"https://nullmenu.ai/#organization"}},{"@type":"BreadcrumbList","@id":"https://boiler.nullmenu.ai/docs/reference/configuration/#breadcrumbs","itemListElement":[{"@type":"ListItem","position":1,"name":"NullBoiler","item":"https://boiler.nullmenu.ai/"},{"@type":"ListItem","position":2,"name":"Documentation","item":"https://boiler.nullmenu.ai/docs/"},{"@type":"ListItem","position":3,"name":"Configuration","item":"https://boiler.nullmenu.ai/docs/reference/configuration/"}]}]}</script><!----><!----><title>Configuration — NullBoiler docs</title>
+		<link href="../../../_app/immutable/assets/0.b4SYXXpF.css" rel="stylesheet">
+		<link href="../../../_app/immutable/assets/2.D_3iEgFB.css" rel="stylesheet">
+		<link href="../../../_app/immutable/assets/5.s1K1snEQ.css" rel="stylesheet">
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents"><!--[--><!--[0--><!--[--><a class="skip mono svelte-12qhfyh" href="#main">Skip to content</a> <span id="sr-status" class="sr-status" role="status" aria-live="polite"></span> <header class="svelte-1elxaub"><div class="inner container svelte-1elxaub"><div class="left svelte-1elxaub"><a class="brand svelte-1elxaub" href="/" aria-label="NullBoiler home"><svg width="24" height="24" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="16" cy="16" r="10.5" stroke="currentColor" stroke-width="1.75"></circle><line class="slash" x1="7" y1="27" x2="25" y2="5" stroke="var(--accent)" stroke-width="1.75" stroke-linecap="round"></line></svg><!----> <span class="word mono svelte-1elxaub">null<span class="suffix serif-i svelte-1elxaub">·boiler</span></span></a> <!--[0--><a class="version mono svelte-1elxaub" href="https://github.com/nullclaw/nullboiler/releases/tag/v2026.5.29" target="_blank" rel="noopener" aria-label="Published release v2026.5.29 (opens in a new tab)">v2026.5.29<!----><svg class="functional-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></a><!--]--></div> <nav class="desktop svelte-1elxaub" aria-label="Main"><!--[--><a href="/docs/" class="nav-link mono svelte-1elxaub active" aria-current="page">Docs<!--[-1--><!--]--></a><a href="https://nullmenu.ai" class="nav-link mono svelte-1elxaub">The menu<!--[-1--><!--]--></a><a href="https://github.com/nullclaw/nullboiler" class="nav-link mono svelte-1elxaub" target="_blank" rel="noopener">GitHub<!--[0--><span class="ext svelte-1elxaub"><!----><svg class="functional-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></span><!--]--></a><!--]--> <button class="search-btn mono svelte-1elxaub" aria-label="Search docs"><!----><svg class="functional-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="5.75"></circle><path d="m14.8 14.8 4.7 4.7"></path></g></svg><!----><!----> <kbd class="svelte-1elxaub">Ctrl K</kbd></button> <button class="theme-toggle svelte-1elxaub" aria-label="Theme: system (dark). Switch to light theme" title="Theme: system (dark). Switch to light theme"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" class="svelte-1elxaub"><circle cx="9" cy="9" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5"></circle><path class="half" d="M9 2.25 a6.75 6.75 0 0 1 0 13.5 Z" fill="currentColor"></path></svg> <span class="theme-mode mono svelte-1elxaub" aria-hidden="true">system</span></button></nav> <button class="burger svelte-1elxaub" aria-expanded="false" aria-controls="mobile-navigation" aria-label="Open navigation"><span class="svelte-1elxaub"></span><span class="svelte-1elxaub"></span></button></div> <details class="nojs-navigation svelte-1elxaub" data-pagefind-ignore=""><summary class="mono svelte-1elxaub">Menu</summary> <nav aria-label="Main navigation" class="svelte-1elxaub"><!--[--><a href="/docs/" class="mono svelte-1elxaub">Docs<!--[-1--><!--]--></a><a href="https://nullmenu.ai" class="mono svelte-1elxaub">The menu<!--[-1--><!--]--></a><a href="https://github.com/nullclaw/nullboiler" class="mono svelte-1elxaub" target="_blank" rel="noopener">GitHub<!--[0--><span class="ext svelte-1elxaub"><!----><svg class="functional-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></span><!--]--></a><!--]--></nav></details> <!--[-1--><!--]--></header><!----> <!--[-1--><!--]--><!----> <main id="main" class="svelte-12qhfyh"><!--[0--><!--[--><div class="docs container svelte-1bpnej"><button class="nav-toggle mono svelte-1bpnej" aria-expanded="false" aria-controls="docs-navigation">menu — docs</button> <details class="nojs-docs-navigation svelte-1bpnej" data-pagefind-ignore=""><summary class="mono svelte-1bpnej">Browse documentation</summary> <nav aria-label="Documentation navigation" class="svelte-1bpnej"><a href="/docs/" class="serif-i svelte-1bpnej">Docs home</a> <!--[--><div class="nojs-group svelte-1bpnej"><h2 class="label svelte-1bpnej">Start</h2> <!--[--><a href="/docs/start/install/" class="svelte-1bpnej">Install</a><a href="/docs/start/quickstart/" class="svelte-1bpnej">Quickstart</a><!--]--></div><div class="nojs-group svelte-1bpnej"><h2 class="label svelte-1bpnej">Guides</h2> <!--[--><a href="/docs/guides/workflow-graphs/" class="svelte-1bpnej">Workflow graphs</a><a href="/docs/guides/workers-and-dispatch/" class="svelte-1bpnej">Workers and dispatch</a><!--]--></div><div class="nojs-group svelte-1bpnej"><h2 class="label svelte-1bpnej">Reference</h2> <!--[--><a href="/docs/reference/api/" class="svelte-1bpnej">HTTP API</a><a href="/docs/reference/configuration/" class="svelte-1bpnej">Configuration</a><!--]--></div><!--]--> <!--[-1--><!--]--></nav></details> <!--[-1--><!--]--> <div id="docs-navigation" class="sidebar svelte-1bpnej" role="navigation" aria-label="Documentation"><div class="drawer-head mono svelte-1bpnej"><div class="svelte-1bpnej"><span class="drawer-kicker svelte-1bpnej">Browse</span> <span id="docs-navigation-title" class="drawer-title svelte-1bpnej">Documentation</span></div> <button class="drawer-close svelte-1bpnej"><span>close</span><!----><svg class="functional-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m7 7 10 10"></path><path d="M17 7 7 17"></path></g></svg><!----><!----></button></div> <a href="/docs/" class="cookbook-link serif-i svelte-1bpnej">Docs home</a> <!--[--><div class="group svelte-1bpnej"><h2 class="label svelte-1bpnej">Start</h2> <ul class="svelte-1bpnej"><!--[--><li class="svelte-1bpnej"><a href="/docs/start/install/" class="svelte-1bpnej">Install</a></li><li class="svelte-1bpnej"><a href="/docs/start/quickstart/" class="svelte-1bpnej">Quickstart</a></li><!--]--></ul></div><div class="group svelte-1bpnej"><h2 class="label svelte-1bpnej">Guides</h2> <ul class="svelte-1bpnej"><!--[--><li class="svelte-1bpnej"><a href="/docs/guides/workflow-graphs/" class="svelte-1bpnej">Workflow graphs</a></li><li class="svelte-1bpnej"><a href="/docs/guides/workers-and-dispatch/" class="svelte-1bpnej">Workers and dispatch</a></li><!--]--></ul></div><div class="group svelte-1bpnej"><h2 class="label svelte-1bpnej">Reference</h2> <ul class="svelte-1bpnej"><!--[--><li class="svelte-1bpnej"><a href="/docs/reference/api/" class="svelte-1bpnej">HTTP API</a></li><li class="svelte-1bpnej"><a href="/docs/reference/configuration/" aria-current="page" class="svelte-1bpnej active">Configuration</a></li><!--]--></ul></div><!--]--> <!--[-1--><!--]--></div> <div class="content svelte-1bpnej"><!--[--><!----> <div class="page svelte-5oqt2y has-toc"><article data-pagefind-body=""><p class="label label--accent" data-pagefind-ignore="">Reference</p> <h1 class="serif svelte-5oqt2y">Configuration</h1> <div class="meta mono svelte-5oqt2y" data-pagefind-ignore=""><!--[0--><span class="chip svelte-5oqt2y" title="Last verified with this release">verified · v2026.5.29</span><!--]--> <button class="meta-link svelte-5oqt2y"><!--[-1-->copy as markdown<!--]--></button> <a class="meta-link svelte-5oqt2y" href="https://github.com/nullclaw/nullmenu/edit/main/content/boiler/docs/reference/configuration.md" target="_blank" rel="noopener">edit on github <!----><svg class="functional-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></a></div> <!--[0--><details class="mobile-toc svelte-5oqt2y" data-pagefind-ignore=""><summary class="svelte-5oqt2y"><span class="label">On this page</span> <span class="toc-count mono svelte-5oqt2y">11 sections <!----><svg class="functional-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.5v11"></path><path d="M6.5 12h11"></path></g></svg><!----><!----></span></summary> <nav aria-label="On this page" class="svelte-5oqt2y"><ul class="svelte-5oqt2y"><!--[--><li class="d2 svelte-5oqt2y"><a href="#where-the-config-comes-from" class="svelte-5oqt2y">Where the config comes from</a></li><li class="d2 svelte-5oqt2y"><a href="#cli" class="svelte-5oqt2y">CLI</a></li><li class="d2 svelte-5oqt2y"><a href="#top-level-fields" class="svelte-5oqt2y">Top-level fields</a></li><li class="d2 svelte-5oqt2y"><a href="#engine" class="svelte-5oqt2y">engine</a></li><li class="d2 svelte-5oqt2y"><a href="#workers" class="svelte-5oqt2y">workers[]</a></li><li class="d2 svelte-5oqt2y"><a href="#tracker-pull-mode-against-nulltickets" class="svelte-5oqt2y">tracker — pull mode against NullTickets</a></li><li class="d3 svelte-5oqt2y"><a href="#trackerconcurrency" class="svelte-5oqt2y">tracker.concurrency</a></li><li class="d3 svelte-5oqt2y"><a href="#trackerworkspace" class="svelte-5oqt2y">tracker.workspace</a></li><li class="d3 svelte-5oqt2y"><a href="#trackersubprocess" class="svelte-5oqt2y">tracker.subprocess</a></li><li class="d2 svelte-5oqt2y"><a href="#environment-variables" class="svelte-5oqt2y">Environment variables</a></li><li class="d2 svelte-5oqt2y"><a href="#preflight" class="svelte-5oqt2y">Preflight</a></li><!--]--></ul></nav></details><!--]--> <div class="prose"><!----><p>One JSON file configures the whole orchestrator: server, workers, engine timings and the optional NullTickets pull mode. Every field has a sane default; the tables below come from the config structs in <code>src/config.zig</code>. Unknown fields are ignored, so configs stay forward-compatible.</p>
+<aside class="callout callout--note"><div class="callout-title">Note</div><p>Pre-1.0: config and CLI may change between releases.</p>
+</aside>
+<h2 id="where-the-config-comes-from" aria-labelledby="heading-label-where-the-config-comes-from"><span id="heading-label-where-the-config-comes-from">Where the config comes from</span><a class="heading-anchor" href="#where-the-config-comes-from" aria-label="Permalink to Where the config comes from" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<p>Resolution order:</p>
+<ol>
+<li><code>--config /path/to/config.json</code> — explicit file wins.</li>
+<li><code>NULLBOILER_HOME=/path/to/dir</code> — <code>config.json</code> is read from that directory.</li>
+<li>Default: <code>~/.nullboiler/config.json</code>.</li>
+</ol>
+<p>Relative paths inside the config — <code>db</code>, <code>strategies_dir</code>, <code>tracker.workflows_dir</code>, <code>tracker.workspace.root</code> — resolve relative to the config file, so a <code>NULLBOILER_HOME</code> directory is a self-contained instance. A missing config file is fine: defaults apply. The repo ships <code>config.example.json</code> as a starting point.</p>
+<h2 id="cli" aria-labelledby="heading-label-cli"><span id="heading-label-cli">CLI</span><a class="heading-anchor" href="#cli" aria-label="Permalink to CLI" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<figure class="code-figure" data-lang="text"><pre class="shiki null-kitchen" style="background-color:#0a0806;color:#d9d1c3" tabindex="0"><code><span class="line"><span>nullboiler [--host HOST] [--port N] [--db PATH] [--config PATH] [--token TOKEN]</span></span>
+<span class="line"><span>nullboiler validate-workflows [PATH]</span></span>
+<span class="line"><span>nullboiler --export-manifest</span></span>
+<span class="line"><span>nullboiler --from-json '&#x3C;wizard answers json>'</span></span>
+<span class="line"><span>nullboiler --version</span></span>
+<span class="line"><span>nullboiler help</span></span></code></pre><button class="code-copy" type="button" data-code data-pagefind-ignore aria-live="polite">copy</button></figure>
+<div class="table-scroll" role="region" aria-label="Data table: Flag / command, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Flag / command</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--host</code>, <code>--port</code></td>
+<td>Bind address; override config</td>
+</tr>
+<tr>
+<td><code>--db</code></td>
+<td>SQLite database path (WAL mode)</td>
+</tr>
+<tr>
+<td><code>--config</code></td>
+<td>Explicit config file</td>
+</tr>
+<tr>
+<td><code>--token</code></td>
+<td>API bearer token; same as <code>api_token</code> in config</td>
+</tr>
+<tr>
+<td><code>validate-workflows [PATH]</code></td>
+<td>Preflight file-based pull-mode <code>WorkflowDef</code> JSON files; errors exit 1, warnings pass</td>
+</tr>
+<tr>
+<td><code>--export-manifest</code></td>
+<td>Export the tool manifest (used by NullHub)</td>
+</tr>
+<tr>
+<td><code>--from-json</code></td>
+<td>Import config from wizard-answer JSON</td>
+</tr>
+<tr>
+<td><code>--version</code></td>
+<td>Print version</td>
+</tr>
+<tr>
+<td><code>help</code>, <code>--help</code>, <code>-h</code></td>
+<td>Print usage</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="top-level-fields" aria-labelledby="heading-label-top-level-fields"><span id="heading-label-top-level-fields">Top-level fields</span><a class="heading-anchor" href="#top-level-fields" aria-label="Permalink to Top-level fields" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Field, Default, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>host</code></td>
+<td><code>127.0.0.1</code></td>
+<td>Bind host</td>
+</tr>
+<tr>
+<td><code>port</code></td>
+<td><code>8080</code></td>
+<td>Bind port</td>
+</tr>
+<tr>
+<td><code>db</code></td>
+<td><code>nullboiler.db</code></td>
+<td>SQLite file</td>
+</tr>
+<tr>
+<td><code>api_token</code></td>
+<td><code>null</code></td>
+<td>Bearer token; when null the API is open (loopback default)</td>
+</tr>
+<tr>
+<td><code>self_url</code></td>
+<td><code>null</code></td>
+<td>Externally reachable URL, used for worker callbacks</td>
+</tr>
+<tr>
+<td><code>strategies_dir</code></td>
+<td><code>strategies</code></td>
+<td>Directory of run strategies</td>
+</tr>
+<tr>
+<td><code>workers</code></td>
+<td><code>[]</code></td>
+<td>Worker array — see <a href="/docs/guides/workers-and-dispatch/">Workers and dispatch</a></td>
+</tr>
+<tr>
+<td><code>engine</code></td>
+<td>see below</td>
+<td>Engine timings</td>
+</tr>
+<tr>
+<td><code>tracker</code></td>
+<td><code>null</code></td>
+<td>NullTickets pull mode — see below</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="engine" aria-labelledby="heading-label-engine"><span id="heading-label-engine"><code>engine</code></span><a class="heading-anchor" href="#engine" aria-label="Permalink to engine" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Field, Default, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>poll_interval_ms</code></td>
+<td>500</td>
+<td>Engine tick interval</td>
+</tr>
+<tr>
+<td><code>default_timeout_ms</code></td>
+<td>300000</td>
+<td>Step timeout when the step sets none</td>
+</tr>
+<tr>
+<td><code>default_max_attempts</code></td>
+<td>1</td>
+<td>Step attempts when the step sets none</td>
+</tr>
+<tr>
+<td><code>health_check_interval_ms</code></td>
+<td>30000</td>
+<td>Worker health probe interval</td>
+</tr>
+<tr>
+<td><code>worker_failure_threshold</code></td>
+<td>3</td>
+<td>Consecutive failures before the circuit opens</td>
+</tr>
+<tr>
+<td><code>worker_circuit_breaker_ms</code></td>
+<td>60000</td>
+<td>How long an open circuit keeps a worker out</td>
+</tr>
+<tr>
+<td><code>retry_base_delay_ms</code></td>
+<td>1000</td>
+<td>First retry delay</td>
+</tr>
+<tr>
+<td><code>retry_max_delay_ms</code></td>
+<td>30000</td>
+<td>Retry delay cap</td>
+</tr>
+<tr>
+<td><code>retry_jitter_ms</code></td>
+<td>250</td>
+<td>Random jitter added to retries</td>
+</tr>
+<tr>
+<td><code>retry_max_elapsed_ms</code></td>
+<td>900000</td>
+<td>Total retry budget per step</td>
+</tr>
+<tr>
+<td><code>shutdown_grace_ms</code></td>
+<td>30000</td>
+<td>Drain window on shutdown</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="workers" aria-labelledby="heading-label-workers"><span id="heading-label-workers"><code>workers[]</code></span><a class="heading-anchor" href="#workers" aria-label="Permalink to workers[]" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Field, Default, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>id</code></td>
+<td>—</td>
+<td>Unique id</td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td>—</td>
+<td>Worker endpoint</td>
+</tr>
+<tr>
+<td><code>token</code></td>
+<td>—</td>
+<td>Bearer token sent to the worker</td>
+</tr>
+<tr>
+<td><code>protocol</code></td>
+<td><code>webhook</code></td>
+<td><code>webhook</code>, <code>api_chat</code>, <code>openai_chat</code>, <code>a2a</code>, <code>mqtt</code>, <code>redis_stream</code></td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td><code>null</code></td>
+<td>Required for <code>openai_chat</code></td>
+</tr>
+<tr>
+<td><code>tags</code></td>
+<td><code>[]</code></td>
+<td>Selection labels</td>
+</tr>
+<tr>
+<td><code>max_concurrent</code></td>
+<td>1</td>
+<td>Per-worker in-flight cap</td>
+</tr>
+</tbody>
+</table>
+</div>
+<aside class="callout callout--note"><div class="callout-title">Note</div><p><code>mqtt</code> and <code>redis_stream</code> parse as valid protocols, but their transports are stubs in the current release — nothing is sent over the wire. Use the four HTTP protocols: <code>webhook</code>, <code>api_chat</code>, <code>openai_chat</code>, <code>a2a</code>.</p>
+</aside>
+<h2 id="tracker-pull-mode-against-nulltickets" aria-labelledby="heading-label-tracker-pull-mode-against-nulltickets"><span id="heading-label-tracker-pull-mode-against-nulltickets"><code>tracker</code> — pull mode against NullTickets</span><a class="heading-anchor" href="#tracker-pull-mode-against-nulltickets" aria-label="Permalink to tracker — pull mode against NullTickets" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<p>Setting this section turns on pull mode: NullBoiler polls <a href="https://tickets.nullmenu.ai/" target="_blank" rel="noopener" aria-label="NullTickets (opens in a new tab)">NullTickets<svg class="functional-icon external-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg></a>, claims tasks by role, heartbeats leases and runs each task in a managed workspace.</p>
+<div class="table-scroll" role="region" aria-label="Data table: Field, Default, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>url</code></td>
+<td><code>null</code></td>
+<td>NullTickets base URL (pull mode is off while null)</td>
+</tr>
+<tr>
+<td><code>api_token</code></td>
+<td><code>null</code></td>
+<td>Tracker token</td>
+</tr>
+<tr>
+<td><code>poll_interval_ms</code></td>
+<td>10000</td>
+<td>Tracker poll interval</td>
+</tr>
+<tr>
+<td><code>agent_id</code></td>
+<td><code>nullboiler</code></td>
+<td>Identity used when claiming</td>
+</tr>
+<tr>
+<td><code>stall_timeout_ms</code></td>
+<td>300000</td>
+<td>Mark a task stalled after this silence</td>
+</tr>
+<tr>
+<td><code>lease_ttl_ms</code></td>
+<td>60000</td>
+<td>Claim lease duration</td>
+</tr>
+<tr>
+<td><code>heartbeat_interval_ms</code></td>
+<td>30000</td>
+<td>Lease heartbeat interval</td>
+</tr>
+<tr>
+<td><code>workflows_dir</code></td>
+<td><code>workflows</code></td>
+<td>Directory of file-based <code>WorkflowDef</code> JSON (hot-reloaded)</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h3 id="trackerconcurrency" aria-labelledby="heading-label-trackerconcurrency"><span id="heading-label-trackerconcurrency"><code>tracker.concurrency</code></span><a class="heading-anchor" href="#trackerconcurrency" aria-label="Permalink to tracker.concurrency" data-pagefind-ignore><span aria-hidden="true">#</span></a></h3>
+<div class="table-scroll" role="region" aria-label="Data table: Field, Default, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>max_concurrent_tasks</code></td>
+<td>10</td>
+<td>Global cap</td>
+</tr>
+<tr>
+<td><code>per_pipeline</code> / <code>per_role</code> / <code>per_state</code></td>
+<td><code>null</code></td>
+<td>Per-key caps as JSON maps</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h3 id="trackerworkspace" aria-labelledby="heading-label-trackerworkspace"><span id="heading-label-trackerworkspace"><code>tracker.workspace</code></span><a class="heading-anchor" href="#trackerworkspace" aria-label="Permalink to tracker.workspace" data-pagefind-ignore><span aria-hidden="true">#</span></a></h3>
+<div class="table-scroll" role="region" aria-label="Data table: Field, Default, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>root</code></td>
+<td><code>/tmp/nullboiler-workspaces</code></td>
+<td>Where per-task workspaces are created</td>
+</tr>
+<tr>
+<td><code>hooks.after_create</code> / <code>hooks.before_run</code> / <code>hooks.after_run</code> / <code>hooks.before_remove</code></td>
+<td><code>null</code></td>
+<td>Shell hooks around the workspace lifecycle</td>
+</tr>
+<tr>
+<td><code>hook_timeout_ms</code></td>
+<td>30000</td>
+<td>Per-hook timeout</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h3 id="trackersubprocess" aria-labelledby="heading-label-trackersubprocess"><span id="heading-label-trackersubprocess"><code>tracker.subprocess</code></span><a class="heading-anchor" href="#trackersubprocess" aria-label="Permalink to tracker.subprocess" data-pagefind-ignore><span aria-hidden="true">#</span></a></h3>
+<p>Pull mode can spawn a local agent per task instead of calling a remote worker:</p>
+<div class="table-scroll" role="region" aria-label="Data table: Field, Default, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>command</code></td>
+<td><code>nullclaw</code></td>
+<td>Binary to spawn</td>
+</tr>
+<tr>
+<td><code>base_port</code></td>
+<td>9200</td>
+<td>First port assigned to spawned agents</td>
+</tr>
+<tr>
+<td><code>health_check_retries</code></td>
+<td>10</td>
+<td>Startup probes before giving up</td>
+</tr>
+<tr>
+<td><code>max_turns</code></td>
+<td>20</td>
+<td>Turn cap per task</td>
+</tr>
+<tr>
+<td><code>turn_timeout_ms</code></td>
+<td>600000</td>
+<td>Per-turn timeout</td>
+</tr>
+<tr>
+<td><code>continuation_prompt</code></td>
+<td>—</td>
+<td>Prompt sent on follow-up turns of a task</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="environment-variables" aria-labelledby="heading-label-environment-variables"><span id="heading-label-environment-variables">Environment variables</span><a class="heading-anchor" href="#environment-variables" aria-label="Permalink to Environment variables" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<div class="table-scroll" role="region" aria-label="Data table: Variable, Purpose" tabindex="0"><table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>NULLBOILER_HOME</code></td>
+<td>Instance home directory; <code>config.json</code> and relative paths resolve from here. Unset, it falls back to <code>HOME</code> (<code>USERPROFILE</code> on Windows) plus <code>.nullboiler</code></td>
+</tr>
+<tr>
+<td><code>NULLBOILER_TOKEN</code></td>
+<td>Exported before <code>docker compose up</code> to align the API token across the repo&#39;s compose stack — see the compose guide (<code>docs/docker-compose-nulltickets-nullclaw.md</code>)</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="preflight" aria-labelledby="heading-label-preflight"><span id="heading-label-preflight">Preflight</span><a class="heading-anchor" href="#preflight" aria-label="Permalink to Preflight" data-pagefind-ignore><span aria-hidden="true">#</span></a></h2>
+<p>Before starting a pull-mode instance, validate the workflow files on disk:</p>
+<figure class="code-figure" data-lang="bash"><pre class="shiki null-kitchen" style="background-color:#0a0806;color:#d9d1c3" tabindex="0"><code><span class="line"><span style="color:#ECE5D8">zig</span><span style="color:#C9B795"> build</span><span style="color:#C9B795"> run</span><span style="color:#C9B795"> --</span><span style="color:#C9B795"> validate-workflows</span></span>
+<span class="line"><span style="color:#ECE5D8">zig</span><span style="color:#C9B795"> build</span><span style="color:#C9B795"> run</span><span style="color:#C9B795"> --</span><span style="color:#C9B795"> validate-workflows</span><span style="color:#C9B795"> workflows</span></span></code></pre><button class="code-copy" type="button" data-code data-pagefind-ignore aria-live="polite">copy</button></figure>
+<p>It scans direct <code>*.json</code> files in the directory (no recursion), errors on malformed JSON, missing or duplicate <code>pipeline_id</code>, and warns on suspicious-but-allowed shapes. Errors exit with status 1; warnings pass — matching the runtime loader&#39;s permissive behavior.</p>
+<!----></div> <nav class="pager svelte-5oqt2y" aria-label="Previous and next" data-pagefind-ignore=""><!--[0--><a class="pager-link prev svelte-5oqt2y" href="/docs/reference/api/"><span class="dir mono svelte-5oqt2y"><!----><svg class="functional-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m10.5 7-5 5 5 5"></path><path d="M6 12h12.5"></path></g></svg><!----><!----> previous</span> <span class="serif-i svelte-5oqt2y">HTTP API</span></a><!--]--> <!--[-1--><!--]--></nav></article> <!--[0--><aside class="toc svelte-5oqt2y" aria-label="On this page"><h2 class="label svelte-5oqt2y">On this page</h2> <ul class="svelte-5oqt2y"><!--[--><li class="d2 svelte-5oqt2y"><a href="#where-the-config-comes-from" class="svelte-5oqt2y">Where the config comes from</a></li><li class="d2 svelte-5oqt2y"><a href="#cli" class="svelte-5oqt2y">CLI</a></li><li class="d2 svelte-5oqt2y"><a href="#top-level-fields" class="svelte-5oqt2y">Top-level fields</a></li><li class="d2 svelte-5oqt2y"><a href="#engine" class="svelte-5oqt2y">engine</a></li><li class="d2 svelte-5oqt2y"><a href="#workers" class="svelte-5oqt2y">workers[]</a></li><li class="d2 svelte-5oqt2y"><a href="#tracker-pull-mode-against-nulltickets" class="svelte-5oqt2y">tracker — pull mode against NullTickets</a></li><li class="d3 svelte-5oqt2y"><a href="#trackerconcurrency" class="svelte-5oqt2y">tracker.concurrency</a></li><li class="d3 svelte-5oqt2y"><a href="#trackerworkspace" class="svelte-5oqt2y">tracker.workspace</a></li><li class="d3 svelte-5oqt2y"><a href="#trackersubprocess" class="svelte-5oqt2y">tracker.subprocess</a></li><li class="d2 svelte-5oqt2y"><a href="#environment-variables" class="svelte-5oqt2y">Environment variables</a></li><li class="d2 svelte-5oqt2y"><a href="#preflight" class="svelte-5oqt2y">Preflight</a></li><!--]--></ul></aside><!--]--></div><!--]--><!----></div></div><!--]--><!--]--><!----></main> <footer class="svelte-jz8lnl"><div class="container"><div class="signoff svelte-jz8lnl"><p class="serif-i big svelte-jz8lnl">Built for your hardware.</p> <p class="sub svelte-jz8lnl">Single-binary Zig tools for running and supervising AI agents locally.</p></div> <div class="cols svelte-jz8lnl"><div class="col svelte-jz8lnl"><h3 class="label svelte-jz8lnl">Products</h3> <ul class="svelte-jz8lnl"><!--[--><li><a href="https://hub.nullmenu.ai" class="mono svelte-jz8lnl">nullhub</a></li><li><a href="https://claw.nullmenu.ai" class="mono svelte-jz8lnl">nullclaw</a></li><li><a href="https://boiler.nullmenu.ai" class="mono svelte-jz8lnl">nullboiler</a></li><li><a href="https://tickets.nullmenu.ai" class="mono svelte-jz8lnl">nulltickets</a></li><li><a href="https://watch.nullmenu.ai" class="mono svelte-jz8lnl">nullwatch</a></li><li><a href="https://pantry.nullmenu.ai" class="mono svelte-jz8lnl">nullpantry</a></li><li><a href="https://clw.nullmenu.ai" class="mono svelte-jz8lnl">nllclw</a></li><li><a href="https://desk.nullmenu.ai" class="mono svelte-jz8lnl">nulldesk</a></li><li><a href="https://cap.nullmenu.ai" class="mono svelte-jz8lnl">nullcap</a></li><li><a href="https://builder.nullmenu.ai" class="mono svelte-jz8lnl">nullbuilder</a></li><!--]--></ul></div> <div class="col svelte-jz8lnl"><h3 class="label svelte-jz8lnl">Explore</h3> <ul class="svelte-jz8lnl"><li><a href="https://nullmenu.ai/products/" class="svelte-jz8lnl">All products</a></li> <li><a href="/docs/" class="svelte-jz8lnl">Documentation</a></li> <li><a href="/llms.txt" class="mono svelte-jz8lnl">llms.txt</a></li></ul></div> <div class="col svelte-jz8lnl"><h3 class="label svelte-jz8lnl">Source</h3> <ul class="svelte-jz8lnl"><li><a href="https://github.com/nullclaw/nullboiler" target="_blank" rel="noopener" class="svelte-jz8lnl">GitHub <!----><svg class="functional-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></a></li> <li><a href="https://github.com/nullclaw" target="_blank" rel="noopener" class="svelte-jz8lnl">nullclaw org <!----><svg class="functional-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="opens in a new tab"><g stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16 16 8"></path><path d="M10 8h6v6"></path></g></svg><!----><!----></a></li> <!--[0--><li><span class="dim svelte-jz8lnl">MIT licensed</span></li><!--]--> <!--[0--><li><span class="dim mono svelte-jz8lnl">v2026.5.29</span></li><!--]--></ul></div></div> <div class="bottom svelte-jz8lnl"><span class="mark svelte-jz8lnl"><svg width="24" height="24" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="16" cy="16" r="10.5" stroke="currentColor" stroke-width="1.75"></circle><line class="slash" x1="7" y1="27" x2="25" y2="5" stroke="var(--accent)" stroke-width="1.75" stroke-linecap="round"></line></svg><!----></span> <span class="mono note svelte-jz8lnl">© 2026 the Null ecosystem</span> <span class="mono note svelte-jz8lnl">built with Zig 0.16</span> <span class="mono note svelte-jz8lnl">local-first · no cloud</span></div></div></footer><!----> <div class="grain svelte-2z0jyf" aria-hidden="true" style="background-image: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E&quot;);"></div><!----><!--]--><!--]--> <!--[-1--><!--]--><!--]-->
+			
+			<script>
+				{
+					__sveltekit_15pfph0 = {
+						base: new URL("../../..", location).pathname.slice(0, -1)
+					};
+
+					const element = document.currentScript.parentElement;
+
+					Promise.all([
+						import("../../../_app/immutable/entry/start.D6R0mWux.js"),
+						import("../../../_app/immutable/entry/app.DBMZA7cE.js")
+					]).then(([kit, app]) => {
+						kit.start(app, element, {
+							node_ids: [0, 2, 5],
+							data: [null,{type:"data",data:{tree:[{slug:"start",title:"Start",pages:[{siteId:"boiler",section:"start",slug:"install",path:"/content/boiler/docs/start/install.md",title:"Install",description:"Prebuilt binaries for seven targets, source builds with Zig 0.16.0, NullHub, or Docker Compose.",order:1,verified:"v2026.5.29"},{siteId:"boiler",section:"start",slug:"quickstart",path:"/content/boiler/docs/start/quickstart.md",title:"Quickstart",description:"Start the orchestrator, pair one NullClaw worker, and run your first task.",order:2,verified:"v2026.5.29"}]},{slug:"guides",title:"Guides",pages:[{siteId:"boiler",section:"guides",slug:"workflow-graphs",path:"/content/boiler/docs/guides/workflow-graphs.md",title:"Workflow graphs",description:"Nodes, edges, state reducers, checkpoints, replay, forking and interrupts.",order:1,verified:"v2026.5.29"},{siteId:"boiler",section:"guides",slug:"workers-and-dispatch",path:"/content/boiler/docs/guides/workers-and-dispatch.md",title:"Workers and dispatch",description:"Worker protocols, tag-based selection, capacity, health checks and drain mode.",order:2,verified:"v2026.5.29"}]},{slug:"reference",title:"Reference",pages:[{siteId:"boiler",section:"reference",slug:"api",path:"/content/boiler/docs/reference/api.md",title:"HTTP API",description:"All 36 operations — runs, steps, checkpoints, workers, workflows, tracker bridge and admin.",order:1,verified:"v2026.5.29"},{siteId:"boiler",section:"reference",slug:"configuration",path:"/content/boiler/docs/reference/configuration.md",title:"Configuration",description:"Config file resolution, every field with its default, CLI flags and the tracker section.",order:2,verified:"v2026.5.29"}]}]},uses:{}},{type:"data",data:{doc:{siteId:"boiler",section:"reference",slug:"configuration",path:"/content/boiler/docs/reference/configuration.md",title:"Configuration",description:"Config file resolution, every field with its default, CLI flags and the tracker section.",order:2,verified:"v2026.5.29",body:"\nOne JSON file configures the whole orchestrator: server, workers, engine timings and the optional NullTickets pull mode. Every field has a sane default; the tables below come from the config structs in `src/config.zig`. Unknown fields are ignored, so configs stay forward-compatible.\n\n> [!NOTE]\n> Pre-1.0: config and CLI may change between releases.\n\n## Where the config comes from\n\nResolution order:\n\n1. `--config /path/to/config.json` — explicit file wins.\n2. `NULLBOILER_HOME=/path/to/dir` — `config.json` is read from that directory.\n3. Default: `~/.nullboiler/config.json`.\n\nRelative paths inside the config — `db`, `strategies_dir`, `tracker.workflows_dir`, `tracker.workspace.root` — resolve relative to the config file, so a `NULLBOILER_HOME` directory is a self-contained instance. A missing config file is fine: defaults apply. The repo ships `config.example.json` as a starting point.\n\n## CLI\n\n```text\nnullboiler [--host HOST] [--port N] [--db PATH] [--config PATH] [--token TOKEN]\nnullboiler validate-workflows [PATH]\nnullboiler --export-manifest\nnullboiler --from-json '\u003Cwizard answers json>'\nnullboiler --version\nnullboiler help\n```\n\n| Flag / command | Purpose |\n| --- | --- |\n| `--host`, `--port` | Bind address; override config |\n| `--db` | SQLite database path (WAL mode) |\n| `--config` | Explicit config file |\n| `--token` | API bearer token; same as `api_token` in config |\n| `validate-workflows [PATH]` | Preflight file-based pull-mode `WorkflowDef` JSON files; errors exit 1, warnings pass |\n| `--export-manifest` | Export the tool manifest (used by NullHub) |\n| `--from-json` | Import config from wizard-answer JSON |\n| `--version` | Print version |\n| `help`, `--help`, `-h` | Print usage |\n\n## Top-level fields\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `host` | `127.0.0.1` | Bind host |\n| `port` | `8080` | Bind port |\n| `db` | `nullboiler.db` | SQLite file |\n| `api_token` | `null` | Bearer token; when null the API is open (loopback default) |\n| `self_url` | `null` | Externally reachable URL, used for worker callbacks |\n| `strategies_dir` | `strategies` | Directory of run strategies |\n| `workers` | `[]` | Worker array — see [Workers and dispatch](/docs/guides/workers-and-dispatch/) |\n| `engine` | see below | Engine timings |\n| `tracker` | `null` | NullTickets pull mode — see below |\n\n## `engine`\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `poll_interval_ms` | 500 | Engine tick interval |\n| `default_timeout_ms` | 300000 | Step timeout when the step sets none |\n| `default_max_attempts` | 1 | Step attempts when the step sets none |\n| `health_check_interval_ms` | 30000 | Worker health probe interval |\n| `worker_failure_threshold` | 3 | Consecutive failures before the circuit opens |\n| `worker_circuit_breaker_ms` | 60000 | How long an open circuit keeps a worker out |\n| `retry_base_delay_ms` | 1000 | First retry delay |\n| `retry_max_delay_ms` | 30000 | Retry delay cap |\n| `retry_jitter_ms` | 250 | Random jitter added to retries |\n| `retry_max_elapsed_ms` | 900000 | Total retry budget per step |\n| `shutdown_grace_ms` | 30000 | Drain window on shutdown |\n\n## `workers[]`\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `id` | — | Unique id |\n| `url` | — | Worker endpoint |\n| `token` | — | Bearer token sent to the worker |\n| `protocol` | `webhook` | `webhook`, `api_chat`, `openai_chat`, `a2a`, `mqtt`, `redis_stream` |\n| `model` | `null` | Required for `openai_chat` |\n| `tags` | `[]` | Selection labels |\n| `max_concurrent` | 1 | Per-worker in-flight cap |\n\n> [!NOTE]\n> `mqtt` and `redis_stream` parse as valid protocols, but their transports are stubs in the current release — nothing is sent over the wire. Use the four HTTP protocols: `webhook`, `api_chat`, `openai_chat`, `a2a`.\n\n## `tracker` — pull mode against NullTickets\n\nSetting this section turns on pull mode: NullBoiler polls [NullTickets](https://tickets.nullmenu.ai/), claims tasks by role, heartbeats leases and runs each task in a managed workspace.\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `url` | `null` | NullTickets base URL (pull mode is off while null) |\n| `api_token` | `null` | Tracker token |\n| `poll_interval_ms` | 10000 | Tracker poll interval |\n| `agent_id` | `nullboiler` | Identity used when claiming |\n| `stall_timeout_ms` | 300000 | Mark a task stalled after this silence |\n| `lease_ttl_ms` | 60000 | Claim lease duration |\n| `heartbeat_interval_ms` | 30000 | Lease heartbeat interval |\n| `workflows_dir` | `workflows` | Directory of file-based `WorkflowDef` JSON (hot-reloaded) |\n\n### `tracker.concurrency`\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `max_concurrent_tasks` | 10 | Global cap |\n| `per_pipeline` / `per_role` / `per_state` | `null` | Per-key caps as JSON maps |\n\n### `tracker.workspace`\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `root` | `/tmp/nullboiler-workspaces` | Where per-task workspaces are created |\n| `hooks.after_create` / `hooks.before_run` / `hooks.after_run` / `hooks.before_remove` | `null` | Shell hooks around the workspace lifecycle |\n| `hook_timeout_ms` | 30000 | Per-hook timeout |\n\n### `tracker.subprocess`\n\nPull mode can spawn a local agent per task instead of calling a remote worker:\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `command` | `nullclaw` | Binary to spawn |\n| `base_port` | 9200 | First port assigned to spawned agents |\n| `health_check_retries` | 10 | Startup probes before giving up |\n| `max_turns` | 20 | Turn cap per task |\n| `turn_timeout_ms` | 600000 | Per-turn timeout |\n| `continuation_prompt` | — | Prompt sent on follow-up turns of a task |\n\n## Environment variables\n\n| Variable | Purpose |\n| --- | --- |\n| `NULLBOILER_HOME` | Instance home directory; `config.json` and relative paths resolve from here. Unset, it falls back to `HOME` (`USERPROFILE` on Windows) plus `.nullboiler` |\n| `NULLBOILER_TOKEN` | Exported before `docker compose up` to align the API token across the repo's compose stack — see the compose guide (`docs/docker-compose-nulltickets-nullclaw.md`) |\n\n## Preflight\n\nBefore starting a pull-mode instance, validate the workflow files on disk:\n\n```bash\nzig build run -- validate-workflows\nzig build run -- validate-workflows workflows\n```\n\nIt scans direct `*.json` files in the directory (no recursion), errors on malformed JSON, missing or duplicate `pipeline_id`, and warns on suspicious-but-allowed shapes. Errors exit with status 1; warnings pass — matching the runtime loader's permissive behavior.\n",html:"\u003Cp>One JSON file configures the whole orchestrator: server, workers, engine timings and the optional NullTickets pull mode. Every field has a sane default; the tables below come from the config structs in \u003Ccode>src/config.zig\u003C/code>. Unknown fields are ignored, so configs stay forward-compatible.\u003C/p>\n\u003Caside class=\"callout callout--note\">\u003Cdiv class=\"callout-title\">Note\u003C/div>\u003Cp>Pre-1.0: config and CLI may change between releases.\u003C/p>\n\u003C/aside>\n\u003Ch2 id=\"where-the-config-comes-from\" aria-labelledby=\"heading-label-where-the-config-comes-from\">\u003Cspan id=\"heading-label-where-the-config-comes-from\">Where the config comes from\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#where-the-config-comes-from\" aria-label=\"Permalink to Where the config comes from\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cp>Resolution order:\u003C/p>\n\u003Col>\n\u003Cli>\u003Ccode>--config /path/to/config.json\u003C/code> — explicit file wins.\u003C/li>\n\u003Cli>\u003Ccode>NULLBOILER_HOME=/path/to/dir\u003C/code> — \u003Ccode>config.json\u003C/code> is read from that directory.\u003C/li>\n\u003Cli>Default: \u003Ccode>~/.nullboiler/config.json\u003C/code>.\u003C/li>\n\u003C/ol>\n\u003Cp>Relative paths inside the config — \u003Ccode>db\u003C/code>, \u003Ccode>strategies_dir\u003C/code>, \u003Ccode>tracker.workflows_dir\u003C/code>, \u003Ccode>tracker.workspace.root\u003C/code> — resolve relative to the config file, so a \u003Ccode>NULLBOILER_HOME\u003C/code> directory is a self-contained instance. A missing config file is fine: defaults apply. The repo ships \u003Ccode>config.example.json\u003C/code> as a starting point.\u003C/p>\n\u003Ch2 id=\"cli\" aria-labelledby=\"heading-label-cli\">\u003Cspan id=\"heading-label-cli\">CLI\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#cli\" aria-label=\"Permalink to CLI\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cfigure class=\"code-figure\" data-lang=\"text\">\u003Cpre class=\"shiki null-kitchen\" style=\"background-color:#0a0806;color:#d9d1c3\" tabindex=\"0\">\u003Ccode>\u003Cspan class=\"line\">\u003Cspan>nullboiler [--host HOST] [--port N] [--db PATH] [--config PATH] [--token TOKEN]\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan>nullboiler validate-workflows [PATH]\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan>nullboiler --export-manifest\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan>nullboiler --from-json '&#x3C;wizard answers json>'\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan>nullboiler --version\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan>nullboiler help\u003C/span>\u003C/span>\u003C/code>\u003C/pre>\u003Cbutton class=\"code-copy\" type=\"button\" data-code data-pagefind-ignore aria-live=\"polite\">copy\u003C/button>\u003C/figure>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Flag / command, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Flag / command\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>\u003Ccode>--host\u003C/code>, \u003Ccode>--port\u003C/code>\u003C/td>\n\u003Ctd>Bind address; override config\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>--db\u003C/code>\u003C/td>\n\u003Ctd>SQLite database path (WAL mode)\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>--config\u003C/code>\u003C/td>\n\u003Ctd>Explicit config file\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>--token\u003C/code>\u003C/td>\n\u003Ctd>API bearer token; same as \u003Ccode>api_token\u003C/code> in config\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>validate-workflows [PATH]\u003C/code>\u003C/td>\n\u003Ctd>Preflight file-based pull-mode \u003Ccode>WorkflowDef\u003C/code> JSON files; errors exit 1, warnings pass\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>--export-manifest\u003C/code>\u003C/td>\n\u003Ctd>Export the tool manifest (used by NullHub)\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>--from-json\u003C/code>\u003C/td>\n\u003Ctd>Import config from wizard-answer JSON\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>--version\u003C/code>\u003C/td>\n\u003Ctd>Print version\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>help\u003C/code>, \u003Ccode>--help\u003C/code>, \u003Ccode>-h\u003C/code>\u003C/td>\n\u003Ctd>Print usage\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"top-level-fields\" aria-labelledby=\"heading-label-top-level-fields\">\u003Cspan id=\"heading-label-top-level-fields\">Top-level fields\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#top-level-fields\" aria-label=\"Permalink to Top-level fields\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Field, Default, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Field\u003C/th>\n\u003Cth>Default\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>\u003Ccode>host\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>127.0.0.1\u003C/code>\u003C/td>\n\u003Ctd>Bind host\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>port\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>8080\u003C/code>\u003C/td>\n\u003Ctd>Bind port\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>db\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>nullboiler.db\u003C/code>\u003C/td>\n\u003Ctd>SQLite file\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>api_token\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>null\u003C/code>\u003C/td>\n\u003Ctd>Bearer token; when null the API is open (loopback default)\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>self_url\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>null\u003C/code>\u003C/td>\n\u003Ctd>Externally reachable URL, used for worker callbacks\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>strategies_dir\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>strategies\u003C/code>\u003C/td>\n\u003Ctd>Directory of run strategies\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>workers\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>[]\u003C/code>\u003C/td>\n\u003Ctd>Worker array — see \u003Ca href=\"/docs/guides/workers-and-dispatch/\">Workers and dispatch\u003C/a>\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>engine\u003C/code>\u003C/td>\n\u003Ctd>see below\u003C/td>\n\u003Ctd>Engine timings\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>tracker\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>null\u003C/code>\u003C/td>\n\u003Ctd>NullTickets pull mode — see below\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"engine\" aria-labelledby=\"heading-label-engine\">\u003Cspan id=\"heading-label-engine\">\u003Ccode>engine\u003C/code>\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#engine\" aria-label=\"Permalink to engine\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Field, Default, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Field\u003C/th>\n\u003Cth>Default\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>\u003Ccode>poll_interval_ms\u003C/code>\u003C/td>\n\u003Ctd>500\u003C/td>\n\u003Ctd>Engine tick interval\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>default_timeout_ms\u003C/code>\u003C/td>\n\u003Ctd>300000\u003C/td>\n\u003Ctd>Step timeout when the step sets none\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>default_max_attempts\u003C/code>\u003C/td>\n\u003Ctd>1\u003C/td>\n\u003Ctd>Step attempts when the step sets none\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>health_check_interval_ms\u003C/code>\u003C/td>\n\u003Ctd>30000\u003C/td>\n\u003Ctd>Worker health probe interval\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>worker_failure_threshold\u003C/code>\u003C/td>\n\u003Ctd>3\u003C/td>\n\u003Ctd>Consecutive failures before the circuit opens\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>worker_circuit_breaker_ms\u003C/code>\u003C/td>\n\u003Ctd>60000\u003C/td>\n\u003Ctd>How long an open circuit keeps a worker out\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>retry_base_delay_ms\u003C/code>\u003C/td>\n\u003Ctd>1000\u003C/td>\n\u003Ctd>First retry delay\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>retry_max_delay_ms\u003C/code>\u003C/td>\n\u003Ctd>30000\u003C/td>\n\u003Ctd>Retry delay cap\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>retry_jitter_ms\u003C/code>\u003C/td>\n\u003Ctd>250\u003C/td>\n\u003Ctd>Random jitter added to retries\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>retry_max_elapsed_ms\u003C/code>\u003C/td>\n\u003Ctd>900000\u003C/td>\n\u003Ctd>Total retry budget per step\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>shutdown_grace_ms\u003C/code>\u003C/td>\n\u003Ctd>30000\u003C/td>\n\u003Ctd>Drain window on shutdown\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"workers\" aria-labelledby=\"heading-label-workers\">\u003Cspan id=\"heading-label-workers\">\u003Ccode>workers[]\u003C/code>\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#workers\" aria-label=\"Permalink to workers[]\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Field, Default, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Field\u003C/th>\n\u003Cth>Default\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>\u003Ccode>id\u003C/code>\u003C/td>\n\u003Ctd>—\u003C/td>\n\u003Ctd>Unique id\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>url\u003C/code>\u003C/td>\n\u003Ctd>—\u003C/td>\n\u003Ctd>Worker endpoint\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>token\u003C/code>\u003C/td>\n\u003Ctd>—\u003C/td>\n\u003Ctd>Bearer token sent to the worker\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>protocol\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>webhook\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>webhook\u003C/code>, \u003Ccode>api_chat\u003C/code>, \u003Ccode>openai_chat\u003C/code>, \u003Ccode>a2a\u003C/code>, \u003Ccode>mqtt\u003C/code>, \u003Ccode>redis_stream\u003C/code>\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>model\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>null\u003C/code>\u003C/td>\n\u003Ctd>Required for \u003Ccode>openai_chat\u003C/code>\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>tags\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>[]\u003C/code>\u003C/td>\n\u003Ctd>Selection labels\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>max_concurrent\u003C/code>\u003C/td>\n\u003Ctd>1\u003C/td>\n\u003Ctd>Per-worker in-flight cap\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Caside class=\"callout callout--note\">\u003Cdiv class=\"callout-title\">Note\u003C/div>\u003Cp>\u003Ccode>mqtt\u003C/code> and \u003Ccode>redis_stream\u003C/code> parse as valid protocols, but their transports are stubs in the current release — nothing is sent over the wire. Use the four HTTP protocols: \u003Ccode>webhook\u003C/code>, \u003Ccode>api_chat\u003C/code>, \u003Ccode>openai_chat\u003C/code>, \u003Ccode>a2a\u003C/code>.\u003C/p>\n\u003C/aside>\n\u003Ch2 id=\"tracker-pull-mode-against-nulltickets\" aria-labelledby=\"heading-label-tracker-pull-mode-against-nulltickets\">\u003Cspan id=\"heading-label-tracker-pull-mode-against-nulltickets\">\u003Ccode>tracker\u003C/code> — pull mode against NullTickets\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#tracker-pull-mode-against-nulltickets\" aria-label=\"Permalink to tracker — pull mode against NullTickets\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cp>Setting this section turns on pull mode: NullBoiler polls \u003Ca href=\"https://tickets.nullmenu.ai/\" target=\"_blank\" rel=\"noopener\" aria-label=\"NullTickets (opens in a new tab)\">NullTickets\u003Csvg class=\"functional-icon external-icon\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\" focusable=\"false\">\u003Cg stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\u003Cpath d=\"M8 16 16 8\">\u003C/path>\u003Cpath d=\"M10 8h6v6\">\u003C/path>\u003C/g>\u003C/svg>\u003C/a>, claims tasks by role, heartbeats leases and runs each task in a managed workspace.\u003C/p>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Field, Default, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Field\u003C/th>\n\u003Cth>Default\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>\u003Ccode>url\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>null\u003C/code>\u003C/td>\n\u003Ctd>NullTickets base URL (pull mode is off while null)\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>api_token\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>null\u003C/code>\u003C/td>\n\u003Ctd>Tracker token\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>poll_interval_ms\u003C/code>\u003C/td>\n\u003Ctd>10000\u003C/td>\n\u003Ctd>Tracker poll interval\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>agent_id\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>nullboiler\u003C/code>\u003C/td>\n\u003Ctd>Identity used when claiming\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>stall_timeout_ms\u003C/code>\u003C/td>\n\u003Ctd>300000\u003C/td>\n\u003Ctd>Mark a task stalled after this silence\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>lease_ttl_ms\u003C/code>\u003C/td>\n\u003Ctd>60000\u003C/td>\n\u003Ctd>Claim lease duration\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>heartbeat_interval_ms\u003C/code>\u003C/td>\n\u003Ctd>30000\u003C/td>\n\u003Ctd>Lease heartbeat interval\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>workflows_dir\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>workflows\u003C/code>\u003C/td>\n\u003Ctd>Directory of file-based \u003Ccode>WorkflowDef\u003C/code> JSON (hot-reloaded)\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch3 id=\"trackerconcurrency\" aria-labelledby=\"heading-label-trackerconcurrency\">\u003Cspan id=\"heading-label-trackerconcurrency\">\u003Ccode>tracker.concurrency\u003C/code>\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#trackerconcurrency\" aria-label=\"Permalink to tracker.concurrency\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h3>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Field, Default, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Field\u003C/th>\n\u003Cth>Default\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>\u003Ccode>max_concurrent_tasks\u003C/code>\u003C/td>\n\u003Ctd>10\u003C/td>\n\u003Ctd>Global cap\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>per_pipeline\u003C/code> / \u003Ccode>per_role\u003C/code> / \u003Ccode>per_state\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>null\u003C/code>\u003C/td>\n\u003Ctd>Per-key caps as JSON maps\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch3 id=\"trackerworkspace\" aria-labelledby=\"heading-label-trackerworkspace\">\u003Cspan id=\"heading-label-trackerworkspace\">\u003Ccode>tracker.workspace\u003C/code>\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#trackerworkspace\" aria-label=\"Permalink to tracker.workspace\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h3>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Field, Default, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Field\u003C/th>\n\u003Cth>Default\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>\u003Ccode>root\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>/tmp/nullboiler-workspaces\u003C/code>\u003C/td>\n\u003Ctd>Where per-task workspaces are created\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>hooks.after_create\u003C/code> / \u003Ccode>hooks.before_run\u003C/code> / \u003Ccode>hooks.after_run\u003C/code> / \u003Ccode>hooks.before_remove\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>null\u003C/code>\u003C/td>\n\u003Ctd>Shell hooks around the workspace lifecycle\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>hook_timeout_ms\u003C/code>\u003C/td>\n\u003Ctd>30000\u003C/td>\n\u003Ctd>Per-hook timeout\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch3 id=\"trackersubprocess\" aria-labelledby=\"heading-label-trackersubprocess\">\u003Cspan id=\"heading-label-trackersubprocess\">\u003Ccode>tracker.subprocess\u003C/code>\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#trackersubprocess\" aria-label=\"Permalink to tracker.subprocess\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h3>\n\u003Cp>Pull mode can spawn a local agent per task instead of calling a remote worker:\u003C/p>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Field, Default, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Field\u003C/th>\n\u003Cth>Default\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>\u003Ccode>command\u003C/code>\u003C/td>\n\u003Ctd>\u003Ccode>nullclaw\u003C/code>\u003C/td>\n\u003Ctd>Binary to spawn\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>base_port\u003C/code>\u003C/td>\n\u003Ctd>9200\u003C/td>\n\u003Ctd>First port assigned to spawned agents\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>health_check_retries\u003C/code>\u003C/td>\n\u003Ctd>10\u003C/td>\n\u003Ctd>Startup probes before giving up\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>max_turns\u003C/code>\u003C/td>\n\u003Ctd>20\u003C/td>\n\u003Ctd>Turn cap per task\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>turn_timeout_ms\u003C/code>\u003C/td>\n\u003Ctd>600000\u003C/td>\n\u003Ctd>Per-turn timeout\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>continuation_prompt\u003C/code>\u003C/td>\n\u003Ctd>—\u003C/td>\n\u003Ctd>Prompt sent on follow-up turns of a task\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"environment-variables\" aria-labelledby=\"heading-label-environment-variables\">\u003Cspan id=\"heading-label-environment-variables\">Environment variables\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#environment-variables\" aria-label=\"Permalink to Environment variables\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cdiv class=\"table-scroll\" role=\"region\" aria-label=\"Data table: Variable, Purpose\" tabindex=\"0\">\u003Ctable>\n\u003Cthead>\n\u003Ctr>\n\u003Cth>Variable\u003C/th>\n\u003Cth>Purpose\u003C/th>\n\u003C/tr>\n\u003C/thead>\n\u003Ctbody>\u003Ctr>\n\u003Ctd>\u003Ccode>NULLBOILER_HOME\u003C/code>\u003C/td>\n\u003Ctd>Instance home directory; \u003Ccode>config.json\u003C/code> and relative paths resolve from here. Unset, it falls back to \u003Ccode>HOME\u003C/code> (\u003Ccode>USERPROFILE\u003C/code> on Windows) plus \u003Ccode>.nullboiler\u003C/code>\u003C/td>\n\u003C/tr>\n\u003Ctr>\n\u003Ctd>\u003Ccode>NULLBOILER_TOKEN\u003C/code>\u003C/td>\n\u003Ctd>Exported before \u003Ccode>docker compose up\u003C/code> to align the API token across the repo&#39;s compose stack — see the compose guide (\u003Ccode>docs/docker-compose-nulltickets-nullclaw.md\u003C/code>)\u003C/td>\n\u003C/tr>\n\u003C/tbody>\n\u003C/table>\n\u003C/div>\n\u003Ch2 id=\"preflight\" aria-labelledby=\"heading-label-preflight\">\u003Cspan id=\"heading-label-preflight\">Preflight\u003C/span>\u003Ca class=\"heading-anchor\" href=\"#preflight\" aria-label=\"Permalink to Preflight\" data-pagefind-ignore>\u003Cspan aria-hidden=\"true\">#\u003C/span>\u003C/a>\u003C/h2>\n\u003Cp>Before starting a pull-mode instance, validate the workflow files on disk:\u003C/p>\n\u003Cfigure class=\"code-figure\" data-lang=\"bash\">\u003Cpre class=\"shiki null-kitchen\" style=\"background-color:#0a0806;color:#d9d1c3\" tabindex=\"0\">\u003Ccode>\u003Cspan class=\"line\">\u003Cspan style=\"color:#ECE5D8\">zig\u003C/span>\u003Cspan style=\"color:#C9B795\"> build\u003C/span>\u003Cspan style=\"color:#C9B795\"> run\u003C/span>\u003Cspan style=\"color:#C9B795\"> --\u003C/span>\u003Cspan style=\"color:#C9B795\"> validate-workflows\u003C/span>\u003C/span>\n\u003Cspan class=\"line\">\u003Cspan style=\"color:#ECE5D8\">zig\u003C/span>\u003Cspan style=\"color:#C9B795\"> build\u003C/span>\u003Cspan style=\"color:#C9B795\"> run\u003C/span>\u003Cspan style=\"color:#C9B795\"> --\u003C/span>\u003Cspan style=\"color:#C9B795\"> validate-workflows\u003C/span>\u003Cspan style=\"color:#C9B795\"> workflows\u003C/span>\u003C/span>\u003C/code>\u003C/pre>\u003Cbutton class=\"code-copy\" type=\"button\" data-code data-pagefind-ignore aria-live=\"polite\">copy\u003C/button>\u003C/figure>\n\u003Cp>It scans direct \u003Ccode>*.json\u003C/code> files in the directory (no recursion), errors on malformed JSON, missing or duplicate \u003Ccode>pipeline_id\u003C/code>, and warns on suspicious-but-allowed shapes. Errors exit with status 1; warnings pass — matching the runtime loader&#39;s permissive behavior.\u003C/p>\n",toc:[{id:"where-the-config-comes-from",text:"Where the config comes from",depth:2},{id:"cli",text:"CLI",depth:2},{id:"top-level-fields",text:"Top-level fields",depth:2},{id:"engine",text:"engine",depth:2},{id:"workers",text:"workers[]",depth:2},{id:"tracker-pull-mode-against-nulltickets",text:"tracker — pull mode against NullTickets",depth:2},{id:"trackerconcurrency",text:"tracker.concurrency",depth:3},{id:"trackerworkspace",text:"tracker.workspace",depth:3},{id:"trackersubprocess",text:"tracker.subprocess",depth:3},{id:"environment-variables",text:"Environment variables",depth:2},{id:"preflight",text:"Preflight",depth:2}]},raw:"\nOne JSON file configures the whole orchestrator: server, workers, engine timings and the optional NullTickets pull mode. Every field has a sane default; the tables below come from the config structs in `src/config.zig`. Unknown fields are ignored, so configs stay forward-compatible.\n\n> [!NOTE]\n> Pre-1.0: config and CLI may change between releases.\n\n## Where the config comes from\n\nResolution order:\n\n1. `--config /path/to/config.json` — explicit file wins.\n2. `NULLBOILER_HOME=/path/to/dir` — `config.json` is read from that directory.\n3. Default: `~/.nullboiler/config.json`.\n\nRelative paths inside the config — `db`, `strategies_dir`, `tracker.workflows_dir`, `tracker.workspace.root` — resolve relative to the config file, so a `NULLBOILER_HOME` directory is a self-contained instance. A missing config file is fine: defaults apply. The repo ships `config.example.json` as a starting point.\n\n## CLI\n\n```text\nnullboiler [--host HOST] [--port N] [--db PATH] [--config PATH] [--token TOKEN]\nnullboiler validate-workflows [PATH]\nnullboiler --export-manifest\nnullboiler --from-json '\u003Cwizard answers json>'\nnullboiler --version\nnullboiler help\n```\n\n| Flag / command | Purpose |\n| --- | --- |\n| `--host`, `--port` | Bind address; override config |\n| `--db` | SQLite database path (WAL mode) |\n| `--config` | Explicit config file |\n| `--token` | API bearer token; same as `api_token` in config |\n| `validate-workflows [PATH]` | Preflight file-based pull-mode `WorkflowDef` JSON files; errors exit 1, warnings pass |\n| `--export-manifest` | Export the tool manifest (used by NullHub) |\n| `--from-json` | Import config from wizard-answer JSON |\n| `--version` | Print version |\n| `help`, `--help`, `-h` | Print usage |\n\n## Top-level fields\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `host` | `127.0.0.1` | Bind host |\n| `port` | `8080` | Bind port |\n| `db` | `nullboiler.db` | SQLite file |\n| `api_token` | `null` | Bearer token; when null the API is open (loopback default) |\n| `self_url` | `null` | Externally reachable URL, used for worker callbacks |\n| `strategies_dir` | `strategies` | Directory of run strategies |\n| `workers` | `[]` | Worker array — see [Workers and dispatch](/docs/guides/workers-and-dispatch/) |\n| `engine` | see below | Engine timings |\n| `tracker` | `null` | NullTickets pull mode — see below |\n\n## `engine`\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `poll_interval_ms` | 500 | Engine tick interval |\n| `default_timeout_ms` | 300000 | Step timeout when the step sets none |\n| `default_max_attempts` | 1 | Step attempts when the step sets none |\n| `health_check_interval_ms` | 30000 | Worker health probe interval |\n| `worker_failure_threshold` | 3 | Consecutive failures before the circuit opens |\n| `worker_circuit_breaker_ms` | 60000 | How long an open circuit keeps a worker out |\n| `retry_base_delay_ms` | 1000 | First retry delay |\n| `retry_max_delay_ms` | 30000 | Retry delay cap |\n| `retry_jitter_ms` | 250 | Random jitter added to retries |\n| `retry_max_elapsed_ms` | 900000 | Total retry budget per step |\n| `shutdown_grace_ms` | 30000 | Drain window on shutdown |\n\n## `workers[]`\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `id` | — | Unique id |\n| `url` | — | Worker endpoint |\n| `token` | — | Bearer token sent to the worker |\n| `protocol` | `webhook` | `webhook`, `api_chat`, `openai_chat`, `a2a`, `mqtt`, `redis_stream` |\n| `model` | `null` | Required for `openai_chat` |\n| `tags` | `[]` | Selection labels |\n| `max_concurrent` | 1 | Per-worker in-flight cap |\n\n> [!NOTE]\n> `mqtt` and `redis_stream` parse as valid protocols, but their transports are stubs in the current release — nothing is sent over the wire. Use the four HTTP protocols: `webhook`, `api_chat`, `openai_chat`, `a2a`.\n\n## `tracker` — pull mode against NullTickets\n\nSetting this section turns on pull mode: NullBoiler polls [NullTickets](https://tickets.nullmenu.ai/), claims tasks by role, heartbeats leases and runs each task in a managed workspace.\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `url` | `null` | NullTickets base URL (pull mode is off while null) |\n| `api_token` | `null` | Tracker token |\n| `poll_interval_ms` | 10000 | Tracker poll interval |\n| `agent_id` | `nullboiler` | Identity used when claiming |\n| `stall_timeout_ms` | 300000 | Mark a task stalled after this silence |\n| `lease_ttl_ms` | 60000 | Claim lease duration |\n| `heartbeat_interval_ms` | 30000 | Lease heartbeat interval |\n| `workflows_dir` | `workflows` | Directory of file-based `WorkflowDef` JSON (hot-reloaded) |\n\n### `tracker.concurrency`\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `max_concurrent_tasks` | 10 | Global cap |\n| `per_pipeline` / `per_role` / `per_state` | `null` | Per-key caps as JSON maps |\n\n### `tracker.workspace`\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `root` | `/tmp/nullboiler-workspaces` | Where per-task workspaces are created |\n| `hooks.after_create` / `hooks.before_run` / `hooks.after_run` / `hooks.before_remove` | `null` | Shell hooks around the workspace lifecycle |\n| `hook_timeout_ms` | 30000 | Per-hook timeout |\n\n### `tracker.subprocess`\n\nPull mode can spawn a local agent per task instead of calling a remote worker:\n\n| Field | Default | Purpose |\n| --- | --- | --- |\n| `command` | `nullclaw` | Binary to spawn |\n| `base_port` | 9200 | First port assigned to spawned agents |\n| `health_check_retries` | 10 | Startup probes before giving up |\n| `max_turns` | 20 | Turn cap per task |\n| `turn_timeout_ms` | 600000 | Per-turn timeout |\n| `continuation_prompt` | — | Prompt sent on follow-up turns of a task |\n\n## Environment variables\n\n| Variable | Purpose |\n| --- | --- |\n| `NULLBOILER_HOME` | Instance home directory; `config.json` and relative paths resolve from here. Unset, it falls back to `HOME` (`USERPROFILE` on Windows) plus `.nullboiler` |\n| `NULLBOILER_TOKEN` | Exported before `docker compose up` to align the API token across the repo's compose stack — see the compose guide (`docs/docker-compose-nulltickets-nullclaw.md`) |\n\n## Preflight\n\nBefore starting a pull-mode instance, validate the workflow files on disk:\n\n```bash\nzig build run -- validate-workflows\nzig build run -- validate-workflows workflows\n```\n\nIt scans direct `*.json` files in the directory (no recursion), errors on malformed JSON, missing or duplicate `pipeline_id`, and warns on suspicious-but-allowed shapes. Errors exit with status 1; warnings pass — matching the runtime loader's permissive behavior.\n",dateModified:"2026-07-17",sectionTitle:"Reference",prev:{siteId:"boiler",section:"reference",slug:"api",path:"/content/boiler/docs/reference/api.md",title:"HTTP API",description:"All 36 operations — runs, steps, checkpoints, workers, workflows, tracker bridge and admin.",order:1,verified:"v2026.5.29",sectionTitle:"Reference"},next:null},uses:{params:["section","slug"]}}],
+							form: null,
+							error: null
+						});
+					});
+				}
+			</script>
+		</div>
+	</body>
+</html>

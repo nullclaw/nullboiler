@@ -1,0 +1,24 @@
+# NullBoiler
+
+> Orchestrate AI-agent workflows with checkpoints, replay, forks, fan-out and interrupts. NullBoiler is a ~2 MB Zig binary with embedded SQLite.
+
+Part of the Null ecosystem (https://nullmenu.ai) — single-binary Zig tools for running AI agents on your own hardware. All components are pre-1.0 with CalVer releases. The links below point to canonical documentation pages.
+
+## Start
+
+- [Install](https://boiler.nullmenu.ai/docs/start/install/): Prebuilt binaries for seven targets, source builds with Zig 0.16.0, NullHub, or Docker Compose.
+- [Quickstart](https://boiler.nullmenu.ai/docs/start/quickstart/): Start the orchestrator, pair one NullClaw worker, and run your first task.
+
+## Guides
+
+- [Workflow graphs](https://boiler.nullmenu.ai/docs/guides/workflow-graphs/): Nodes, edges, state reducers, checkpoints, replay, forking and interrupts.
+- [Workers and dispatch](https://boiler.nullmenu.ai/docs/guides/workers-and-dispatch/): Worker protocols, tag-based selection, capacity, health checks and drain mode.
+
+## Reference
+
+- [HTTP API](https://boiler.nullmenu.ai/docs/reference/api/): All 36 operations — runs, steps, checkpoints, workers, workflows, tracker bridge and admin.
+- [Configuration](https://boiler.nullmenu.ai/docs/reference/configuration/): Config file resolution, every field with its default, CLI flags and the tracker section.
+
+## Source
+
+- [GitHub](https://github.com/nullclaw/nullboiler)
