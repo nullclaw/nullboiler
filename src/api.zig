@@ -501,30 +501,6 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
     }
 
     const obj = root.object;
-    const body_idempotency_key = getJsonString(obj, "idempotency_key");
-    const idempotency_key = ctx.request_idempotency_key orelse body_idempotency_key;
-    if (idempotency_key) |ik| {
-        if (ik.len == 0) {
-            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"idempotency key must not be empty\"}}");
-        }
-        const existing_run = ctx.store.getRunByIdempotencyKey(ctx.allocator, ik) catch {
-            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to check idempotency key\"}}");
-        };
-        if (existing_run) |run| {
-            if (!std.mem.eql(u8, run.workflow_json, body)) {
-                return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"idempotency key already used with different payload\"}}");
-            }
-            if (ctx.metrics) |m| {
-                metrics_mod.Metrics.incr(&m.runs_idempotent_replays_total);
-            }
-            const run_id_json = jsonQuoted(ctx.allocator, run.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-            const status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-            const replay_resp = std.fmt.allocPrint(ctx.allocator,
-                \\{{"id":{s},"status":{s},"idempotent_replay":true}}
-            , .{ run_id_json, status_json }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-            return jsonResponse(200, replay_resp);
-        }
-    }
 
     // Extract steps array
     const steps_val = obj.get("steps") orelse {
@@ -534,7 +510,8 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"steps must be an array\"}}");
     }
     // Expand strategy if present
-    const effective_steps = if (obj.get("strategy") != null and ctx.strategies != null) blk: {
+    const has_strategy = obj.get("strategy") != null and ctx.strategies != null;
+    const effective_steps = if (has_strategy) blk: {
         const expanded = strategy_mod.expandStrategy(ctx.allocator, ctx.strategies.?.*, obj) catch |err| {
             return switch (err) {
                 error.UnknownStrategy => jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"unknown strategy\"}}"),
@@ -551,6 +528,43 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
     } else steps_val.array.items;
 
     const steps_array = effective_steps;
+
+    // The engine rebuilds the graph from workflow_json, so it must carry the
+    // expanded steps -- storing the raw body would drop every depends_on that
+    // expansion just derived. Without a strategy the body is already canonical,
+    // and reusing it verbatim keeps idempotency comparisons byte-stable against
+    // runs stored before this.
+    const workflow_json = if (has_strategy)
+        buildExpandedWorkflowJson(ctx.allocator, obj, effective_steps) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to serialize workflow\"}}");
+        }
+    else
+        body;
+
+    const body_idempotency_key = getJsonString(obj, "idempotency_key");
+    const idempotency_key = ctx.request_idempotency_key orelse body_idempotency_key;
+    if (idempotency_key) |ik| {
+        if (ik.len == 0) {
+            return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"idempotency key must not be empty\"}}");
+        }
+        const existing_run = ctx.store.getRunByIdempotencyKey(ctx.allocator, ik) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to check idempotency key\"}}");
+        };
+        if (existing_run) |run| {
+            if (!std.mem.eql(u8, run.workflow_json, workflow_json)) {
+                return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"idempotency key already used with different payload\"}}");
+            }
+            if (ctx.metrics) |m| {
+                metrics_mod.Metrics.incr(&m.runs_idempotent_replays_total);
+            }
+            const run_id_json = jsonQuoted(ctx.allocator, run.id) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            const status_json = jsonQuoted(ctx.allocator, run.status) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            const replay_resp = std.fmt.allocPrint(ctx.allocator,
+                \\{{"id":{s},"status":{s},"idempotent_replay":true}}
+            , .{ run_id_json, status_json }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+            return jsonResponse(200, replay_resp);
+        }
+    }
 
     if (steps_array.len == 0) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"steps array must not be empty\"}}");
@@ -582,12 +596,12 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
     const run_id_buf = ids.generateId();
     const run_id = ctx.allocator.dupe(u8, &run_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
 
-    // Insert run — workflow_json = the original body (frozen snapshot)
-    ctx.store.insertRun(run_id, idempotency_key, "running", body, input_json, callbacks_json) catch {
+    // Insert run — workflow_json = frozen snapshot, post-strategy-expansion
+    ctx.store.insertRun(run_id, idempotency_key, "running", workflow_json, input_json, callbacks_json) catch {
         if (idempotency_key) |ik| {
             const existing = ctx.store.getRunByIdempotencyKey(ctx.allocator, ik) catch null;
             if (existing) |run| {
-                if (!std.mem.eql(u8, run.workflow_json, body)) {
+                if (!std.mem.eql(u8, run.workflow_json, workflow_json)) {
                     return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"idempotency key already used with different payload\"}}");
                 }
                 if (ctx.metrics) |m| {
@@ -1953,6 +1967,33 @@ fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Rebuild the workflow JSON from strategy-expanded steps.
+///
+/// `strategy`, `steps` and `reduce` are inputs to expansion; the expanded step
+/// array already carries their effect as `depends_on` edges and a synthetic
+/// reduce step. Keeping the originals would let a later reader re-derive a graph
+/// that disagrees with the steps stored alongside it.
+fn buildExpandedWorkflowJson(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+    effective_steps: []const std.json.Value,
+) ![]const u8 {
+    var out_obj: std.json.ObjectMap = .empty;
+
+    for (obj.keys(), obj.values()) |key, val| {
+        if (std.mem.eql(u8, key, "strategy")) continue;
+        if (std.mem.eql(u8, key, "steps")) continue;
+        if (std.mem.eql(u8, key, "reduce")) continue;
+        try out_obj.put(allocator, key, val);
+    }
+
+    var steps_array = try std.json.Array.initCapacity(allocator, effective_steps.len);
+    for (effective_steps) |step| try steps_array.append(step);
+    try out_obj.put(allocator, "steps", std.json.Value{ .array = steps_array });
+
+    return serializeJsonValue(allocator, std.json.Value{ .object = out_obj });
+}
+
 fn serializeJsonValue(allocator: std.mem.Allocator, val: ?std.json.Value) ![]const u8 {
     const v = val orelse return "{}";
     if (v == .null) return "{}";
@@ -2218,6 +2259,142 @@ fn plainResponse(status_code: u16, body: []const u8) HttpResponse {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
+
+fn makeTestStrategyMap(allocator: std.mem.Allocator) strategy_mod.StrategyMap {
+    var map = strategy_mod.StrategyMap{};
+    map.put(allocator, "sequential", strategy_mod.Strategy{
+        .name = "sequential",
+        .description = "chain steps",
+        .build = "chain",
+    }) catch unreachable;
+    map.put(allocator, "parallel", strategy_mod.Strategy{
+        .name = "parallel",
+        .description = "independent steps",
+        .build = "independent",
+    }) catch unreachable;
+    return map;
+}
+
+test "API: sequential strategy stores expanded depends_on in workflow_json" {
+    // Regression #36: workflow_json held the raw request body, so the
+    // depends_on edges applyChain derived were discarded. The engine rebuilds
+    // its graph from workflow_json, saw no edges, and dispatched every step as
+    // an independent root -- which is also why #34 reported sequential order
+    // not being enforced.
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var strategies = makeTestStrategyMap(arena.allocator());
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .request_idempotency_key = "seq-expand",
+        .strategies = &strategies,
+    };
+
+    const body =
+        \\{"strategy":"sequential","steps":[{"id":"a","type":"task","prompt_template":"first"},{"id":"b","type":"task","prompt_template":"second"}]}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 201), resp.status_code);
+
+    const run = (try store.getRunByIdempotencyKey(arena.allocator(), "seq-expand")).?;
+
+    try std.testing.expect(std.mem.indexOf(u8, run.workflow_json, "\"depends_on\"") != null);
+    // strategy is consumed by expansion; leaving it would let a reader re-derive
+    // a graph that disagrees with the stored steps.
+    try std.testing.expect(std.mem.indexOf(u8, run.workflow_json, "\"strategy\"") == null);
+}
+
+test "API: workflow without strategy is stored verbatim" {
+    // The no-strategy path must keep storing the raw body byte-for-byte, so
+    // idempotency comparisons still match runs written before #36 was fixed.
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .request_idempotency_key = "verbatim",
+    };
+
+    const body =
+        \\{"steps":[{"id":"s1","type":"task","prompt_template":"do work"}]}
+    ;
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 201), resp.status_code);
+
+    const run = (try store.getRunByIdempotencyKey(arena.allocator(), "verbatim")).?;
+    try std.testing.expectEqualStrings(body, run.workflow_json);
+}
+
+test "API: strategy run replays instead of conflicting on identical body" {
+    // Regression #36: the stored workflow_json is now the expanded form, so the
+    // idempotency check has to compare against that same expanded form. Compare
+    // it to the raw body and a legitimate retry looks like a payload change.
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var strategies = makeTestStrategyMap(arena.allocator());
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .request_idempotency_key = "seq-replay",
+        .strategies = &strategies,
+    };
+
+    const body =
+        \\{"strategy":"sequential","steps":[{"id":"a","type":"task","prompt_template":"first"},{"id":"b","type":"task","prompt_template":"second"}]}
+    ;
+    const first = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 201), first.status_code);
+
+    const second = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 200), second.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, second.body, "\"idempotent_replay\":true") != null);
+}
+
+test "API: strategy run still conflicts on a different body" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var strategies = makeTestStrategyMap(arena.allocator());
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+        .request_idempotency_key = "seq-conflict",
+        .strategies = &strategies,
+    };
+
+    const body_a =
+        \\{"strategy":"sequential","steps":[{"id":"a","type":"task","prompt_template":"first"}]}
+    ;
+    const body_b =
+        \\{"strategy":"sequential","steps":[{"id":"a","type":"task","prompt_template":"changed"}]}
+    ;
+
+    const first = handleRequest(&ctx, "POST", "/runs", body_a);
+    try std.testing.expectEqual(@as(u16, 201), first.status_code);
+
+    const second = handleRequest(&ctx, "POST", "/runs", body_b);
+    try std.testing.expectEqual(@as(u16, 409), second.status_code);
+}
 
 test "API: create run rejects unknown dependency" {
     const allocator = std.testing.allocator;
