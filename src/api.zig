@@ -2408,6 +2408,36 @@ test "API: create run rejects unknown step type" {
     try std.testing.expectEqual(@as(u16, 400), resp.status_code);
 }
 
+test "API: create run accepts parallel strategy with reduce block" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var strategies = strategy_mod.StrategyMap{};
+    try strategies.put(alloc, "parallel", .{
+        .name = "parallel",
+        .description = "independent steps",
+        .build = "independent",
+    });
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = alloc,
+        .strategies = &strategies,
+    };
+
+    const body =
+        \\{"strategy":"parallel","steps":[{"id":"a","type":"task","worker_tags":["default"],"prompt_template":"research A","timeout_ms":30000},{"id":"b","type":"task","worker_tags":["default"],"prompt_template":"research B","timeout_ms":30000}],"reduce":{"id":"synth","worker_tags":["default"],"prompt_template":"synthesize: {{state.a_out}} {{state.b_out}}"}}
+    ;
+
+    const resp = handleRequest(&ctx, "POST", "/runs", body);
+    try std.testing.expectEqual(@as(u16, 201), resp.status_code);
+}
+
 test "API: get step enforces run ownership" {
     const allocator = std.testing.allocator;
     var store = try Store.init(allocator, ":memory:");

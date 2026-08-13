@@ -1,5 +1,6 @@
 const std = @import("std");
 const std_compat = @import("compat.zig");
+const types = @import("types.zig");
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -167,6 +168,11 @@ fn applyChain(allocator: std.mem.Allocator, steps: []std.json.Value) !void {
     }
 }
 
+/// Synthetic type for the reduce step. A reduce block carries `worker_tags`
+/// and a `prompt_template`, so it dispatches exactly like a task; the join is
+/// expressed by the `depends_on` edges built below, not by the type.
+const reduce_step_type = "task";
+
 /// Build a reduce step that depends on all other steps.
 fn buildReduceStep(
     allocator: std.mem.Allocator,
@@ -180,8 +186,7 @@ fn buildReduceStep(
         try new_obj.put(allocator, key, val);
     }
 
-    // Set type to reduce
-    try new_obj.put(allocator, "type", std.json.Value{ .string = "reduce" });
+    try new_obj.put(allocator, "type", std.json.Value{ .string = reduce_step_type });
 
     // Ensure it has an id; default to "__reduce" if not provided
     if (new_obj.get("id") == null) {
@@ -383,7 +388,7 @@ test "expandStrategy independent + reduce: appends reduce step depending on all"
     try std.testing.expectEqual(@as(usize, 3), result.array.items.len);
 
     const reduce_step = result.array.items[2].object;
-    try std.testing.expectEqualStrings("reduce", getJsonString(reduce_step, "type").?);
+    try std.testing.expectEqualStrings("task", getJsonString(reduce_step, "type").?);
     try std.testing.expectEqualStrings("r", getJsonString(reduce_step, "id").?);
 
     // depends_on should include a and b
@@ -485,5 +490,43 @@ test "expandStrategy: reduce step gets default id when not provided" {
 
     const reduce_step = result.array.items[1].object;
     try std.testing.expectEqualStrings("__reduce", getJsonString(reduce_step, "id").?);
-    try std.testing.expectEqualStrings("reduce", getJsonString(reduce_step, "type").?);
+    try std.testing.expectEqualStrings("task", getJsonString(reduce_step, "type").?);
+}
+
+test "expandStrategy: reduce step type is a known StepType" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const strategies = makeTestStrategies(alloc);
+
+    const input =
+        \\{"strategy":"parallel","steps":[{"id":"a","type":"task"},{"id":"b","type":"task"}],"reduce":{"id":"synth","prompt_template":"synthesize"}}
+    ;
+    const parsed = try parseJson(alloc, input);
+    const result = try expandStrategy(alloc, strategies, parsed.value.object);
+
+    for (result.array.items) |step_val| {
+        const step_type = getJsonString(step_val.object, "type").?;
+        try std.testing.expect(types.StepType.fromString(step_type) != null);
+    }
+}
+
+test "expandStrategy: reduce step preserves user fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const strategies = makeTestStrategies(alloc);
+
+    const input =
+        \\{"strategy":"parallel","steps":[{"id":"a","type":"task"}],"reduce":{"id":"synth","worker_tags":["default"],"prompt_template":"synthesize","output_key":"final"}}
+    ;
+    const parsed = try parseJson(alloc, input);
+    const result = try expandStrategy(alloc, strategies, parsed.value.object);
+
+    const reduce_step = result.array.items[1].object;
+    try std.testing.expectEqualStrings("synthesize", getJsonString(reduce_step, "prompt_template").?);
+    try std.testing.expectEqualStrings("final", getJsonString(reduce_step, "output_key").?);
+    try std.testing.expectEqualStrings("default", reduce_step.get("worker_tags").?.array.items[0].string);
 }
