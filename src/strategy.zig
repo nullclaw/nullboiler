@@ -180,8 +180,12 @@ fn buildReduceStep(
         try new_obj.put(allocator, key, val);
     }
 
-    // Set type to reduce
-    try new_obj.put(allocator, "type", std.json.Value{ .string = "reduce" });
+    // Set type to task. A reduce block is conceptually a synthesis task with
+    // implicit depends_on (built below) — it needs no dedicated StepType and
+    // the engine handles it as a normal task node. Emitting "reduce" here was
+    // rejected by validateStepsForCreateRun because StepType has no reduce
+    // variant (nullboiler-62s).
+    try new_obj.put(allocator, "type", std.json.Value{ .string = "task" });
 
     // Ensure it has an id; default to "__reduce" if not provided
     if (new_obj.get("id") == null) {
@@ -383,7 +387,7 @@ test "expandStrategy independent + reduce: appends reduce step depending on all"
     try std.testing.expectEqual(@as(usize, 3), result.array.items.len);
 
     const reduce_step = result.array.items[2].object;
-    try std.testing.expectEqualStrings("reduce", getJsonString(reduce_step, "type").?);
+    try std.testing.expectEqualStrings("task", getJsonString(reduce_step, "type").?);
     try std.testing.expectEqualStrings("r", getJsonString(reduce_step, "id").?);
 
     // depends_on should include a and b
@@ -485,5 +489,31 @@ test "expandStrategy: reduce step gets default id when not provided" {
 
     const reduce_step = result.array.items[1].object;
     try std.testing.expectEqualStrings("__reduce", getJsonString(reduce_step, "id").?);
-    try std.testing.expectEqualStrings("reduce", getJsonString(reduce_step, "type").?);
+    try std.testing.expectEqualStrings("task", getJsonString(reduce_step, "type").?);
+}
+
+test "expandStrategy parallel+reduce: output passes validateStepsForCreateRun (nullboiler-62s regression)" {
+    // Regression: emitting type:"reduce" was rejected by validateStepsForCreateRun
+    // with StepTypeUnknown because StepType has no reduce variant. The expanded
+    // steps must round-trip through validation cleanly.
+    const validation = @import("workflow_validation.zig");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const strategies = makeTestStrategies(alloc);
+
+    const input =
+        \\{"strategy":"parallel","steps":[{"id":"a","type":"task","worker_tags":["default"],"prompt_template":"pa"},{"id":"b","type":"task","worker_tags":["default"],"prompt_template":"pb"}],"reduce":{"id":"synth","worker_tags":["default"],"prompt_template":"synthesize: {{state.a_out}} {{state.b_out}}"}}
+    ;
+    const parsed = try parseJson(alloc, input);
+    const result = try expandStrategy(alloc, strategies, parsed.value.object);
+
+    // Must NOT return StepTypeUnknown — the prior failure mode.
+    try validation.validateStepsForCreateRun(alloc, result.array.items);
+
+    // Sanity: 3 steps (2 parallel + 1 reduce-as-task).
+    try std.testing.expectEqual(@as(usize, 3), result.array.items.len);
+    try std.testing.expectEqualStrings("task", getJsonString(result.array.items[2].object, "type").?);
 }
