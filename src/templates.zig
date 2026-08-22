@@ -42,6 +42,7 @@ pub const Context = struct {
 pub const RenderError = error{
     UnterminatedExpression,
     UnknownExpression,
+    UnresolvedReference,
     InputFieldNotFound,
     StepNotFound,
     ItemNotAvailable,
@@ -398,6 +399,16 @@ fn lookupJsonPath(alloc: Allocator, json_bytes: []const u8, path: []const u8) !?
 
 /// Resolve a template expression (the text inside `{{ }}`) to a string value.
 /// Handles state.X, input.X, item, item.X expressions.
+///
+/// `strict` controls the missing-key policy:
+///   - false (lenient): missing keys return empty string. Used by
+///     processNewConditionals / isNewTruthy so `{% if X %}` evaluates
+///     empty-as-false without raising.
+///   - true (strict): missing keys return error.UnresolvedReference. Used by
+///     renderPromptTemplateStrict for prompt_template interpolation so an
+///     unresolved variable fails the node visibly instead of producing an
+///     empty prompt that the worker hallucinates from (issue #40,
+///     issue #40 acceptance).
 fn resolveNewExpression(
     alloc: Allocator,
     expr: []const u8,
@@ -405,7 +416,45 @@ fn resolveNewExpression(
     input_json: ?[]const u8,
     item_json: ?[]const u8,
     store_access: ?StoreAccess,
+    strict: bool,
 ) ![]const u8 {
+    // Helper: turn a missing-value result into either empty string (lenient)
+    // or UnresolvedReference (strict).
+    const OrErr = struct {
+        fn emptyOrErr(s: bool, a: Allocator) ![]const u8 {
+            if (s) return error.UnresolvedReference;
+            return a.dupe(u8, "") catch return error.OutOfMemory;
+        }
+    };
+
+    // {{steps.X.Y}} — per-step output registry written by buildStepRegistryUpdate
+    // alongside output_key. Resolves against state.steps.X.Y. Errors visibly
+    // when the step is absent so the worker never receives an empty prompt
+    // and hallucinates from session context (issue #40).
+    if (std.mem.startsWith(u8, expr, "steps.")) {
+        const rest = expr["steps.".len..];
+        if (rest.len == 0) return error.UnknownExpression;
+
+        // rest is "<id>.<field...>"; re-anchor under state.steps.<id>.<field...>
+        const path = try std.fmt.allocPrint(alloc, "steps.{s}", .{rest});
+        defer alloc.free(path);
+
+        const raw = state_mod.getStateValue(alloc, state_json, path) catch return error.StepNotFound;
+        if (raw) |r| {
+            const stripped = stripJsonQuotes(r);
+            if (stripped.ptr != r.ptr or stripped.len != r.len) {
+                const result = alloc.dupe(u8, stripped) catch return error.OutOfMemory;
+                alloc.free(r);
+                return result;
+            }
+            return r;
+        }
+        // Step registry is the canonical output-chaining mechanism; a missing
+        // step is always a hard error regardless of strict mode — silent empty
+        // here is exactly the aaq hallucination vector.
+        return error.StepNotFound;
+    }
+
     if (std.mem.startsWith(u8, expr, "state.")) {
         // Use getStateValue which handles "state." prefix, nested paths, [-1] indexing
         const raw = try state_mod.getStateValue(alloc, state_json, expr);
@@ -420,12 +469,12 @@ fn resolveNewExpression(
             }
             return r;
         }
-        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        return OrErr.emptyOrErr(strict, alloc);
     }
 
     if (std.mem.startsWith(u8, expr, "input.")) {
         const ij = input_json orelse {
-            return alloc.dupe(u8, "") catch return error.OutOfMemory;
+            return OrErr.emptyOrErr(strict, alloc);
         };
         const field = expr["input.".len..];
         const raw = try lookupJsonPath(alloc, ij, field);
@@ -438,7 +487,7 @@ fn resolveNewExpression(
             }
             return r;
         }
-        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        return OrErr.emptyOrErr(strict, alloc);
     }
 
     if (std.mem.eql(u8, expr, "item")) {
@@ -446,12 +495,12 @@ fn resolveNewExpression(
             const stripped = stripJsonQuotes(ij);
             return alloc.dupe(u8, stripped) catch return error.OutOfMemory;
         }
-        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        return OrErr.emptyOrErr(strict, alloc);
     }
 
     if (std.mem.startsWith(u8, expr, "item.")) {
         const ij = item_json orelse {
-            return alloc.dupe(u8, "") catch return error.OutOfMemory;
+            return OrErr.emptyOrErr(strict, alloc);
         };
         const field = expr["item.".len..];
         const raw = try lookupJsonPath(alloc, ij, field);
@@ -464,7 +513,7 @@ fn resolveNewExpression(
             }
             return r;
         }
-        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        return OrErr.emptyOrErr(strict, alloc);
     }
 
     // {{config.X}} — alias for {{state.__config.X}}
@@ -481,7 +530,7 @@ fn resolveNewExpression(
             }
             return r;
         }
-        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        return OrErr.emptyOrErr(strict, alloc);
     }
 
     if (std.mem.startsWith(u8, expr, "store.")) {
@@ -502,10 +551,11 @@ fn resolveNewExpression(
             }
             return r;
         }
-        return alloc.dupe(u8, "") catch return error.OutOfMemory;
+        return OrErr.emptyOrErr(strict, alloc);
     }
 
-    // Unknown expression — return empty
+    // Unknown expression form (no recognized prefix).
+    if (strict) return error.UnknownExpression;
     return alloc.dupe(u8, "") catch return error.OutOfMemory;
 }
 
@@ -519,7 +569,7 @@ fn isNewTruthy(
     item_json: ?[]const u8,
     store_access: ?StoreAccess,
 ) bool {
-    const value = resolveNewExpression(alloc, expr, state_json, input_json, item_json, store_access) catch return false;
+    const value = resolveNewExpression(alloc, expr, state_json, input_json, item_json, store_access, false) catch return false;
     defer alloc.free(value);
 
     if (value.len == 0) return false;
@@ -682,7 +732,7 @@ pub fn renderTemplateWithStore(
                 const raw_expr = preprocessed[after_open..close];
                 const expr = std.mem.trim(u8, raw_expr, " \t\n\r");
 
-                const value = try resolveNewExpression(alloc, expr, state_json, input_json, item_json, store_access);
+                const value = try resolveNewExpression(alloc, expr, state_json, input_json, item_json, store_access, false);
                 defer alloc.free(value);
 
                 result.appendSlice(alloc, value) catch return error.OutOfMemory;
@@ -701,7 +751,144 @@ pub fn renderTemplateWithStore(
     return result.toOwnedSlice(alloc) catch return error.OutOfMemory;
 }
 
+/// Strict prompt-template renderer. Same syntax as `renderTemplateWithStore`
+/// but propagates `UnresolvedReference` / `UnknownExpression` / `StepNotFound`
+/// instead of swallowing them into an empty string.
+///
+/// Conditionals (`{% if X %}`) still evaluate leniently inside this renderer
+/// — they need empty-as-false semantics. Only the `{{...}}` interpolation
+/// phase is strict. Use this for `prompt_template` rendering so a missing
+/// variable fails the node visibly instead of producing an empty prompt
+/// that the worker hallucinates from prior-session context
+/// (issue #40, issue #40 acceptance).
+pub fn renderPromptTemplateStrict(
+    alloc: Allocator,
+    template: []const u8,
+    state_json: []const u8,
+    input_json: ?[]const u8,
+    item_json: ?[]const u8,
+    store_access: ?StoreAccess,
+) ![]const u8 {
+    // Phase 1: Process conditional blocks (lenient — empty-as-false).
+    const preprocessed = try processNewConditionals(alloc, template, state_json, input_json, item_json, store_access);
+    defer alloc.free(preprocessed);
+
+    // Phase 2: Resolve {{expression}} substitutions (strict — errors propagate).
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var pos: usize = 0;
+
+    while (pos < preprocessed.len) {
+        if (std.mem.indexOfPos(u8, preprocessed, pos, "{{")) |open| {
+            result.appendSlice(alloc, preprocessed[pos..open]) catch return error.OutOfMemory;
+
+            const after_open = open + 2;
+            if (std.mem.indexOfPos(u8, preprocessed, after_open, "}}")) |close| {
+                const raw_expr = preprocessed[after_open..close];
+                const expr = std.mem.trim(u8, raw_expr, " \t\n\r");
+
+                const value = try resolveNewExpression(alloc, expr, state_json, input_json, item_json, store_access, true);
+                defer alloc.free(value);
+
+                result.appendSlice(alloc, value) catch return error.OutOfMemory;
+                pos = close + 2;
+            } else {
+                return error.UnterminatedExpression;
+            }
+        } else {
+            result.appendSlice(alloc, preprocessed[pos..]) catch return error.OutOfMemory;
+            break;
+        }
+    }
+
+    return result.toOwnedSlice(alloc) catch return error.OutOfMemory;
+}
+
 // ── New template engine tests ─────────────────────────────────────────
+
+test "template steps.X.output resolves from state registry" {
+    // issue #40: {{steps.X.output}} must resolve against the per-step
+    // registry that buildTaskStateUpdates writes alongside output_key.
+    const alloc = std.testing.allocator;
+    const s = "{\"steps\":{\"a\":{\"output\":\"found data\"}}}";
+    const result = try renderTemplate(alloc, "Echo: {{steps.a.output}}", s, null, null);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("Echo: found data", result);
+}
+
+test "template steps.X.output errors visibly when step missing" {
+    // issue #40 acceptance: unresolved steps reference must error,
+    // not silently return empty (which caused aaq session-contamination
+    // hallucinations).
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(
+        error.StepNotFound,
+        renderTemplate(alloc, "Echo: {{steps.missing.output}}", "{}", null, null),
+    );
+}
+
+test "renderPromptTemplateStrict errors on missing state.X (issue #40 acceptance)" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(
+        error.UnresolvedReference,
+        renderPromptTemplateStrict(alloc, "Echo: {{state.missing}}", "{}", null, null, null),
+    );
+}
+
+test "renderPromptTemplateStrict errors on missing input.X (issue #40)" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(
+        error.UnresolvedReference,
+        renderPromptTemplateStrict(alloc, "Echo: {{input.missing}}", "{}", "{}", null, null),
+    );
+}
+
+test "renderPromptTemplateStrict errors on missing item (issue #40)" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(
+        error.UnresolvedReference,
+        renderPromptTemplateStrict(alloc, "Item: {{item}}", "{}", null, null, null),
+    );
+}
+
+test "renderPromptTemplateStrict errors on unknown expression form (issue #40)" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(
+        error.UnknownExpression,
+        renderPromptTemplateStrict(alloc, "Echo: {{bogus.thing}}", "{}", null, null, null),
+    );
+}
+
+test "renderPromptTemplateStrict still honors conditionals leniently (issue #40)" {
+    // {% if X %} must still evaluate empty-as-false even in strict mode;
+    // only the {{...}} interpolation phase is strict.
+    const alloc = std.testing.allocator;
+    const result = try renderPromptTemplateStrict(
+        alloc,
+        "{% if state.missing %}hidden{% endif %}visible",
+        "{}",
+        null,
+        null,
+        null,
+    );
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("visible", result);
+}
+
+test "renderPromptTemplateStrict resolves state.X when present (issue #40)" {
+    const alloc = std.testing.allocator;
+    const result = try renderPromptTemplateStrict(
+        alloc,
+        "Hello {{state.name}}",
+        "{\"name\":\"World\"}",
+        null,
+        null,
+        null,
+    );
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("Hello World", result);
+}
 
 test "template state interpolation" {
     const alloc = std.testing.allocator;

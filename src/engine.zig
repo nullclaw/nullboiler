@@ -860,6 +860,20 @@ pub const Engine = struct {
                                 };
                                 running_state = new_state;
 
+                                // issue #40: deep-merge per-step registry
+                                // so {{steps.X.output}} resolves in downstream
+                                // templates regardless of output_key. Uses
+                                // applyDeepUpdates (not applyUpdates) so multiple
+                                // steps coexist under state.steps.
+                                if (cr.raw_output) |raw_out| {
+                                    if (try buildStepRegistryUpdate(alloc, node_name, raw_out)) |reg| {
+                                        running_state = state_mod.applyDeepUpdates(alloc, running_state, reg) catch |err| blk: {
+                                            log.warn("task node {s} failed to apply step registry: {}", .{ node_name, err });
+                                            break :blk running_state;
+                                        };
+                                    }
+                                }
+
                                 // Gap 3: Store result in cache
                                 if (cache_ttl) |ttl| cache_store: {
                                     const pt_s = getNodeField(alloc, node_json, "prompt_template") orelse break :cache_store;
@@ -1144,10 +1158,12 @@ pub const Engine = struct {
             return TaskNodeResult{ .completed = .{ .state_updates = null } };
         };
 
-        // 2. Render prompt with graph template interpolation and optional store access.
-        const rendered_prompt = self.renderWorkflowTemplate(alloc, prompt_template, state_json, runtime, null) catch |err| {
-            log.err("template render failed for node {s}: {}", .{ node_name, err });
-            return TaskNodeResult{ .failed = "template render failed" };
+        // 2. Render prompt with the STRICT template engine: missing variables
+        //    must fail the node visibly. Silent-empty here is the
+        //    hallucination-on-ramp (issue #40).
+        const rendered_prompt = self.renderPromptTemplateStrict(alloc, prompt_template, state_json, runtime, null) catch |err| {
+            log.err("prompt template render failed for node {s}: {} -- unresolved variable or unknown expression", .{ node_name, err });
+            return TaskNodeResult{ .failed = "prompt template render failed: unresolved variable" };
         };
 
         // 3. Get workers and select one
@@ -1547,6 +1563,21 @@ pub const Engine = struct {
         item_json: ?[]const u8,
     ) ![]const u8 {
         return templates.renderTemplateWithStore(alloc, template, state_json, runtime.input_json, item_json, runtime.storeAccess(self.store_fetcher));
+    }
+
+    /// Strict variant for prompt_template interpolation. Propagates
+    /// UnresolvedReference / UnknownExpression / StepNotFound so a missing
+    /// variable fails the node visibly instead of producing an empty prompt
+    /// that the worker hallucinates from (issue #40).
+    fn renderPromptTemplateStrict(
+        self: *Engine,
+        alloc: std.mem.Allocator,
+        template: []const u8,
+        state_json: []const u8,
+        runtime: RuntimeBindings,
+        item_json: ?[]const u8,
+    ) ![]const u8 {
+        return templates.renderPromptTemplateStrict(alloc, template, state_json, runtime.input_json, item_json, runtime.storeAccess(self.store_fetcher));
     }
 
     fn buildRuntimeBindings(self: *Engine, alloc: std.mem.Allocator, workflow_json: []const u8, state_json: []const u8, input_json: ?[]const u8) RuntimeBindings {
@@ -2102,6 +2133,37 @@ fn buildTaskStateUpdates(alloc: std.mem.Allocator, node_json: []const u8, output
     }
 
     return serializeJsonValue(alloc, .{ .object = result });
+}
+
+/// Build a per-step registry update JSON for deep-merge into state.steps.
+/// Returns `{"steps": { <node_name>: {"output": <output>} }}` or null if
+/// node_name is empty. The engine applies this via state.applyDeepUpdates
+/// (not applyUpdates) so multiple steps coexist under state.steps without
+/// clobbering each other (issue #40).
+fn buildStepRegistryUpdate(alloc: std.mem.Allocator, node_name: []const u8, output: []const u8) !?[]const u8 {
+    if (node_name.len == 0) return null;
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const output_val = blk: {
+        const op = json.parseFromSlice(json.Value, a, output, .{}) catch null;
+        if (op) |p| break :blk p.value;
+        break :blk json.Value{ .string = output };
+    };
+
+    var inner: json.ObjectMap = .empty;
+    try inner.put(a, "output", output_val);
+
+    var step_entry: json.ObjectMap = .empty;
+    try step_entry.put(a, node_name, .{ .object = inner });
+
+    var root: json.ObjectMap = .empty;
+    try root.put(a, "steps", .{ .object = step_entry });
+
+    const serialized = try serializeJsonValue(a, .{ .object = root });
+    return try alloc.dupe(u8, serialized);
 }
 
 /// Serialize completed_nodes set to JSON array.
@@ -3168,6 +3230,75 @@ test "buildTaskStateUpdates applies output_mapping from JSON output" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"review_result\":{\"grade\":\"approve\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"grade\":\"approve\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"feedback\":\"looks good\"") != null);
+}
+
+test "buildStepRegistryUpdate wraps plain text output (issue #40)" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const result = try buildStepRegistryUpdate(arena.allocator(), "a", "draft plan");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("{\"steps\":{\"a\":{\"output\":\"draft plan\"}}}", result.?);
+}
+
+test "buildStepRegistryUpdate returns null for empty node_name (issue #40)" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const result = try buildStepRegistryUpdate(arena.allocator(), "", "anything");
+    try std.testing.expect(result == null);
+}
+
+test "issue #40 integration: two-step sequential state propagates via steps registry" {
+    // Acceptance #4: 2-step sequential with template MUST echo verbatim.
+    // Step a emits "SENTINEL_XYZ"; step b's template renders {{steps.a.output}}
+    // against the state built by applying a's state_updates + registry update.
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Step a: no output_key, output is a plain string.
+    const node_a = "{\"type\":\"task\"}";
+    const updates_a = try buildTaskStateUpdates(alloc, node_a, "SENTINEL_XYZ");
+    const reg_a = try buildStepRegistryUpdate(alloc, "a", "SENTINEL_XYZ");
+
+    // Apply a's updates onto empty state, then deep-merge the registry entry.
+    var state_after_a = try state_mod.applyUpdates(alloc, "{}", updates_a, "{}");
+    if (reg_a) |r| {
+        state_after_a = try state_mod.applyDeepUpdates(alloc, state_after_a, r);
+    }
+
+    // Step b: render template against state_after_a.
+    const rendered = try templates.renderTemplate(
+        alloc,
+        "Echo: {{steps.a.output}}",
+        state_after_a,
+        null,
+        null,
+    );
+    try std.testing.expectEqualStrings("Echo: SENTINEL_XYZ", rendered);
+
+    // Step b also writes its own output; the registry deep-merges so both
+    // a and b coexist under state.steps.
+    const node_b = "{\"type\":\"task\"}";
+    const updates_b = try buildTaskStateUpdates(alloc, node_b, "downstream");
+    const reg_b = try buildStepRegistryUpdate(alloc, "b", "downstream");
+
+    var state_after_b = try state_mod.applyUpdates(alloc, state_after_a, updates_b, "{}");
+    if (reg_b) |r| {
+        state_after_b = try state_mod.applyDeepUpdates(alloc, state_after_b, r);
+    }
+    const rendered2 = try templates.renderTemplate(
+        alloc,
+        "a={{steps.a.output}} b={{steps.b.output}}",
+        state_after_b,
+        null,
+        null,
+    );
+    try std.testing.expectEqualStrings("a=SENTINEL_XYZ b=downstream", rendered2);
 }
 
 test "getSendItemsPath prefers canonical items_key" {
