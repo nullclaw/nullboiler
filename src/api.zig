@@ -499,8 +499,8 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
     if (root != .object) {
         return jsonResponse(400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"body must be a JSON object\"}}");
     }
+    var obj = root.object;
 
-    const obj = root.object;
     const body_idempotency_key = getJsonString(obj, "idempotency_key");
     const idempotency_key = ctx.request_idempotency_key orelse body_idempotency_key;
     if (idempotency_key) |ik| {
@@ -582,12 +582,34 @@ fn handleCreateRun(ctx: *Context, body: []const u8) HttpResponse {
     const run_id_buf = ids.generateId();
     const run_id = ctx.allocator.dupe(u8, &run_id_buf) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
 
-    // Insert run — workflow_json = the original body (frozen snapshot)
-    ctx.store.insertRun(run_id, idempotency_key, "running", body, input_json, callbacks_json) catch {
+    // Build expanded workflow JSON from effective_steps (nullboiler-7mn).
+    // When strategy is used, effective_steps has depends_on from applyChain.
+    // The raw body does NOT — storing raw body loses the expansion and the
+    // engine dispatches all steps as roots (no chain, no parallel ordering).
+    // Fix: replace steps in obj with expanded version, remove strategy, serialize.
+    if (obj.get("strategy") != null) {
+        var steps_arr = std.json.Array.initCapacity(ctx.allocator, effective_steps.len) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to build expanded workflow\"}}");
+        };
+        for (effective_steps) |step| {
+            steps_arr.append(step) catch {
+                return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to build steps array\"}}");
+            };
+        }
+        obj.put(ctx.allocator, "steps", .{ .array = steps_arr }) catch {
+            return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"failed to update workflow object\"}}");
+        };
+        // strategy field is now consumed — leave it in the stored JSON (harmless,
+        // normalizeWorkflowRoot only reads steps/nodes/edges, not strategy)
+    }
+    const stored_workflow_json = serializeJsonValue(ctx.allocator, .{ .object = obj }) catch body;
+
+    // Insert run — workflow_json = expanded workflow (with depends_on from strategy)
+    ctx.store.insertRun(run_id, idempotency_key, "running", stored_workflow_json, input_json, callbacks_json) catch {
         if (idempotency_key) |ik| {
             const existing = ctx.store.getRunByIdempotencyKey(ctx.allocator, ik) catch null;
             if (existing) |run| {
-                if (!std.mem.eql(u8, run.workflow_json, body)) {
+                if (!std.mem.eql(u8, run.workflow_json, stored_workflow_json)) {
                     return jsonResponse(409, "{\"error\":{\"code\":\"conflict\",\"message\":\"idempotency key already used with different payload\"}}");
                 }
                 if (ctx.metrics) |m| {
