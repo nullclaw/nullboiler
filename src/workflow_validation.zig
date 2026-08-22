@@ -543,6 +543,12 @@ fn getJsonStringFromObj(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 }
 
 /// Scan `text` for {{state.KEY}} references and check them against schema.
+///
+/// Note on `{{steps.X.output}}` (issue #40 canonical convention for
+/// referencing a prior step's output): the engine populates the
+/// `state.steps.<id>.output` registry at runtime via buildStepRegistryUpdate,
+/// so these references are NOT checked against state_schema. They will fail
+/// visibly at prompt-render time if the referenced step never executed.
 fn checkStateRefs(
     alloc: Allocator,
     errors: *std.ArrayListUnmanaged(ValidationError),
@@ -557,6 +563,9 @@ fn checkStateRefs(
         const close = std.mem.indexOfPos(u8, text, open + 2, "}}") orelse break;
         const expr = text[open + 2 .. close];
         pos = close + 2;
+
+        // {{steps.X.output}} — runtime-populated registry, skip schema check.
+        if (std.mem.startsWith(u8, expr, "steps.")) continue;
 
         // Check if it's "state.KEY"
         if (std.mem.startsWith(u8, expr, "state.")) {
