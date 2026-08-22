@@ -1813,128 +1813,106 @@ fn getSchemaFromRun(ctx: *Context, run: types.RunRow) []const u8 {
 
 // ── Tracker Handlers ─────────────────────────────────────────────────
 
-fn formatRunningTask(allocator: std.mem.Allocator, task: tracker_mod.RunningTask) ![]const u8 {
-    const task_id_json = try jsonQuoted(allocator, task.task_id);
-    const title_json = try jsonQuoted(allocator, task.task_title);
-    const pipeline_json = try jsonQuoted(allocator, task.pipeline_id);
-    const role_json = try jsonQuoted(allocator, task.agent_role);
-    const exec_json = try jsonQuoted(allocator, task.execution_mode);
-    const state_json = try jsonQuoted(allocator, task.state.toString());
+/// Copy the tracker snapshot for serving. Serves from the published
+/// snapshot (never the tick mutex) so status stays responsive while a
+/// dispatch-blocking tick holds state.mutex (issue #41).
+/// Distinguishes: tracker not configured (404), no snapshot yet (503),
+/// copy failure (500).
+const SnapshotResult = union(enum) {
+    ok: tracker_mod.TrackerSnapshot,
+    err: HttpResponse,
+};
 
-    return std.fmt.allocPrint(allocator,
-        \\{{"task_id":{s},"task_title":{s},"pipeline_id":{s},"agent_role":{s},"execution":{s},"current_turn":{d},"max_turns":{d},"started_at_ms":{d},"last_activity_ms":{d},"state":{s}}}
-    , .{
-        task_id_json,
-        title_json,
-        pipeline_json,
-        role_json,
-        exec_json,
-        task.current_turn,
-        task.max_turns,
-        task.started_at_ms,
-        task.last_activity_ms,
-        state_json,
-    });
+fn snapshotView(ctx: *Context) SnapshotResult {
+    const state = ctx.tracker_state orelse {
+        return .{ .err = jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}") };
+    };
+    var view = tracker_mod.TrackerSnapshot{
+        .running_json = "",
+        .running_count = 0,
+        .completed_count = 0,
+        .failed_count = 0,
+        .by_id = .{},
+    };
+    state.copySnapshotView(ctx.allocator, &view) catch |err| switch (err) {
+        error.NoSnapshot => return .{ .err = jsonResponse(503, "{\"error\":{\"code\":\"snapshot_unavailable\",\"message\":\"tracker snapshot not published yet\"}}") },
+        error.OutOfMemory => {
+            view.deinit(ctx.allocator);
+            return .{ .err = jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}") };
+        },
+    };
+    return .{ .ok = view };
 }
 
 fn handleTrackerStatus(ctx: *Context) HttpResponse {
-    const state = ctx.tracker_state orelse {
-        return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
-    };
     const cfg = ctx.tracker_cfg orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
     };
 
-    state.mutex.lock();
-    defer state.mutex.unlock();
-
-    // Build running tasks array
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
-    for (state.running.values(), 0..) |task, i| {
-        if (i > 0) {
-            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        }
-        const entry = formatRunningTask(ctx.allocator, task) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    }
-
-    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    const running_json = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    var view = switch (snapshotView(ctx)) {
+        .err => |resp| return resp,
+        .ok => |v| v,
+    };
+    defer view.deinit(ctx.allocator);
 
     const resp = std.fmt.allocPrint(ctx.allocator,
         \\{{"mode":"pull","running_count":{d},"max_concurrent":{d},"completed_count":{d},"failed_count":{d},"poll_interval_ms":{d},"running":{s}}}
     , .{
-        state.runningCount(),
+        view.running_count,
         cfg.concurrency.max_concurrent_tasks,
-        state.completed_count,
-        state.failed_count,
+        view.completed_count,
+        view.failed_count,
         cfg.poll_interval_ms,
-        running_json,
+        view.running_json,
     }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
 
     return jsonResponse(200, resp);
 }
 
 fn handleTrackerTasks(ctx: *Context) HttpResponse {
-    const state = ctx.tracker_state orelse {
-        return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
+    var view = switch (snapshotView(ctx)) {
+        .err => |resp| return resp,
+        .ok => |v| v,
     };
+    defer view.deinit(ctx.allocator);
 
-    state.mutex.lock();
-    defer state.mutex.unlock();
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    buf.append(ctx.allocator, '[') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-
-    for (state.running.values(), 0..) |task, i| {
-        if (i > 0) {
-            buf.append(ctx.allocator, ',') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        }
-        const entry = formatRunningTask(ctx.allocator, task) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-        buf.appendSlice(ctx.allocator, entry) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    }
-
-    buf.append(ctx.allocator, ']') catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
-    const json_body = buf.toOwnedSlice(ctx.allocator) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const json_body = ctx.allocator.dupe(u8, view.running_json) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, json_body);
 }
 
 fn handleTrackerTaskDetail(ctx: *Context, task_id: []const u8) HttpResponse {
-    const state = ctx.tracker_state orelse {
-        return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
+    var view = switch (snapshotView(ctx)) {
+        .err => |resp| return resp,
+        .ok => |v| v,
     };
+    defer view.deinit(ctx.allocator);
 
-    state.mutex.lock();
-    defer state.mutex.unlock();
-
-    const task = state.running.get(task_id) orelse {
+    const task_json = view.by_id.get(task_id) orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"not_found\",\"message\":\"task not found\"}}");
     };
 
-    const json_body = formatRunningTask(ctx.allocator, task) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
+    const json_body = ctx.allocator.dupe(u8, task_json) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, json_body);
 }
 
 fn handleTrackerStats(ctx: *Context) HttpResponse {
-    const state = ctx.tracker_state orelse {
-        return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
-    };
     const cfg = ctx.tracker_cfg orelse {
         return jsonResponse(404, "{\"error\":{\"code\":\"tracker_disabled\",\"message\":\"pull-mode tracker is not configured\"}}");
     };
 
-    state.mutex.lock();
-    defer state.mutex.unlock();
+    var view = switch (snapshotView(ctx)) {
+        .err => |resp| return resp,
+        .ok => |v| v,
+    };
+    defer view.deinit(ctx.allocator);
 
     const resp = std.fmt.allocPrint(ctx.allocator,
         \\{{"running":{d},"completed":{d},"failed":{d},"total":{d},"max_concurrent":{d}}}
     , .{
-        state.runningCount(),
-        state.completed_count,
-        state.failed_count,
-        state.completed_count + state.failed_count + state.runningCount(),
+        view.running_count,
+        view.completed_count,
+        view.failed_count,
+        view.completed_count + view.failed_count + view.running_count,
         cfg.concurrency.max_concurrent_tasks,
     }) catch return jsonResponse(500, "{\"error\":{\"code\":\"internal\",\"message\":\"out of memory\"}}");
     return jsonResponse(200, resp);
