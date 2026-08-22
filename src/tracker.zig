@@ -56,6 +56,62 @@ pub const CooldownEntry = struct {
     attempt_count: u32,
 };
 
+// ── TrackerSnapshot ─────────────────────────────────────────────────
+
+/// Serialize a RunningTask to its API JSON shape (field order must match
+/// the format previously served inline by api.zig formatRunningTask).
+pub fn runningTaskJson(allocator: std.mem.Allocator, task: RunningTask) ![]const u8 {
+    const task_id_json = try std.json.Stringify.valueAlloc(allocator, task.task_id, .{});
+    defer allocator.free(task_id_json);
+    const title_json = try std.json.Stringify.valueAlloc(allocator, task.task_title, .{});
+    defer allocator.free(title_json);
+    const pipeline_json = try std.json.Stringify.valueAlloc(allocator, task.pipeline_id, .{});
+    defer allocator.free(pipeline_json);
+    const role_json = try std.json.Stringify.valueAlloc(allocator, task.agent_role, .{});
+    defer allocator.free(role_json);
+    const exec_json = try std.json.Stringify.valueAlloc(allocator, task.execution_mode, .{});
+    defer allocator.free(exec_json);
+    const state_json = try std.json.Stringify.valueAlloc(allocator, task.state.toString(), .{});
+    defer allocator.free(state_json);
+
+    return std.fmt.allocPrint(allocator,
+        \\{{"task_id":{s},"task_title":{s},"pipeline_id":{s},"agent_role":{s},"execution":{s},"current_turn":{d},"max_turns":{d},"started_at_ms":{d},"last_activity_ms":{d},"state":{s}}}
+    , .{
+        task_id_json,
+        title_json,
+        pipeline_json,
+        role_json,
+        exec_json,
+        task.current_turn,
+        task.max_turns,
+        task.started_at_ms,
+        task.last_activity_ms,
+        state_json,
+    });
+}
+
+/// Immutable, self-contained view of tracker state published at the end
+/// of each tick. Observability endpoints serve from the snapshot under
+/// its own short-lived mutex, so a tick that blocks for minutes on a
+/// synchronous dispatch cannot stall /tracker/status (issue #41).
+pub const TrackerSnapshot = struct {
+    running_json: []const u8, // "[{task},{task}]"
+    running_count: u32,
+    completed_count: u64,
+    failed_count: u64,
+    /// task_id -> per-task JSON (same shape as running_json entries)
+    by_id: std.StringArrayHashMapUnmanaged([]const u8),
+
+    pub fn deinit(self: *TrackerSnapshot, allocator: std.mem.Allocator) void {
+        allocator.free(self.running_json);
+        for (self.by_id.keys(), self.by_id.values()) |key, value| {
+            allocator.free(key);
+            allocator.free(value);
+        }
+        self.by_id.deinit(allocator);
+    }
+};
+
 // ── TrackerState ────────────────────────────────────────────────────
 
 pub const TrackerState = struct {
@@ -64,6 +120,11 @@ pub const TrackerState = struct {
     completed_count: u64,
     failed_count: u64,
     cooldowns: std.StringArrayHashMapUnmanaged(CooldownEntry),
+    /// Guards `snapshot` only. Held for pointer swaps and short reads —
+    /// NEVER across network I/O, unlike `mutex` which tick() holds
+    /// through synchronous dispatches.
+    snapshot_mutex: std_compat.sync.Mutex,
+    snapshot: ?TrackerSnapshot,
 
     pub fn init() TrackerState {
         return .{
@@ -72,6 +133,8 @@ pub const TrackerState = struct {
             .completed_count = 0,
             .failed_count = 0,
             .cooldowns = .{},
+            .snapshot_mutex = .{},
+            .snapshot = null,
         };
     }
 
@@ -97,6 +160,116 @@ pub const TrackerState = struct {
             allocator.free(key);
         }
         self.cooldowns.deinit(allocator);
+
+        if (self.snapshot) |*snap| {
+            snap.deinit(allocator);
+        }
+    }
+
+    /// Build and publish a snapshot of the current running state. Called
+    /// from tick() while `mutex` is held; swaps under `snapshot_mutex`
+    /// so readers never wait on the tick mutex. Caller must hold `mutex`.
+    pub fn publishSnapshot(self: *TrackerState, allocator: std.mem.Allocator) void {
+        var snap = TrackerSnapshot{
+            .running_json = "",
+            .running_count = @intCast(self.running.count()),
+            .completed_count = self.completed_count,
+            .failed_count = self.failed_count,
+            .by_id = .{},
+        };
+
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        buf.append(allocator, '[') catch {
+            buf.deinit(allocator);
+            return;
+        };
+        var ok = true;
+        for (self.running.values(), 0..) |task, i| {
+            if (i > 0) {
+                buf.append(allocator, ',') catch {
+                    ok = false;
+                    break;
+                };
+            }
+            const entry = runningTaskJson(allocator, task) catch {
+                ok = false;
+                break;
+            };
+            defer allocator.free(entry);
+            buf.appendSlice(allocator, entry) catch {
+                ok = false;
+                break;
+            };
+            const key = allocator.dupe(u8, task.task_id) catch {
+                ok = false;
+                break;
+            };
+            const value = allocator.dupe(u8, entry) catch {
+                allocator.free(key);
+                ok = false;
+                break;
+            };
+            snap.by_id.put(allocator, key, value) catch {
+                allocator.free(key);
+                allocator.free(value);
+                ok = false;
+                break;
+            };
+        }
+        buf.append(allocator, ']') catch {
+            ok = false;
+        };
+        if (!ok) {
+            // Partial build: free everything we allocated and keep the
+            // previous snapshot.
+            buf.deinit(allocator);
+            var partial = snap;
+            partial.deinit(allocator);
+            return;
+        }
+        snap.running_json = buf.toOwnedSlice(allocator) catch {
+            buf.deinit(allocator);
+            var partial = snap;
+            partial.deinit(allocator);
+            return;
+        };
+
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
+        if (self.snapshot) |*old| {
+            old.deinit(allocator);
+        }
+        self.snapshot = snap;
+    }
+
+    /// Copy the published snapshot view into `out` (allocated with
+    /// `allocator`; caller owns and must call deinitView). Returns false
+    /// if no snapshot has been published yet. Never touches `mutex`, so
+    /// it stays fast while a dispatch-blocking tick holds that mutex.
+    pub const SnapshotViewError = error{ NoSnapshot, OutOfMemory };
+
+    pub fn copySnapshotView(self: *TrackerState, allocator: std.mem.Allocator, out: *TrackerSnapshot) SnapshotViewError!void {
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
+        const snap = self.snapshot orelse return error.NoSnapshot;
+
+        out.running_json = allocator.dupe(u8, snap.running_json) catch return error.OutOfMemory;
+        out.running_count = snap.running_count;
+        out.completed_count = snap.completed_count;
+        out.failed_count = snap.failed_count;
+        out.by_id = .{};
+        for (snap.by_id.keys(), snap.by_id.values()) |key, value| {
+            const k = allocator.dupe(u8, key) catch return error.OutOfMemory;
+            const v = allocator.dupe(u8, value) catch {
+                allocator.free(k);
+                return error.OutOfMemory;
+            };
+            out.by_id.put(allocator, k, v) catch {
+                allocator.free(k);
+                allocator.free(v);
+                return error.OutOfMemory;
+            };
+        }
     }
 
     pub fn runningCount(self: *const TrackerState) u32 {
@@ -276,6 +449,15 @@ pub const Tracker = struct {
         // Startup cleanup: remove all stale workspaces from previous run
         self.startupCleanup();
 
+        // Publish an initial (empty) snapshot so observability endpoints
+        // serve 200 immediately instead of 503 until the first tick
+        // (which may block on its first poll) completes.
+        {
+            self.state.mutex.lock();
+            defer self.state.mutex.unlock();
+            self.state.publishSnapshot(self.allocator);
+        }
+
         const poll_ns: u64 = @as(u64, self.cfg.poll_interval_ms) * std.time.ns_per_ms;
 
         while (!self.shutdown.load(.acquire)) {
@@ -308,6 +490,8 @@ pub const Tracker = struct {
         self.reconcile(tick_alloc);
         self.pollAndClaim(tick_alloc);
         self.cleanCooldowns();
+        // Publish last, so the snapshot reflects this tick's final state.
+        self.state.publishSnapshot(self.allocator);
     }
 
     /// Heartbeat all active leases. If a heartbeat fails, kill the subprocess
@@ -1515,4 +1699,131 @@ test "TrackerState countByState" {
     try std.testing.expectEqual(@as(u32, 2), state.countByState("in_progress"));
     try std.testing.expectEqual(@as(u32, 1), state.countByState("rework"));
     try std.testing.expectEqual(@as(u32, 0), state.countByState("done"));
+}
+test "TrackerSnapshot publish and copy decoupled from tick mutex" {
+    const allocator = std.testing.allocator;
+    var state = TrackerState.init();
+    defer state.deinit(allocator);
+
+    // No snapshot yet
+    var view = TrackerSnapshot{
+        .running_json = "",
+        .running_count = 0,
+        .completed_count = 0,
+        .failed_count = 0,
+        .by_id = .{},
+    };
+    try std.testing.expectError(error.NoSnapshot, state.copySnapshotView(allocator, &view));
+
+    // Insert a running task (as tick would, under mutex)
+    {
+        state.mutex.lock();
+        defer state.mutex.unlock();
+        const key = try allocator.dupe(u8, "task-snap-1");
+        const task = RunningTask{
+            .task_id = key,
+            .task_title = try allocator.dupe(u8, "Snapshot Task \"quoted\""),
+            .task_identifier = try allocator.dupe(u8, "pending"),
+            .task_state = try allocator.dupe(u8, "pending"),
+            .task_json = try allocator.dupe(u8, "{}"),
+            .pipeline_id = try allocator.dupe(u8, "pipe-1"),
+            .agent_role = "worker",
+            .lease_id = try allocator.dupe(u8, "lease-1"),
+            .lease_token = try allocator.dupe(u8, "tok"),
+            .run_id = try allocator.dupe(u8, "run-1"),
+            .workspace_path = try allocator.dupe(u8, "/tmp/ws"),
+            .execution_mode = "dispatch",
+            .subprocess = null,
+            .started_at_ms = 1000,
+            .last_activity_ms = 2000,
+            .task_version = 1,
+            .current_turn = 0,
+            .max_turns = 3,
+            .state = .running,
+        };
+        try state.running.put(allocator, try allocator.dupe(u8, "task-snap-1"), task);
+        state.completed_count = 7;
+        state.failed_count = 3;
+
+        state.publishSnapshot(allocator);
+    }
+
+    // Read WITHOUT touching state.mutex (the decoupling property): hold the
+    // tick mutex while copying to prove the copy does not need it.
+    state.mutex.lock();
+    try state.copySnapshotView(allocator, &view);
+    state.mutex.unlock();
+    defer view.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), view.running_count);
+    try std.testing.expectEqual(@as(u64, 7), view.completed_count);
+    try std.testing.expectEqual(@as(u64, 3), view.failed_count);
+    try std.testing.expect(std.mem.indexOf(u8, view.running_json, "\"task_id\":\"task-snap-1\"") != null);
+    // Title escaping round-trips
+    try std.testing.expect(std.mem.indexOf(u8, view.running_json, "\\\"quoted\\\"") != null);
+    // Per-task lookup view
+    const detail = view.by_id.get("task-snap-1");
+    try std.testing.expect(detail != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail.?, "\"state\":\"running\"") != null);
+
+    // Republish with empty running: snapshot replaces, old freed
+    {
+        state.mutex.lock();
+        defer state.mutex.unlock();
+        if (state.running.fetchSwapRemove("task-snap-1")) |entry| {
+            const t = entry.value;
+            allocator.free(t.task_id);
+            allocator.free(t.task_title);
+            allocator.free(t.task_identifier);
+            allocator.free(t.task_state);
+            allocator.free(t.task_json);
+            allocator.free(t.pipeline_id);
+            allocator.free(t.lease_id);
+            allocator.free(t.lease_token);
+            allocator.free(t.run_id);
+            allocator.free(t.workspace_path);
+            allocator.free(entry.key);
+        }
+        state.publishSnapshot(allocator);
+    }
+    var view2 = TrackerSnapshot{
+        .running_json = "",
+        .running_count = 0,
+        .completed_count = 0,
+        .failed_count = 0,
+        .by_id = .{},
+    };
+    try state.copySnapshotView(allocator, &view2);
+    defer view2.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), view2.running_count);
+    try std.testing.expectEqualStrings("[]", view2.running_json);
+}
+
+test "runningTaskJson shape matches API field order" {
+    const allocator = std.testing.allocator;
+    const task = RunningTask{
+        .task_id = "t1",
+        .task_title = "T",
+        .task_identifier = "s",
+        .task_state = "s",
+        .task_json = "{}",
+        .pipeline_id = "p",
+        .agent_role = "r",
+        .lease_id = "l",
+        .lease_token = "k",
+        .run_id = "rn",
+        .workspace_path = "/w",
+        .execution_mode = "dispatch",
+        .subprocess = null,
+        .started_at_ms = 1,
+        .last_activity_ms = 2,
+        .task_version = 1,
+        .current_turn = 0,
+        .max_turns = 1,
+        .state = .running,
+    };
+    const json = try runningTaskJson(allocator, task);
+    defer allocator.free(json);
+    try std.testing.expect(std.mem.startsWith(u8, json, "{\"task_id\":\"t1\",\"task_title\":\"T\",\"pipeline_id\":\"p\",\"agent_role\":\"r\",\"execution\":\"dispatch\""));
+    try std.testing.expect(std.mem.endsWith(u8, json, "\"state\":\"running\"}"));
 }
