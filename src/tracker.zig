@@ -1120,9 +1120,43 @@ pub const Tracker = struct {
             }
         }
 
-        // Original failure path (no retry or max attempts reached)
+        // Original failure path (no retry or max attempts reached).
+        //
+        // failRun ends the run, but it leaves the task in its current stage.
+        // A task that is still in a claimable stage is claimed again on the
+        // next poll, so a worker that fails every attempt produces an
+        // unbounded claim/dispatch/fail loop: a new run row and a new
+        // workspace per tick, and the ticket never moves. Apply the
+        // workflow's configured on_failure transition first so the task
+        // actually leaves the stage.
         var client = tracker_client.TrackerClient.init(tick_alloc, self.cfg.url orelse "", self.cfg.api_token);
-        _ = client.failRun(task.run_id, "execution failed", task.lease_token, null) catch {};
+
+        var transitioned = false;
+        if (self.workflows.get(task.pipeline_id)) |wf| {
+            if (wf.on_failure.transition_to.len > 0) {
+                transitioned = client.transition(
+                    task.run_id,
+                    wf.on_failure.transition_to,
+                    task.lease_token,
+                    null,
+                    task.task_identifier,
+                    task.task_version,
+                ) catch false;
+                if (!transitioned) {
+                    log.warn("failure transition '{s}' rejected for task {s}; task stays in stage {s}", .{
+                        wf.on_failure.transition_to,
+                        task.task_id,
+                        task.task_identifier,
+                    });
+                }
+            }
+        }
+
+        // Fall back to failing the run when no transition is configured or the
+        // pipeline rejected the trigger, so the run is still closed out.
+        if (!transitioned) {
+            _ = client.failRun(task.run_id, "execution failed", task.lease_token, null) catch {};
+        }
 
         if (self.cfg.workspace.hooks.after_run) |hook| {
             _ = workspace_mod.runHook(self.allocator, hook, task.workspace_path, @as(u64, self.cfg.workspace.hook_timeout_ms)) catch false;
