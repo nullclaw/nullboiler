@@ -10,6 +10,7 @@ const ids = @import("ids.zig");
 const metrics_mod = @import("metrics.zig");
 const worker_protocol = @import("worker_protocol.zig");
 const async_dispatch = @import("async_dispatch.zig");
+const dispatch_mod = @import("dispatch.zig");
 const redis_client = @import("redis_client.zig");
 const mqtt_client = @import("mqtt_client.zig");
 const tracker_mod = @import("tracker.zig");
@@ -261,6 +262,11 @@ pub fn main(init: std.process.Init) !void {
             wf_watcher = workflow_loader.WorkflowWatcher.init(allocator, tracker_cfg.workflows_dir, &store);
         }
     }
+
+    dispatch_mod.configureTimeouts(
+        @as(u64, cfg.engine.default_timeout_ms),
+        @as(u64, cfg.engine.worker_probe_timeout_ms),
+    );
 
     var engine = engine_mod.Engine.init(&store, allocator, poll_ms);
     engine.configure(.{

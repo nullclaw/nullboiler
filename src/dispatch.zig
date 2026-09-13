@@ -9,6 +9,131 @@ const worker_response = @import("worker_response.zig");
 const redis_client = @import("redis_client.zig");
 const mqtt_client = @import("mqtt_client.zig");
 
+// ── Outbound HTTP timeouts ────────────────────────────────────────────
+//
+// std.http.Client has no timeout: FetchOptions carries none, and the only
+// `timeout` field in the http client (ConnectTcpOptions.timeout) is never read.
+// A worker that accepts a connection and then goes silent therefore blocks the
+// caller forever. Both callers here run on long-lived loops — probeWorker on
+// the engine's health-check pass, dispatchStep on the engine and tracker ticks —
+// so one silent worker stalls the loop that is supposed to notice it, and the
+// circuit breaker can never trip.
+//
+// The fix runs each request under a deadline on a dedicated threaded Io and
+// cancels it if the deadline passes. The process-wide Io is left alone: it is
+// single-threaded, where `async` runs the call inline and cancellation is
+// unreachable.
+
+var outbound_io_state: std.Io.Threaded = undefined;
+var outbound_io_ready: std.atomic.Value(bool) = .init(false);
+var outbound_io_mutex: std_compat.sync.Mutex = .{};
+
+fn outboundIo() std.Io {
+    if (!outbound_io_ready.load(.acquire)) {
+        outbound_io_mutex.lock();
+        defer outbound_io_mutex.unlock();
+        if (!outbound_io_ready.load(.acquire)) {
+            outbound_io_state = .init(std.heap.smp_allocator, .{});
+            outbound_io_ready.store(true, .release);
+        }
+    }
+    return outbound_io_state.io();
+}
+
+/// Deadline for a dispatch to a worker. Agent turns legitimately run for
+/// minutes, so this is a backstop against a wedged socket rather than a
+/// latency budget; a value below a real turn would break working dispatches.
+var dispatch_timeout_ms: u64 = 1_800_000;
+
+/// Deadline for a health probe. Short: a worker that cannot answer a bare GET
+/// promptly is not healthy, and this is the signal the circuit breaker needs.
+var probe_timeout_ms: u64 = 5_000;
+
+/// Called once at startup from the loaded config.
+pub fn configureTimeouts(dispatch_ms: u64, probe_ms: u64) void {
+    dispatch_timeout_ms = dispatch_ms;
+    probe_timeout_ms = probe_ms;
+}
+
+const FetchCall = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    method: std.http.Method,
+    payload: ?[]const u8,
+    extra_headers: []const std.http.Header,
+    content_type_json: bool,
+    response_writer: *std.Io.Writer,
+
+    /// Set by the worker task on every exit path. The future's own return value
+    /// is not trusted after a cancel; this flag is what distinguishes a
+    /// completed request from an abandoned one.
+    finished: std.atomic.Value(bool) = .init(false),
+    status: u16 = 0,
+    failed: bool = false,
+};
+
+fn fetchTask(call: *FetchCall) void {
+    defer call.finished.store(true, .release);
+    var client: std.http.Client = .{ .allocator = call.allocator, .io = call.io };
+    defer client.deinit();
+    const result = client.fetch(.{
+        .location = .{ .url = call.url },
+        .method = call.method,
+        .payload = call.payload,
+        .response_writer = call.response_writer,
+        .extra_headers = call.extra_headers,
+        .headers = .{
+            .content_type = if (call.content_type_json)
+                .{ .override = "application/json" }
+            else
+                .default,
+        },
+    }) catch {
+        call.failed = true;
+        return;
+    };
+    call.status = @intFromEnum(result.status);
+}
+
+const FetchTimeoutError = error{ Timeout, RequestFailed };
+
+/// Runs one HTTP request with a deadline. Returns the status code, or
+/// error.Timeout if the deadline passed before the request finished.
+///
+/// The request runs via `Io.concurrent`, not `Io.async`: `async` is allowed to
+/// run the call inline when the pool's async limit is reached (on a 1-CPU host
+/// that limit is 0), which would silently disable the deadline.
+///
+/// `Io.Threaded.cancel` joins the task before returning, so `call` is dead by
+/// the time this function returns and may live on the caller's stack.
+fn fetchWithDeadline(call: *FetchCall, timeout_ms: u64) FetchTimeoutError!u16 {
+    const io = call.io;
+
+    if (timeout_ms == 0) {
+        // 0 disables the deadline; run the request inline as before.
+        fetchTask(call);
+    } else if (io.concurrent(fetchTask, .{call})) |future_val| {
+        var future = future_val;
+        const deadline_ns: u64 = timeout_ms * std.time.ns_per_ms;
+        const step_ns: u64 = @min(deadline_ns, 25 * std.time.ns_per_ms);
+        var waited_ns: u64 = 0;
+        while (!call.finished.load(.acquire) and waited_ns < deadline_ns) {
+            std.Io.sleep(io, .fromNanoseconds(@intCast(step_ns)), .awake) catch break;
+            waited_ns += step_ns;
+        }
+        _ = future.cancel(io);
+    } else |_| {
+        // No thread available to enforce the deadline; fall back to an
+        // unbounded inline request rather than failing the dispatch.
+        fetchTask(call);
+    }
+
+    if (!call.finished.load(.acquire)) return error.Timeout;
+    if (call.failed) return error.RequestFailed;
+    return call.status;
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 pub const WorkerInfo = struct {
@@ -192,9 +317,6 @@ pub fn dispatchStepWithOpts(
     }
     defer if (auth_header) |ah| allocator.free(ah);
 
-    var client: std.http.Client = .{ .allocator = allocator, .io = std_compat.io() };
-    defer client.deinit();
-
     var response_body: std.Io.Writer.Allocating = .init(allocator);
     defer response_body.deinit();
 
@@ -204,24 +326,27 @@ pub fn dispatchStepWithOpts(
         break :blk headers_buf[0..1];
     } else &.{};
 
-    const result = client.fetch(.{
-        .location = .{ .url = url },
+    var call: FetchCall = .{
+        .io = outboundIo(),
+        .allocator = allocator,
+        .url = url,
         .method = .POST,
         .payload = body,
-        .response_writer = &response_body.writer,
         .extra_headers = extra_headers,
-        .headers = .{
-            .content_type = .{ .override = "application/json" },
-        },
-    }) catch {
+        .content_type_json = true,
+        .response_writer = &response_body.writer,
+    };
+
+    const status_code = fetchWithDeadline(&call, dispatch_timeout_ms) catch |err| {
         return DispatchResult{
             .output = "",
             .success = false,
-            .error_text = "HTTP request failed",
+            .error_text = switch (err) {
+                error.Timeout => "worker did not respond within the dispatch timeout",
+                error.RequestFailed => "HTTP request failed",
+            },
         };
     };
-
-    const status_code = @intFromEnum(result.status);
     if (status_code < 200 or status_code >= 300) {
         const err_msg = try std.fmt.allocPrint(allocator, "HTTP {d}", .{status_code});
         return DispatchResult{
@@ -254,19 +379,24 @@ pub fn probeWorker(
     const url = worker_protocol.buildRequestUrl(allocator, worker_url, protocol) catch return false;
     defer allocator.free(url);
 
-    var client: std.http.Client = .{ .allocator = allocator, .io = std_compat.io() };
-    defer client.deinit();
-
     var response_body: std.Io.Writer.Allocating = .init(allocator);
     defer response_body.deinit();
 
-    const result = client.fetch(.{
-        .location = .{ .url = url },
+    var call: FetchCall = .{
+        .io = outboundIo(),
+        .allocator = allocator,
+        .url = url,
         .method = .GET,
+        .payload = null,
+        .extra_headers = &.{},
+        .content_type_json = false,
         .response_writer = &response_body.writer,
-    }) catch return false;
+    };
 
-    const status_code = @intFromEnum(result.status);
+    // A worker that does not answer the probe within the deadline is unhealthy,
+    // which is the whole point: without this the probe blocks and the failure
+    // is never counted.
+    const status_code = fetchWithDeadline(&call, probe_timeout_ms) catch return false;
     return status_code < 500;
 }
 
@@ -1130,4 +1260,24 @@ test "parseA2aResponse: handles invalid JSON" {
     const result = try parseA2aResponse(allocator, "not json");
     try std.testing.expect(!result.success);
     try std.testing.expectEqualStrings("A2A: invalid JSON response", result.error_text.?);
+}
+
+test "probeWorker gives up on a worker that accepts but never responds" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    // A listening socket that is never accepted from: the kernel completes the
+    // TCP handshake, then the request goes unanswered.
+    const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
+    var server = try addr.listen(std_compat.io(), .{ .reuse_address = true });
+    defer server.deinit(std_compat.io());
+
+    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/webhook", .{server.socket.address.ip4.port});
+    defer std.testing.allocator.free(url);
+
+    const saved_dispatch = dispatch_timeout_ms;
+    const saved_probe = probe_timeout_ms;
+    defer configureTimeouts(saved_dispatch, saved_probe);
+    configureTimeouts(saved_dispatch, 200);
+
+    try std.testing.expect(!probeWorker(std.testing.allocator, url, "webhook"));
 }

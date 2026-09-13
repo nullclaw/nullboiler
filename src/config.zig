@@ -17,9 +17,14 @@ pub const WorkerConfig = struct {
 
 pub const EngineConfig = struct {
     poll_interval_ms: u32 = 500,
-    default_timeout_ms: u32 = 300000,
+    /// Deadline for one dispatch to a worker, in ms. 0 disables it.
+    /// Agent turns run for minutes, so this is a backstop against a wedged
+    /// socket, not a latency budget.
+    default_timeout_ms: u32 = 1800000,
     default_max_attempts: u32 = 1,
     health_check_interval_ms: u32 = 30000,
+    /// Deadline for one worker health probe, in ms. 0 disables it.
+    worker_probe_timeout_ms: u32 = 5000,
     worker_failure_threshold: u32 = 3,
     worker_circuit_breaker_ms: u32 = 60000,
     retry_base_delay_ms: u32 = 1000,
