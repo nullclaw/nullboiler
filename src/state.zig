@@ -391,6 +391,26 @@ fn applyMerge(alloc: Allocator, old_json: ?[]const u8, update_json: []const u8) 
     return try alloc.dupe(u8, result);
 }
 
+/// Recursively merge `updates_json` into `state_json`. Unlike `applyUpdates`,
+/// this bypasses reducer semantics and always deep-merges nested objects —
+/// used for the per-step registry where multiple writers land under a shared
+/// parent key (e.g. state.steps.<id>.output) without clobbering siblings
+/// (issue #40).
+pub fn applyDeepUpdates(alloc: Allocator, state_json: []const u8, updates_json: []const u8) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const state_parsed = json.parseFromSlice(json.Value, arena_alloc, state_json, .{}) catch {
+        return try alloc.dupe(u8, updates_json);
+    };
+    const updates_parsed = try json.parseFromSlice(json.Value, arena_alloc, updates_json, .{});
+
+    const merged = try deepMerge(arena_alloc, state_parsed.value, updates_parsed.value);
+    const result = try serializeValue(arena_alloc, merged);
+    return try alloc.dupe(u8, result);
+}
+
 /// Recursively deep-merge two JSON objects.
 fn deepMerge(alloc: Allocator, base: json.Value, overlay: json.Value) !json.Value {
     if (base != .object or overlay != .object) {
