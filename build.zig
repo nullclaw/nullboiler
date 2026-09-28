@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "2026.3.3";
+    const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "dev";
 
     var build_options = b.addOptions();
     build_options.addOption([]const u8, "version", app_version);
