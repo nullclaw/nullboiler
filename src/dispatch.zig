@@ -404,25 +404,31 @@ fn appendJsonString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocat
 
 // ── A2A Protocol Support ──────────────────────────────────────────────
 
-/// Build an A2A (Agent-to-Agent) JSON-RPC 2.0 request body using tasks/send.
+/// Build an A2A (Agent-to-Agent) JSON-RPC 2.0 request body using message/send.
 /// The context_id provides session persistence — same context_id means same conversation.
 fn buildA2aRequestBody(
     allocator: std.mem.Allocator,
     prompt: []const u8,
     context_id: []const u8,
 ) ![]const u8 {
-    // Build the parts array
+    // Generate a unique messageId from the context_id
+    const message_id = try std.fmt.allocPrint(allocator, "msg-{s}", .{context_id});
+    defer allocator.free(message_id);
+
+    // Build the parts array — A2A v0.3.0 uses "kind" discriminator
     const parts = [_]struct {
-        type: []const u8,
+        kind: []const u8,
         text: []const u8,
     }{
-        .{ .type = "text", .text = prompt },
+        .{ .kind = "text", .text = prompt },
     };
 
-    // Build the message
+    // Build the message — NullClaw requires kind + messageId per A2A v0.3.0
     const message = .{
         .role = "user",
         .parts = parts[0..],
+        .kind = "message",
+        .messageId = message_id,
     };
 
     // Build the params
@@ -435,7 +441,7 @@ fn buildA2aRequestBody(
     return std.json.Stringify.valueAlloc(allocator, .{
         .jsonrpc = "2.0",
         .id = context_id,
-        .method = "tasks/send",
+        .method = "message/send",
         .params = params,
     }, .{});
 }
@@ -537,14 +543,33 @@ fn parseA2aResponse(allocator: std.mem.Allocator, response_body: []const u8) !Di
         }
     }
 
-    // Extract text from artifacts[0].parts[0].text
+    // message/send (A2A v0.3.0): the result IS the Message — extract text
+    // from parts[0].text directly.
+    if (result_obj.get("parts")) |parts_val| {
+        if (parts_val == .array and parts_val.array.items.len > 0) {
+            const first_part = parts_val.array.items[0];
+            if (first_part == .object) {
+                if (first_part.object.get("text")) |text_val| {
+                    if (text_val == .string) {
+                        return DispatchResult{
+                            .output = try allocator.dupe(u8, text_val.string),
+                            .success = true,
+                            .error_text = null,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    // Legacy tasks/send shape: extract text from artifacts[0].parts[0].text
     if (result_obj.get("artifacts")) |artifacts_val| {
         if (artifacts_val == .array and artifacts_val.array.items.len > 0) {
             const first_artifact = artifacts_val.array.items[0];
             if (first_artifact == .object) {
-                if (first_artifact.object.get("parts")) |parts_val| {
-                    if (parts_val == .array and parts_val.array.items.len > 0) {
-                        const first_part = parts_val.array.items[0];
+                if (first_artifact.object.get("parts")) |artifact_parts| {
+                    if (artifact_parts == .array and artifact_parts.array.items.len > 0) {
+                        const first_part = artifact_parts.array.items[0];
                         if (first_part == .object) {
                             // Check for "text" field (A2A uses "text" key for text parts)
                             if (first_part.object.get("text")) |text_val| {
@@ -566,7 +591,7 @@ fn parseA2aResponse(allocator: std.mem.Allocator, response_body: []const u8) !Di
     return DispatchResult{
         .output = "",
         .success = false,
-        .error_text = "A2A: no text found in artifacts",
+        .error_text = "A2A: no text found in response parts or artifacts",
     };
 }
 
@@ -1054,17 +1079,21 @@ test "buildA2aRequestBody: produces valid JSON-RPC 2.0 request" {
 
     try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
     try std.testing.expectEqualStrings("run_abc_step_fix", obj.get("id").?.string);
-    try std.testing.expectEqualStrings("tasks/send", obj.get("method").?.string);
+    try std.testing.expectEqualStrings("message/send", obj.get("method").?.string);
 
     const params = obj.get("params").?.object;
     try std.testing.expectEqualStrings("run_abc_step_fix", params.get("contextId").?.string);
 
     const message = params.get("message").?.object;
     try std.testing.expectEqualStrings("user", message.get("role").?.string);
+    // A2A v0.3.0: message carries kind + messageId
+    try std.testing.expectEqualStrings("message", message.get("kind").?.string);
+    try std.testing.expectEqualStrings("msg-run_abc_step_fix", message.get("messageId").?.string);
 
     const parts = message.get("parts").?.array;
     try std.testing.expectEqual(@as(usize, 1), parts.items.len);
-    try std.testing.expectEqualStrings("text", parts.items[0].object.get("type").?.string);
+    // A2A v0.3.0: parts use "kind" discriminator, not "type"
+    try std.testing.expectEqualStrings("text", parts.items[0].object.get("kind").?.string);
     try std.testing.expectEqualStrings("Fix the bug in main.py", parts.items[0].object.get("text").?.string);
 }
 
@@ -1078,7 +1107,7 @@ test "buildRequestBody: a2a protocol produces JSON-RPC body" {
     const obj = parsed.value.object;
 
     try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
-    try std.testing.expectEqualStrings("tasks/send", obj.get("method").?.string);
+    try std.testing.expectEqualStrings("message/send", obj.get("method").?.string);
     // context_id is "run_{run_id}_step_{step_id}"
     try std.testing.expectEqualStrings("run_run-1_step_step-1", obj.get("id").?.string);
 }
@@ -1092,6 +1121,17 @@ test "parseA2aResponse: extracts text from successful response" {
     defer allocator.free(result.output);
     try std.testing.expect(result.success);
     try std.testing.expectEqualStrings("The bug has been fixed.", result.output);
+}
+
+test "parseA2aResponse: extracts text from message/send result (A2A v0.3.0)" {
+    const allocator = std.testing.allocator;
+    const response =
+        \\{"jsonrpc":"2.0","id":"req-1","result":{"role":"agent","parts":[{"kind":"text","text":"Reply from the agent."}],"kind":"message","messageId":"msg-42","contextId":"ctx-1"}}
+    ;
+    const result = try parseA2aResponse(allocator, response);
+    defer allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("Reply from the agent.", result.output);
 }
 
 test "parseA2aResponse: handles JSON-RPC error" {
@@ -1122,7 +1162,7 @@ test "parseA2aResponse: handles missing artifacts" {
     ;
     const result = try parseA2aResponse(allocator, response);
     try std.testing.expect(!result.success);
-    try std.testing.expectEqualStrings("A2A: no text found in artifacts", result.error_text.?);
+    try std.testing.expectEqualStrings("A2A: no text found in response parts or artifacts", result.error_text.?);
 }
 
 test "parseA2aResponse: handles invalid JSON" {
