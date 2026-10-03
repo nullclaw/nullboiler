@@ -29,13 +29,16 @@ These are hard-won constraints — code changes must respect them:
   discriminators and required `messageId` (#42, #48, #53).
 - Prompt templates render **strictly**: unresolved references fail the node
   visibly. Never add silent-empty fallbacks (#40).
-- `on_success.transition_to` / `on_failure.transition_to` are applied as the
-  pipeline FSM **trigger** name — the trigger must exist on the task's stage (#53).
+- `on_success.transition_to` is applied as the pipeline FSM **trigger** name —
+  the trigger must exist on the task's stage (#53). The same naming is the
+  **intended contract** for `on_failure.transition_to`, which is parsed but not
+  yet applied (#52).
 - `/tracker/*` endpoints serve a published snapshot; never serve state under the
   tick mutex (#41, #50).
 - Known gaps — do not build on them: synchronous worker dispatch has no timeout
   (#43); no-worker dead-ends wait silently without fail-fast (#44); MQTT and
-  Redis dispatch are stubs (#32).
+  Redis dispatch are stubs (#32); `on_failure.transition_to` is parsed but never
+  read — `driveFailed` goes straight to `failRun` (#52, closed without merge).
 
 ## 3) Engineering Principles
 
