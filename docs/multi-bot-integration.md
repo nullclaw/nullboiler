@@ -66,3 +66,24 @@ Bridge response is strict webhook-compatible JSON:
 Then register that bridge endpoint in NullBoiler with protocol `webhook`.
 
 Native pull-mode with `NullTickets` is documented in `docs/nulltickets-nullboiler-nullclaw.md`.
+
+## A2A worker conventions
+
+When a workflow uses `execution: "dispatch"` with `dispatch.protocol = "a2a"`:
+
+- **Worker URL is the base URL.** The dispatcher appends `/a2a` to the configured
+  worker URL itself. Configure `http://host:3000`, not `http://host:3000/a2a` —
+  the latter produces `POST /a2a/a2a` and fails with `HTTP 404`.
+- The dispatcher sends A2A v0.3.0 JSON-RPC (`message/send`, `kind` discriminators,
+  `messageId`), requires the worker to accept it at `POST {base}/a2a`, and parses
+  the reply from the result's `parts[].text` (falling back to the legacy
+  `artifacts[].parts[].text` shape).
+
+## Workflow transition conventions
+
+`on_success.transition_to` and `on_failure.transition_to` are applied as the
+pipeline FSM **trigger** name. Define the pipeline transition's `trigger` to
+match the value used in the workflow (naming the trigger after its target state,
+e.g. `trigger: "done"` for `to: "done"`, is the simplest convention). A trigger
+name that does not exist on the task's current stage is rejected by the tracker
+and the task re-enters its retry cycle.
