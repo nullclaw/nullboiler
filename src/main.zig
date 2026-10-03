@@ -54,6 +54,16 @@ pub fn main(init: std.process.Init) !void {
             printUsage();
             return;
         }
+        // --help/-h must print help regardless of position or subcommand
+        // context: "server --help" previously fell through to server startup
+        // (#56). Unknown subcommands with an explicit help flag get the
+        // general usage rather than a silently-started server.
+        for (all_args[1..]) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                printUsage();
+                return;
+            }
+        }
         if (std.mem.eql(u8, all_args[0], "validate-workflows")) {
             if (all_args.len > 2) {
                 std.debug.print("error: validate-workflows accepts at most one PATH argument\n\n", .{});
