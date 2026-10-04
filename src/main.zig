@@ -37,6 +37,25 @@ pub fn main(init: std.process.Init) !void {
     defer std_compat.process.argsFree(allocator, args);
     const all_args = if (args.len > 0) args[1..] else &.{};
 
+    // Help is detected before every other early exit. "server --help"
+    // previously fell through to server startup (#56), and a scan placed below
+    // --export-manifest/--from-json still let those handlers run: they ignore
+    // the help request, and --from-json additionally creates config.json.
+    // Unknown subcommands with an explicit help flag get the general usage
+    // rather than a silently-started server.
+    if (all_args.len >= 1) {
+        for (all_args) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                printUsage();
+                return;
+            }
+        }
+        if (std.mem.eql(u8, all_args[0], "help")) {
+            printUsage();
+            return;
+        }
+    }
+
     // Check for manifest protocol flags first (early exit, no config needed)
     if (all_args.len >= 1) {
         if (std.mem.eql(u8, all_args[0], "--export-manifest")) {
@@ -46,23 +65,6 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, all_args[0], "--from-json")) {
             try @import("from_json.zig").run(allocator, all_args[1..]);
             return;
-        }
-        if (std.mem.eql(u8, all_args[0], "help") or
-            std.mem.eql(u8, all_args[0], "--help") or
-            std.mem.eql(u8, all_args[0], "-h"))
-        {
-            printUsage();
-            return;
-        }
-        // --help/-h must print help regardless of position or subcommand
-        // context: "server --help" previously fell through to server startup
-        // (#56). Unknown subcommands with an explicit help flag get the
-        // general usage rather than a silently-started server.
-        for (all_args[1..]) |arg| {
-            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-                printUsage();
-                return;
-            }
         }
         if (std.mem.eql(u8, all_args[0], "validate-workflows")) {
             if (all_args.len > 2) {
@@ -808,4 +810,170 @@ comptime {
     _ = @import("tracker.zig");
     _ = @import("state.zig");
     _ = @import("sse.zig");
+}
+
+// ── CLI --help regression coverage (#56) ─────────────────────────────────────
+//
+// `--help`/`-h` must be honoured at any argument position and for both
+// spellings, across the server, validation, manifest and JSON-bootstrap paths.
+// A help request must print usage, exit 0, and must never create or alter
+// config/database files as a side effect.
+
+const HelpCase = struct {
+    label: []const u8,
+    args: []const []const u8,
+};
+
+const help_cases = [_]HelpCase{
+    .{ .label = "toplevel-long", .args = &.{"--help"} },
+    .{ .label = "toplevel-short", .args = &.{"-h"} },
+    .{ .label = "server-long", .args = &.{ "server", "--help" } },
+    .{ .label = "serve-short", .args = &.{ "serve", "-h" } },
+    .{ .label = "validate-long", .args = &.{ "validate-workflows", "--help" } },
+    .{ .label = "manifest-long", .args = &.{ "--export-manifest", "--help" } },
+    .{ .label = "fromjson-flag-only", .args = &.{ "--from-json", "--help" } },
+};
+
+/// Absolute path of the installed CLI, supplied by build.zig
+/// (`NULLBOILER_TEST_EXE`). Skips the test when the binary is unavailable so a
+/// partial build never reports a false failure.
+fn helpTestExePath(allocator: std.mem.Allocator) ![]u8 {
+    const raw = std_compat.process.getEnvVarOwned(allocator, "NULLBOILER_TEST_EXE") catch return error.SkipZigTest;
+    defer allocator.free(raw);
+    std_compat.fs.cwd().access(raw, .{}) catch return error.SkipZigTest;
+    return std_compat.fs.cwd().realpathAlloc(allocator, raw);
+}
+
+/// Create an empty scratch directory and return its absolute path. Everything a
+/// help request might wrongly write lands here, so the test can assert the
+/// directory stays empty.
+fn makeHelpScratchDir(allocator: std.mem.Allocator, label: []const u8) !struct { abs: []u8, rel: []u8 } {
+    const rel = try std.fmt.allocPrint(allocator, ".zig-cache/cli-help-{s}", .{label});
+    errdefer allocator.free(rel);
+    std_compat.fs.cwd().deleteTree(rel) catch {};
+    try std_compat.fs.cwd().makePath(rel);
+    const abs = try std_compat.fs.cwd().realpathAlloc(allocator, rel);
+    return .{ .abs = abs, .rel = rel };
+}
+
+const HelpRun = struct {
+    exit_code: ?u8,
+    output: []u8,
+};
+
+fn runHelpCase(
+    allocator: std.mem.Allocator,
+    exe: []const u8,
+    args: []const []const u8,
+    cwd_path: []const u8,
+) !HelpRun {
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, exe);
+    for (args) |arg| try argv.append(allocator, arg);
+
+    var child = std_compat.process.Child.init(argv.items, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    child.cwd = cwd_path;
+    try child.spawn();
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    defer output.deinit(allocator);
+    if (child.stdout) |file| {
+        const text = try file.readToEndAlloc(allocator, 64 * 1024);
+        defer allocator.free(text);
+        try output.appendSlice(allocator, text);
+    }
+    if (child.stderr) |file| {
+        const text = try file.readToEndAlloc(allocator, 64 * 1024);
+        defer allocator.free(text);
+        try output.appendSlice(allocator, text);
+    }
+    const term = try child.wait();
+    const exit_code: ?u8 = switch (term) {
+        .exited => |code| code,
+        else => null,
+    };
+    return .{ .exit_code = exit_code, .output = try output.toOwnedSlice(allocator) };
+}
+
+fn dirHasEntries(abs_path: []const u8) !bool {
+    var dir = try std_compat.fs.openDirAbsolute(abs_path, .{ .iterate = true });
+    defer dir.close();
+    var it = dir.iterate();
+    return (try it.next()) != null;
+}
+
+/// Help must print usage, exit 0, and leave the working directory untouched.
+fn expectHelpIsSideEffectFree(
+    allocator: std.mem.Allocator,
+    exe: []const u8,
+    args: []const []const u8,
+    label: []const u8,
+) !void {
+    const scratch = try makeHelpScratchDir(allocator, label);
+    defer allocator.free(scratch.abs);
+    defer {
+        std_compat.fs.cwd().deleteTree(scratch.rel) catch {};
+        allocator.free(scratch.rel);
+    }
+
+    const run = try runHelpCase(allocator, exe, args, scratch.abs);
+    defer allocator.free(run.output);
+
+    std.testing.expect(run.exit_code != null) catch |err| {
+        std.debug.print("\n[{s}] process terminated abnormally; output:\n{s}\n", .{ label, run.output });
+        return err;
+    };
+    try std.testing.expectEqual(@as(?u8, 0), run.exit_code);
+
+    if (std.mem.indexOf(u8, run.output, "Usage:") == null) {
+        std.debug.print("\n[{s}] expected usage text, got:\n{s}\n", .{ label, run.output });
+        return error.ExpectedHelpOutput;
+    }
+
+    if (try dirHasEntries(scratch.abs)) {
+        std.debug.print("\n[{s}] help request wrote files into {s}\n", .{ label, scratch.abs });
+        return error.HelpMustNotWriteFiles;
+    }
+}
+
+test "cli help: --help/-h print usage at every position with no side effects" {
+    const allocator = std.testing.allocator;
+    const exe = try helpTestExePath(allocator);
+    defer allocator.free(exe);
+
+    for (help_cases) |case| {
+        try expectHelpIsSideEffectFree(allocator, exe, case.args, case.label);
+    }
+}
+
+test "cli help: --from-json with a payload does not create config when help is requested" {
+    const allocator = std.testing.allocator;
+    const exe = try helpTestExePath(allocator);
+    defer allocator.free(exe);
+
+    const scratch = try makeHelpScratchDir(allocator, "fromjson-payload");
+    defer allocator.free(scratch.abs);
+    defer {
+        std_compat.fs.cwd().deleteTree(scratch.rel) catch {};
+        allocator.free(scratch.rel);
+    }
+
+    const payload = try std.fmt.allocPrint(allocator, "{{\"home\":\"{s}\"}}", .{scratch.abs});
+    defer allocator.free(payload);
+
+    const run = try runHelpCase(allocator, exe, &.{ "--from-json", payload, "--help" }, scratch.abs);
+    defer allocator.free(run.output);
+
+    try std.testing.expectEqual(@as(?u8, 0), run.exit_code);
+    if (std.mem.indexOf(u8, run.output, "Usage:") == null) {
+        std.debug.print("\nexpected usage text, got:\n{s}\n", .{run.output});
+        return error.ExpectedHelpOutput;
+    }
+    if (try dirHasEntries(scratch.abs)) {
+        std.debug.print("\n--from-json --help created files in {s}\n", .{scratch.abs});
+        return error.HelpMustNotWriteFiles;
+    }
 }
