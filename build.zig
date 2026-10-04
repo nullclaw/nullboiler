@@ -62,5 +62,12 @@ pub fn build(b: *std.Build) void {
     exe_unit_tests.root_module.addImport("build_options", build_options_module);
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     const test_step = b.step("test", "Run unit tests");
+    // CLI regression tests spawn the installed binary, so install it first.
+    const exe_basename = if (target.result.os.tag == .windows) "nullboiler.exe" else "nullboiler";
+    run_exe_unit_tests.setEnvironmentVariable("NULLBOILER_TEST_EXE", b.fmt("zig-out/bin/{s}", .{exe_basename}));
+    run_exe_unit_tests.setCwd(b.path("."));
+    // The Run step itself must wait for the install, not just the test step,
+    // or the tests observe a missing binary and skip.
+    run_exe_unit_tests.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_exe_unit_tests.step);
 }
