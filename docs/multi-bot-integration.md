@@ -76,14 +76,21 @@ When a workflow uses `execution: "dispatch"` with `dispatch.protocol = "a2a"`:
   the latter produces `POST /a2a/a2a` and fails with `HTTP 404`.
 - The dispatcher sends A2A v0.3.0 JSON-RPC (`message/send`, `kind` discriminators,
   `messageId`), requires the worker to accept it at `POST {base}/a2a`, and parses
-  the reply from the result's `parts[].text` (falling back to the legacy
-  `artifacts[].parts[].text` shape).
+  the reply from `result.parts[0].text` (falling back to the legacy
+  `result.artifacts[0].parts[0].text`). Only the first part is read — multi-part
+  replies are not combined.
 
 ## Workflow transition conventions
 
-`on_success.transition_to` and `on_failure.transition_to` are applied as the
-pipeline FSM **trigger** name. Define the pipeline transition's `trigger` to
-match the value used in the workflow (naming the trigger after its target state,
-e.g. `trigger: "done"` for `to: "done"`, is the simplest convention). A trigger
-name that does not exist on the task's current stage is rejected by the tracker
-and the task re-enters its retry cycle.
+`on_success.transition_to` is passed to the pipeline FSM as the **trigger**
+name. Define the pipeline transition's `trigger` to match the value used in the
+workflow (naming the trigger after its target state, e.g. `trigger: "done"` for
+`to: "done"`, is the simplest convention). A trigger name that does not exist on
+the task's current stage is rejected by the tracker and the task re-enters its
+retry cycle.
+
+`on_failure.transition_to` follows the same naming convention, but is currently
+an **existing implementation gap**: it is parsed and never consumed. After retry
+handling, `Tracker.driveFailed` calls `failRun` directly, so no failure
+transition fires (#52, closed without merge). Treat failure transitions as the
+intended contract, not current behavior.
