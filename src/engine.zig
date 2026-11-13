@@ -1192,6 +1192,9 @@ pub const Engine = struct {
             selected_worker = try dispatch.selectWorker(alloc, worker_infos, required_tags);
         }
         if (selected_worker == null) {
+            if (!try dispatch.anyWorkerMatchesTags(alloc, worker_infos, required_tags)) {
+                return TaskNodeResult{ .failed = try std.fmt.allocPrint(alloc, "no registered worker matches the tags of node {s}", .{node_name}) };
+            }
             return TaskNodeResult{ .no_worker = {} };
         }
         const worker = selected_worker.?;
@@ -3806,6 +3809,32 @@ test "engine: validateConfig returns true with registered workers" {
     try store.insertWorker("w1", "http://localhost:9000", "", "webhook", null, "[]", 5, "config");
     var engine = Engine.init(&store, allocator, 500);
     try std.testing.expect(engine.validateConfig());
+}
+
+test "engine: task node fails when no worker matches its tags (issue #44)" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    try store.insertWorker("w1", "http://localhost:9000", "", "webhook", null, "[\"coder\"]", 5, "config");
+
+    const node_json =
+        \\{"type":"task","worker_tags":["nonexistent-tag"],"prompt_template":"hello"}
+    ;
+    const wf =
+        \\{"nodes":{"t1":{"type":"task","worker_tags":["nonexistent-tag"],"prompt_template":"hello"}},"edges":[["__start__","t1"],["t1","__end__"]]}
+    ;
+    try store.createRunWithState("r1", null, wf, "{}", "{}");
+
+    var engine = Engine.init(&store, allocator, 500);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const run_row = (try store.getRun(arena.allocator(), "r1")).?;
+    const runtime = RuntimeBindings{ .input_json = null, .task_id = null, .tracker = null };
+    const result = try engine.executeTaskNode(arena.allocator(), run_row, runtime, "t1", node_json, "{}");
+    try std.testing.expect(result == .failed);
 }
 
 test "generateMermaid: simple chain" {

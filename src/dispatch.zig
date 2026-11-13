@@ -62,6 +62,19 @@ pub fn selectWorker(
     return best;
 }
 
+/// Returns true if any registered worker, regardless of status or load,
+/// has at least one tag that intersects required_tags.
+pub fn anyWorkerMatchesTags(
+    allocator: std.mem.Allocator,
+    workers: []const WorkerInfo,
+    required_tags: []const []const u8,
+) !bool {
+    for (workers) |worker| {
+        if (try workerMatchesTags(allocator, worker.tags_json, required_tags)) return true;
+    }
+    return false;
+}
+
 /// Parse worker tags_json and check if any tag intersects with required_tags.
 fn workerMatchesTags(
     allocator: std.mem.Allocator,
